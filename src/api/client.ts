@@ -1,12 +1,10 @@
-// Base URL for the Whisper backend (http://localhost:3000).
-// All API calls go through /api/v1 — this is the single place to update
-// if the backend address changes (e.g. staging, production).
-
-// Point this at the running backend:
-//   • iOS simulator on this Mac → 'http://localhost:3000'
-//   • Android emulator          → 'http://10.0.2.2:3000'
-//   • Physical device on LAN    → 'http://<this-mac-LAN-IP>:3000' (currently 192.168.1.24)
-export const BASE_URL = 'http://192.168.1.23:3000';
+// Base URL driven by EXPO_PUBLIC_API_URL. Set it in your .env file:
+//   iOS simulator  → EXPO_PUBLIC_API_URL=http://localhost:3000
+//   Android emu    → EXPO_PUBLIC_API_URL=http://10.0.2.2:3000
+//   Physical device→ EXPO_PUBLIC_API_URL=http://<your-LAN-IP>:3000
+//   Staging / prod → EXPO_PUBLIC_API_URL=https://api.evarna.app
+// Falls back to localhost:3000 if the variable is unset (simulator dev).
+export const BASE_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:3000';
 export const API_BASE = `${BASE_URL}/api/v1`;
 
 // localtunnel.me shows a browser-friendly warning page on first visit unless this
