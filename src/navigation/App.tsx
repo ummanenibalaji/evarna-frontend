@@ -19,7 +19,7 @@ import {
   S01_Splash, S02_Age, S03_Disclosure, S05_Pronouns, S06_Comm, S_Handoff,
   S04_Archetype, S07_Voice, S08_Name, S_Meet,
 } from '../screens/Onboarding';
-import { S10_Home, S11_AddCompanion } from '../screens/Home';
+import { S10_Home } from '../screens/Home';
 import { S09_FirstChat, S12_VoiceCall, S14_Chat } from '../screens/Chat';
 import {
   S15_StudioHome, S16_ScenarioSetup, S17_StudioSession, S18_CharacterCreator,
@@ -374,10 +374,9 @@ export default function App() {
         accent={ARCHETYPE_COLORS[archetypePick] || W.primary}
       />;
       case 'notif': return <S25_NotifPermission go={go} companion={{ id: 'new', name: companionName, archetype: archetypePick }} />;
-      case 'first-chat': return <S14_Chat go={(s) => go(s)} companion={{ id: 'new', name: companionName, archetype: archetypePick }} accent={t.orbHue} userName={t.userName} firstRun openMemorySheet={() => {}} userId={userId ?? undefined} characterId={characterId ?? undefined} />;
+      case 'first-chat': return <S09_FirstChat go={(s) => go(s)} companion={{ id: characterId ?? 'new', name: companionName, archetype: archetypePick }} userId={userId ?? undefined} characterId={characterId ?? undefined} />;
       case 'home': return renderHome(true);
       case 'callDepleted': return <S27_StartCallDepleted companion={currentCompanion} onClose={() => setScreen('home')} onTopUp={() => setScreen('topup')} onUpgrade={() => setScreen('paywall')} onText={() => setScreen('chat')} />;
-      case 'add-companion': return <S11_AddCompanion go={go} tier={t.tier} onCreate={(c) => { PLUS_COMPANIONS.push({ id: String(Date.now()), ...c, memory: '', lastTalked: 'New' } as Companion); }} />;
       case 'call': return <S12_VoiceCall go={(s) => go(s)} companion={currentCompanion} accent={t.orbHue} orbIntensity={1} minutesRemaining={t.minutesRemaining} userId={activeCharacterId ? userId ?? undefined : undefined} characterId={activeCharacterId ?? undefined} />;
       case 'chat': return <S14_Chat go={(s) => go(s)} companion={currentCompanion} accent={t.orbHue} capHit={t.capHit} userName={t.userName} openMemorySheet={() => {}} userId={activeCharacterId ? userId ?? undefined : undefined} characterId={activeCharacterId ?? undefined} />;
       case 'crisis': return <S28_CrisisChat go={go} companion={currentCompanion} />;
@@ -401,7 +400,7 @@ export default function App() {
       case 'character-creator': return <S18_CharacterCreator go={go} onSave={(c) => setCharacters(cs => [...cs, c])} />;
       case 'sandbox': return <S19_SandboxHome go={go} comingSoon={t.sandboxComingSoon} isMinor={isMinor} openMode={(m) => { setSandboxMode(m); setScreen('sandbox-session'); }} />;
       case 'sandbox-session': return <S20_SandboxSession go={go} mode={sandboxMode || SANDBOX_MODES[0]} />;
-      case 'settings': return <S21_Settings go={go} tier={t.tier} companions={companions} userName={t.userName} userEmail={`${t.userName.toLowerCase()}@whisper.app`} settings={settings} setSettings={setSettings} openCompanionProfile={openCompanionProfile} />;
+      case 'settings': return <S21_Settings go={go} tier={t.tier} companions={companions} userName={t.userName} userEmail={`${t.userName.toLowerCase()}@whisper.app`} settings={settings} setSettings={setSettings} openCompanionProfile={openCompanionProfile} userId={userId ?? undefined} />;
       case 'memories': return <S22_Memories go={go} characterId={activeCharacterId ?? undefined} companionName={currentCompanion.name} />;
       case 'paywall': return <S23_Paywall go={go} trigger={paywallTrigger} currentTier={t.tier} backTo={paywallBack} />;
       case 'topup': return <S24_TopUp go={go} backTo={topupBack} />;
@@ -417,7 +416,7 @@ export default function App() {
   const renderUnderlay = () => {
     const origin = screen === 'paywall' ? paywallBack : screen === 'topup' ? topupBack : 'home';
     if (origin === 'settings') {
-      return <S21_Settings go={() => {}} tier={t.tier} companions={companions} userName={t.userName} userEmail={`${t.userName.toLowerCase()}@whisper.app`} settings={settings} setSettings={setSettings} openCompanionProfile={() => {}} />;
+      return <S21_Settings go={() => {}} tier={t.tier} companions={companions} userName={t.userName} userEmail={`${t.userName.toLowerCase()}@whisper.app`} settings={settings} setSettings={setSettings} openCompanionProfile={() => {}} userId={userId ?? undefined} />;
     }
     return renderHome(false);
   };

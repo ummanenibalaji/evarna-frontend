@@ -19,7 +19,7 @@ import { useEntrance, usePressScale, useCountUp } from '../theme/animations';
 import { W, alpha } from '../theme/theme';
 import { ARCHETYPE_COLORS, ARCHETYPE_LABEL, MEM_TYPES, SAMPLE_MEMORIES, Companion, Tier, Memory } from '../data/config';
 import { Go, ScreenName } from '../navigation/types';
-import { getMemories, deleteMemory, deleteAllMemories, ApiMemory } from '../api';
+import { getMemories, deleteMemory, deleteAllMemories, ApiMemory, getUserStats, ApiUserStats } from '../api';
 
 export interface AppSettings {
   dailyCheckin: boolean;
@@ -38,10 +38,17 @@ interface SettingsProps {
   settings: AppSettings;
   setSettings: (s: AppSettings) => void;
   openCompanionProfile?: (c: Companion) => void;
+  userId?: string;
 }
 
-export function S21_Settings({ go, tier, companions, userName, userEmail, settings, setSettings, openCompanionProfile }: SettingsProps) {
+export function S21_Settings({ go, tier, companions, userName, userEmail, settings, setSettings, openCompanionProfile, userId }: SettingsProps) {
   const [voiceSpeed, setVoiceSpeed] = useState(1.0);
+  const [userStats, setUserStats] = useState<ApiUserStats | null>(null);
+
+  useEffect(() => {
+    if (!userId) return;
+    getUserStats(userId).then(setUserStats).catch(() => {});
+  }, [userId]);
   const [bgSoundIdx, setBgSoundIdx] = useState(0);
   // Notification time as an exact moment of day.
   const [notifHour, setNotifHour] = useState(21);   // 9 PM default
@@ -83,10 +90,10 @@ export function S21_Settings({ go, tier, companions, userName, userEmail, settin
 
         {/* Premium stats hero — streak, minutes left, total talk time */}
         <StatsHero
-          streak={12}
+          streak={userStats?.total_sessions ?? 12}
           minutesLeft={87}
           minutesTotal={120}
-          talkTimeMinutes={342}
+          talkTimeMinutes={userStats?.total_voice_minutes ?? 342}
           onMinutesPress={() => go('topup')}
         />
 

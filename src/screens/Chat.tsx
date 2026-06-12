@@ -32,7 +32,7 @@ type Msg = {
 };
 
 // ─── S09 FIRST CONVERSATION ──────────────────────────────────────────────
-export function S09_FirstChat({ go, companion }: { go: Go; companion: Companion }) {
+export function S09_FirstChat({ go, companion, userId, characterId }: { go: Go; companion: Companion; userId?: string; characterId?: string }) {
   const [msgs, setMsgs] = useState<Msg[]>([
     { from: 'comp', text: `Hey, this is ${companion.name}. Thanks for choosing me. I'd love to get to know you — what's been on your mind today?` },
   ]);
@@ -42,6 +42,84 @@ export function S09_FirstChat({ go, companion }: { go: Go; companion: Companion 
   const [typing, setTyping] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
 
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const sessionRef = useRef<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const pendingRef = useRef<string | null>(null);
+  const backendMode = !!(userId && characterId);
+
+  const finishStreaming = (patch: Partial<Msg>) => {
+    setMsgs(m => {
+      const updated = [...m];
+      const last = updated[updated.length - 1];
+      if (last?.streaming) updated[updated.length - 1] = { ...last, ...patch, streaming: false };
+      return updated;
+    });
+  };
+
+  const runBackendTurn = (sid: string, text: string, userMsgCount: number) => {
+    abortRef.current?.abort();
+    abortRef.current = streamConversation(
+      { session_id: sid, character_id: characterId!, user_id: userId!, message: text },
+      {
+        onChunk: (content) => {
+          setMsgs(m => {
+            const updated = [...m];
+            const last = updated[updated.length - 1];
+            if (last?.streaming) updated[updated.length - 1] = { ...last, text: (last.text ?? '') + content };
+            return updated;
+          });
+        },
+        onDone: () => {
+          finishStreaming({});
+          setShowBadge(true);
+          setTimeout(() => setShowBadge(false), 3000);
+          if (userMsgCount >= 1) setTimeout(() => setShowContinue(true), 600);
+        },
+        onCrisis: (_content) => { finishStreaming({}); go('crisis'); },
+        onError: (err) => {
+          console.warn('[FirstChat] Stream error:', err);
+          finishStreaming({ text: "(Couldn't reach the server — please try again.)" });
+        },
+      },
+    );
+  };
+
+  useEffect(() => {
+    if (sessionId && pendingRef.current) {
+      const text = pendingRef.current;
+      pendingRef.current = null;
+      runBackendTurn(sessionId, text, msgs.filter(m => m.from === 'user').length);
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!userId || !characterId) return;
+    let mounted = true;
+    startSession(userId, characterId, 'text')
+      .then(res => {
+        if (!mounted) return;
+        setSessionId(res.session_id);
+        sessionRef.current = res.session_id;
+      })
+      .catch(e => {
+        console.warn('[FirstChat] Session start failed:', e);
+        if (!mounted) return;
+        if (pendingRef.current) {
+          pendingRef.current = null;
+          finishStreaming({ text: "(Couldn't reach the server — please try again.)" });
+        }
+      });
+    return () => {
+      mounted = false;
+      abortRef.current?.abort();
+      if (sessionRef.current) {
+        endSession(sessionRef.current).catch(() => {});
+        sessionRef.current = null;
+      }
+    };
+  }, [userId, characterId]);
+
   useEffect(() => {
     scrollRef.current?.scrollToEnd({ animated: true });
   }, [msgs, typing]);
@@ -49,19 +127,27 @@ export function S09_FirstChat({ go, companion }: { go: Go; companion: Companion 
   const send = () => {
     if (!draft.trim()) return;
     const userMsg = draft.trim();
-    const prevLen = msgs.length;
+    const userMsgCount = msgs.filter(m => m.from === 'user').length;
     setMsgs(m => [...m, { from: 'user', text: userMsg }]);
     setDraft('');
+
+    if (backendMode) {
+      setMsgs(m => [...m, { from: 'comp', text: '', streaming: true }]);
+      if (sessionRef.current) runBackendTurn(sessionRef.current, userMsg, userMsgCount);
+      else pendingRef.current = userMsg;
+      return;
+    }
+
     setTyping(true);
     setTimeout(() => {
-      const next = prevLen >= 2
+      const next = userMsgCount >= 1
         ? `I really enjoyed this. I'll remember everything we talked about. Come back tomorrow?`
         : `That means a lot. Tell me more — I'm listening.`;
       setTyping(false);
       setMsgs(m => [...m, { from: 'comp', text: next }]);
       setShowBadge(true);
       setTimeout(() => setShowBadge(false), 3000);
-      if (prevLen >= 2) setTimeout(() => setShowContinue(true), 600);
+      if (userMsgCount >= 1) setTimeout(() => setShowContinue(true), 600);
     }, 1200);
   };
 
@@ -82,7 +168,10 @@ export function S09_FirstChat({ go, companion }: { go: Go; companion: Companion 
         style={{ flex: 1 }}
         contentContainerStyle={{ padding: 16, paddingBottom: 8, gap: 8 }}
       >
-        {msgs.map((m, i) => <Bubble key={i} from={m.from} text={m.text || ''} memoryRefs={m.memoryRefs} />)}
+        {msgs.map((m, i) => {
+          if (m.streaming && !m.text) return <TypingDots key={i} />;
+          return <Bubble key={i} from={m.from} text={m.text || ''} memoryRefs={m.memoryRefs} />;
+        })}
         {typing && <TypingDots />}
         <View style={{ alignSelf: 'center', marginTop: 6 }}>
           <MemoryBadge show={showBadge} />
@@ -426,7 +515,7 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
           setShowBadge(true);
           setTimeout(() => setShowBadge(false), 3000);
         },
-        onCrisis: (content) => finishStreaming({ text: content }),
+        onCrisis: (_content) => { finishStreaming({}); go('crisis'); },
         onError: (err) => {
           console.warn('[Chat] Stream error:', err);
           finishStreaming({ text: "(Couldn't reach the server — please try again.)" });
@@ -562,7 +651,10 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
     <Screen>
       <TopBar
         left={
-          <Pressable onPress={() => go('home')}>
+          <Pressable onPress={() => {
+            const hasTalked = !firstRun && backendMode && msgs.some(m => m.from === 'user');
+            go(hasTalked ? 'recap' : 'home');
+          }}>
             <NavIcon name="back" color={W.text2} />
           </Pressable>
         }
