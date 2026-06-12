@@ -19,6 +19,7 @@ export interface OnboardPayload {
 export interface OnboardResponse {
   user_id: string;
   character_id: string;
+  is_minor: boolean;
 }
 
 export const onboardUser = (p: OnboardPayload): Promise<OnboardResponse> =>

@@ -101,6 +101,7 @@ export default function App() {
   // Backend IDs — set after successful onboarding API call
   const [userId, setUserId] = useState<string | null>(null);
   const [characterId, setCharacterId] = useState<string | null>(null);
+  const [isMinor, setIsMinor] = useState(false);
 
   // The companion created during onboarding — replaces static placeholder on home screen
   const [userCompanion, setUserCompanion] = useState<Companion | null>(null);
@@ -131,9 +132,10 @@ export default function App() {
     AsyncStorage.getItem(SESSION_KEY)
       .then(raw => {
         if (!raw) return;
-        const saved = JSON.parse(raw) as { userId: string; characterId: string; companion: Companion };
+        const saved = JSON.parse(raw) as { userId: string; characterId: string; companion: Companion; isMinor?: boolean };
         if (saved.userId) setUserId(saved.userId);
         if (saved.characterId) setCharacterId(saved.characterId);
+        if (saved.isMinor !== undefined) setIsMinor(saved.isMinor);
         if (saved.companion) {
           setUserCompanion(saved.companion);
           setCompanionName(saved.companion.name);
@@ -155,7 +157,7 @@ export default function App() {
       lastTalked: 'Just now',
     };
     setUserCompanion(companion);
-    AsyncStorage.setItem(SESSION_KEY, JSON.stringify({ userId, characterId, companion })).catch(() => {});
+    AsyncStorage.setItem(SESSION_KEY, JSON.stringify({ userId, characterId, companion, isMinor })).catch(() => {});
     // After a fresh onboarding or new-character creation, sync the home list
     // so the new companion appears alongside the existing ones.
     refreshUserCharacters(userId);
@@ -187,7 +189,6 @@ export default function App() {
       : userCompanion
         ? [userCompanion]
         : (t.tier === 'free' ? FREE_COMPANIONS : PLUS_COMPANIONS.slice(0, 1));
-  const isMinor = false;
   const currentCompanion: Companion = activeCompanion || companions[0];
 
   // Real backend characters from /characters/user/:id have UUIDs as ids. The
@@ -311,6 +312,7 @@ export default function App() {
       });
       setUserId(res.user_id);
       setCharacterId(res.character_id);
+      setIsMinor(res.is_minor ?? false);
       const newCompanion: Companion = {
         id: res.character_id,
         name,
