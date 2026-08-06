@@ -14,7 +14,7 @@ import { Pill, PrimaryButton, ProgressDots, Card } from '../components/Atoms';
 import { Orb } from '../components/Orb';
 import { Avatar, Waveform } from '../components/Avatar';
 import { useEntrance, useBreathe, useMeetIn } from '../theme/animations';
-import { W, alpha } from '../theme/theme';
+import { W, alpha, hexWithOpacity } from '../theme/theme';
 import { Go, Archetype } from '../navigation/types';
 import { NAME_SUGGESTIONS, VOICES, ARCHETYPE_COLORS } from '../data/config';
 import type { ApiVoice } from '../api';
@@ -506,32 +506,85 @@ const PRONOUN_GENDER: Record<string, string> = {
 };
 
 // ─── S05 PRONOUNS ────────────────────────────────────────────────────────
-export function S05_Pronouns({ go, onGender }: { go: Go; onGender?: (g: string) => void }) {
+// Collects the user's name AND pronouns. The name is required: it becomes
+// User.display_name and is what the companion actually calls the user in every
+// prompt. Onboarding previously never asked, so the backend received a hardcoded
+// config constant and every user in the database was named "Aria".
+export function S05_Pronouns({
+  go,
+  onGender,
+  onName,
+}: {
+  go: Go;
+  onGender?: (g: string) => void;
+  onName?: (n: string) => void;
+}) {
   const [picked, setPicked] = useState<string | null>(null);
+  const [name, setName] = useState('');
+  const nameRef = useRef<TextInput>(null);
   const opts = ['He / Him', 'She / Her', 'They / Them'];
+  const trimmed = name.trim();
+
+  const pickPronoun = (o: string) => {
+    // Don't advance without a name — otherwise we're back to a placeholder.
+    if (!trimmed) {
+      nameRef.current?.focus();
+      return;
+    }
+    setPicked(o);
+    onName?.(trimmed);
+    onGender?.(PRONOUN_GENDER[o] ?? 'non-binary');
+    setTimeout(() => go('comm'), 300);
+  };
+
   return (
     <Screen>
       <TopBar left={<BackBtn onPress={() => go('disclosure')} />} center={<ProgressDots total={5} current={1} />} />
       <View style={{ flex: 1, paddingHorizontal: 24, paddingTop: 12 }}>
         <Txt font="user" weight={600} style={{ fontSize: 11, color: W.text2, textTransform: 'uppercase', letterSpacing: 0.9, marginBottom: 8 }}>About you</Txt>
-        <Txt font="comp" weight={700} style={{ fontSize: 24, color: W.text, lineHeight: 31 }}>How should your companion refer to you?</Txt>
-        <View style={{ marginTop: 32, flexDirection: 'row', gap: 12 }}>
+        <Txt font="comp" weight={700} style={{ fontSize: 24, color: W.text, lineHeight: 31 }}>What should your companion call you?</Txt>
+
+        <TextInput
+          ref={nameRef}
+          value={name}
+          onChangeText={setName}
+          placeholder="Your first name"
+          placeholderTextColor={W.text2}
+          autoCapitalize="words"
+          autoCorrect={false}
+          maxLength={50}
+          returnKeyType="done"
+          style={{
+            marginTop: 24,
+            width: '100%',
+            height: 52,
+            backgroundColor: 'rgba(37,40,54,0.7)',
+            color: W.text,
+            borderWidth: 1,
+            borderColor: trimmed ? hexWithOpacity(W.primary, 0.35) : 'rgba(255,255,255,0.05)',
+            borderRadius: 12,
+            paddingHorizontal: 16,
+            fontFamily: 'Outfit_400Regular',
+            fontSize: 16,
+          }}
+        />
+
+        <Txt font="comp" weight={600} style={{ marginTop: 28, fontSize: 16, color: W.text }}>And how should they refer to you?</Txt>
+        <View style={{ marginTop: 14, flexDirection: 'row', gap: 12, opacity: trimmed ? 1 : 0.45 }}>
           {opts.map(o => (
             <Pill
               key={o}
               active={picked === o}
-              onPress={() => {
-                setPicked(o);
-                onGender?.(PRONOUN_GENDER[o] ?? 'non-binary');
-                setTimeout(() => go('comm'), 300);
-              }}
+              onPress={() => pickPronoun(o)}
               style={{ flex: 1 }}
             >
               {o}
             </Pill>
           ))}
         </View>
-        <Txt font="user" style={{ marginTop: 16, fontSize: 13, color: W.text2 }}>This helps your companion talk naturally with you.</Txt>
+        <Txt font="user" style={{ marginTop: 16, fontSize: 13, color: W.text2 }}>
+          {trimmed ? 'This helps your companion talk naturally with you.' : 'Enter your name to continue.'}
+        </Txt>
       </View>
     </Screen>
   );

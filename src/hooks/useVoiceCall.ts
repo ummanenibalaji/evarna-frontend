@@ -17,7 +17,7 @@ function getAudioSession(): {
     return { startAudioSession: async () => {}, stopAudioSession: async () => {} };
   }
 }
-import { startVoiceSession } from '../api';
+import { startVoiceSession, endVoiceSession } from '../api';
 import {
   AGENT_JOIN_TIMEOUT_MS,
   decodeAgentState,
@@ -61,6 +61,18 @@ export function useVoiceCall(params: UseVoiceCallParams): UseVoiceCallReturn {
   const onEndedRef = useRef(onEnded);
   onEndedRef.current = onEnded;
 
+  // The backend now closes the session itself when the participant leaves the
+  // LiveKit room, but we also tell it explicitly on hang-up. Belt and braces:
+  // covers the case where the voice worker is down, so nothing server-side is
+  // watching the room. The endpoint is idempotent, so a double call is safe.
+  const sessionIdRef = useRef<string | null>(null);
+
+  const finalizeSession = useCallback(() => {
+    const sid = sessionIdRef.current;
+    sessionIdRef.current = null;
+    if (sid) endVoiceSession(sid).catch(() => { /* fire and forget */ });
+  }, []);
+
   // Skip the live connection unless we have real ids; the screen still mounts
   // (e.g. demo path) so we just sit in "connecting" forever in that case —
   // callers should pass enabled=false when they want the screen demoed.
@@ -80,6 +92,7 @@ export function useVoiceCall(params: UseVoiceCallParams): UseVoiceCallReturn {
     (async () => {
       try {
         const res = await startVoiceSession(userId!, characterId!);
+        sessionIdRef.current = res.session_id;
         if (cancelledRef.current) return;
 
         await getAudioSession().startAudioSession();
@@ -164,8 +177,10 @@ export function useVoiceCall(params: UseVoiceCallParams): UseVoiceCallReturn {
       roomRef.current = null;
       if (r) r.disconnect().catch(() => {});
       getAudioSession().stopAudioSession().catch(() => {});
+      // Covers navigating away / unmount without pressing hang up.
+      finalizeSession();
     };
-  }, [shouldConnect, userId, characterId, attempt]);
+  }, [shouldConnect, userId, characterId, attempt, finalizeSession]);
 
   const toggleMute = useCallback(() => {
     setMuted(prev => {
@@ -183,8 +198,9 @@ export function useVoiceCall(params: UseVoiceCallParams): UseVoiceCallReturn {
       try { await r.disconnect(); } catch { /* swallow */ }
     }
     try { await getAudioSession().stopAudioSession(); } catch { /* swallow */ }
+    finalizeSession();
     setPhase('ended');
-  }, []);
+  }, [finalizeSession]);
 
   const retry = useCallback(() => {
     setError(null);

@@ -97,6 +97,11 @@ export default function App() {
   const [dateOfBirth, setDateOfBirth] = useState('1995-06-15');
   const [userGender, setUserGender] = useState('non-binary');
   const [commStyle, setCommStyle] = useState('warm');
+  // The user's real name, collected on S05 and sent as User.display_name.
+  // Persisted with the session so a restored install doesn't lose it.
+  // Previously this was never collected and CONFIG.userName ("Aria") was sent
+  // for every single user.
+  const [userName, setUserName] = useState('');
 
   // Backend IDs — set after successful onboarding API call
   const [userId, setUserId] = useState<string | null>(null);
@@ -132,10 +137,17 @@ export default function App() {
     AsyncStorage.getItem(SESSION_KEY)
       .then(raw => {
         if (!raw) return;
-        const saved = JSON.parse(raw) as { userId: string; characterId: string; companion: Companion; isMinor?: boolean };
+        const saved = JSON.parse(raw) as {
+          userId: string;
+          characterId: string;
+          companion: Companion;
+          isMinor?: boolean;
+          userName?: string;
+        };
         if (saved.userId) setUserId(saved.userId);
         if (saved.characterId) setCharacterId(saved.characterId);
         if (saved.isMinor !== undefined) setIsMinor(saved.isMinor);
+        if (saved.userName) setUserName(saved.userName);
         if (saved.companion) {
           setUserCompanion(saved.companion);
           setCompanionName(saved.companion.name);
@@ -157,7 +169,10 @@ export default function App() {
       lastTalked: 'Just now',
     };
     setUserCompanion(companion);
-    AsyncStorage.setItem(SESSION_KEY, JSON.stringify({ userId, characterId, companion, isMinor })).catch(() => {});
+    AsyncStorage.setItem(
+      SESSION_KEY,
+      JSON.stringify({ userId, characterId, companion, isMinor, userName }),
+    ).catch(() => {});
     // After a fresh onboarding or new-character creation, sync the home list
     // so the new companion appears alongside the existing ones.
     refreshUserCharacters(userId);
@@ -179,6 +194,14 @@ export default function App() {
   const [settings, setSettings] = useState({
     dailyCheckin: true, weeklyReflection: true, autoPlay: true, liveCaptions: true,
   });
+
+  // What the UI shows for the user's name. `userName` is the real, onboarded
+  // value; the CONFIG constant is only a last resort for the pre-onboarding
+  // prototype screens so nothing renders blank.
+  const displayName = userName.trim() || t.userName;
+  // No email is collected anywhere yet (the login screen is not wired to auth),
+  // so there is deliberately none to show — better than a fabricated address.
+  const displayEmail = '';
 
   // Prefer the live backend list when present; fall back to the locally onboarded
   // companion (so the screen still renders if the API is unreachable), and finally
@@ -296,9 +319,16 @@ export default function App() {
       return;
     }
 
+    // S05 gates advancing on a non-empty name, so this should always hold.
+    // Fail loudly rather than silently onboarding another user called "Aria".
+    if (!userName.trim()) {
+      Alert.alert('Setup error', 'We didn\'t get your name. Please go back and enter it.');
+      return;
+    }
+
     try {
       const res = await onboardUser({
-        display_name: t.userName,
+        display_name: userName.trim(),
         gender: genderNorm,
         date_of_birth: dateOfBirth,
         communication_style: commStyle,
@@ -335,7 +365,7 @@ export default function App() {
       go={interactive ? go : () => {}}
       tier={t.tier}
       companions={companions}
-      userName={t.userName}
+      userName={displayName}
       maxCompanions={MAX_COMPANIONS}
       onSelectCompanion={interactive ? (c) => { setActiveCompanion(c); setScreen('chat'); } : () => {}}
       onCallCompanion={interactive ? (c) => {
@@ -358,7 +388,7 @@ export default function App() {
       case 'splash': return <S01_Splash go={go} goNew={() => { setIsNewUser(true); go('login'); }} />;
       case 'age': return <S02_Age go={go} onDob={setDateOfBirth} />;
       case 'disclosure': return <S03_Disclosure go={go} />;
-      case 'pronouns': return <S05_Pronouns go={go} onGender={setUserGender} />;
+      case 'pronouns': return <S05_Pronouns go={go} onGender={setUserGender} onName={setUserName} />;
       case 'comm': return <S06_Comm go={go} onCommStyle={setCommStyle} />;
       case 'handoff': return <S_Handoff go={go} />;
       case 'archetype': return <S04_Archetype go={go} onPick={setArchetypePick} backTo={addMode === 'add' ? 'home' : 'handoff'} />;
@@ -380,10 +410,10 @@ export default function App() {
       case 'home': return renderHome(true);
       case 'callDepleted': return <S27_StartCallDepleted companion={currentCompanion} onClose={() => setScreen('home')} onTopUp={() => setScreen('topup')} onUpgrade={() => setScreen('paywall')} onText={() => setScreen('chat')} />;
       case 'call': return <S12_VoiceCall go={(s) => go(s)} companion={currentCompanion} accent={t.orbHue} orbIntensity={1} minutesRemaining={t.minutesRemaining} userId={activeCharacterId ? userId ?? undefined : undefined} characterId={activeCharacterId ?? undefined} />;
-      case 'chat': return <S14_Chat go={(s) => go(s)} companion={currentCompanion} accent={t.orbHue} capHit={t.capHit} userName={t.userName} openMemorySheet={() => {}} userId={activeCharacterId ? userId ?? undefined : undefined} characterId={activeCharacterId ?? undefined} />;
+      case 'chat': return <S14_Chat go={(s) => go(s)} companion={currentCompanion} accent={t.orbHue} capHit={t.capHit} userName={displayName} openMemorySheet={() => {}} userId={activeCharacterId ? userId ?? undefined : undefined} characterId={activeCharacterId ?? undefined} />;
       case 'crisis': return <S28_CrisisChat go={go} companion={currentCompanion} />;
       case 'profile': return <S26_CompanionEdit go={(s) => go(s)} companion={currentCompanion} onDelete={() => {}} backTo={profileBack} />;
-      case 'user-profile': return <S_UserProfile go={(s) => go(s)} userName={t.userName} userEmail={`${t.userName.toLowerCase()}@whisper.app`} backTo={profileBack} />;
+      case 'user-profile': return <S_UserProfile go={(s) => go(s)} userName={displayName} userEmail={displayEmail} backTo={profileBack} />;
       case 'recap': return (
         <View style={{ flex: 1 }}>
           {renderHome(false)}
@@ -402,7 +432,7 @@ export default function App() {
       case 'character-creator': return <S18_CharacterCreator go={go} onSave={(c) => setCharacters(cs => [...cs, c])} />;
       case 'sandbox': return <S19_SandboxHome go={go} comingSoon={t.sandboxComingSoon} isMinor={isMinor} openMode={(m) => { setSandboxMode(m); setScreen('sandbox-session'); }} />;
       case 'sandbox-session': return <S20_SandboxSession go={go} mode={sandboxMode || SANDBOX_MODES[0]} />;
-      case 'settings': return <S21_Settings go={go} tier={t.tier} companions={companions} userName={t.userName} userEmail={`${t.userName.toLowerCase()}@whisper.app`} settings={settings} setSettings={setSettings} openCompanionProfile={openCompanionProfile} userId={userId ?? undefined} />;
+      case 'settings': return <S21_Settings go={go} tier={t.tier} companions={companions} userName={displayName} userEmail={displayEmail} settings={settings} setSettings={setSettings} openCompanionProfile={openCompanionProfile} userId={userId ?? undefined} />;
       case 'memories': return <S22_Memories go={go} characterId={activeCharacterId ?? undefined} companionName={currentCompanion.name} />;
       case 'paywall': return <S23_Paywall go={go} trigger={paywallTrigger} currentTier={t.tier} backTo={paywallBack} />;
       case 'topup': return <S24_TopUp go={go} backTo={topupBack} />;
@@ -418,7 +448,7 @@ export default function App() {
   const renderUnderlay = () => {
     const origin = screen === 'paywall' ? paywallBack : screen === 'topup' ? topupBack : 'home';
     if (origin === 'settings') {
-      return <S21_Settings go={() => {}} tier={t.tier} companions={companions} userName={t.userName} userEmail={`${t.userName.toLowerCase()}@whisper.app`} settings={settings} setSettings={setSettings} openCompanionProfile={() => {}} userId={userId ?? undefined} />;
+      return <S21_Settings go={() => {}} tier={t.tier} companions={companions} userName={displayName} userEmail={displayEmail} settings={settings} setSettings={setSettings} openCompanionProfile={() => {}} userId={userId ?? undefined} />;
     }
     return renderHome(false);
   };

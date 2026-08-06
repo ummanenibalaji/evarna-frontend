@@ -80,7 +80,13 @@ export function S21_Settings({ go, tier, companions, userName, userEmail, settin
           </View>
           <View style={{ flex: 1 }}>
             <Txt font="user" weight={500} style={{ fontSize: 15, color: W.text }}>{userName}</Txt>
-            <Txt font="user" style={{ fontSize: 12, color: W.text2 }} numberOfLines={1}>{userEmail}</Txt>
+            {/* Only render an email when there actually is one. This used to
+                display a fabricated `${name}@whisper.app` address. */}
+            {userEmail ? (
+              <Txt font="user" style={{ fontSize: 12, color: W.text2 }} numberOfLines={1}>{userEmail}</Txt>
+            ) : (
+              <Txt font="user" style={{ fontSize: 12, color: W.text2 }}>No email linked</Txt>
+            )}
           </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
             <Txt font="user" style={{ fontSize: 12, color: W.secondary }}>Edit</Txt>
