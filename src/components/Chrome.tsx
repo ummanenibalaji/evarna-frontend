@@ -138,7 +138,7 @@ export function TopBar({ left, center, right, height = 56, bg = 'transparent', b
       {border && (
         <LinearGradient
           pointerEvents="none"
-          colors={['rgba(255,255,255,0)', 'rgba(139,130,255,0.20)', 'rgba(94,234,212,0.16)', 'rgba(139,130,255,0.20)', 'rgba(255,255,255,0)']}
+          colors={['rgba(255,255,255,0)', 'rgba(255,138,118,0.20)', 'rgba(255,201,96,0.16)', 'rgba(255,138,118,0.20)', 'rgba(255,255,255,0)']}
           start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
           style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 1 }}
         />

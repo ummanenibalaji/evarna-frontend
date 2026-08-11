@@ -6,9 +6,10 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Animated, Easing, StyleSheet } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import { RadialGlow } from './RadialGlow';
 import { useBreathe, useSpin } from '../theme/animations';
-import { W, withAlphaByte, alpha } from '../theme/theme';
+import { W, GRAD, withAlphaByte, alpha } from '../theme/theme';
 
 export type OrbState = 'idle' | 'listening' | 'speaking' | 'thinking' | 'memory';
 
@@ -22,13 +23,16 @@ interface OrbProps {
 interface Ember { id: number; dx: number; }
 
 export function Orb({ state = 'idle', size = 180, accent = W.primary, intensity = 1 }: OrbProps) {
-  const tint = state === 'listening' || state === 'memory' ? W.accent : accent;
+  // Listening leans violet (the cool end of the aurora); memory is the one
+  // state that goes gold, matching every other memory affordance.
+  const tint = state === 'memory' ? W.gold : state === 'listening' ? W.violet : accent;
   const isSpeaking = state === 'speaking';
   const isThinking = state === 'thinking';
   const isListening = state === 'listening';
 
   const breatheFast = useBreathe(isSpeaking ? 1300 : 4200);
   const spin = useSpin(2400);
+  const ringSpin = useSpin(7000);
 
   const scaleMul = isSpeaking ? 1.12 : isListening ? 0.92 : isThinking ? 0.85 : 1;
   const containerScale = useRef(new Animated.Value(scaleMul)).current;
@@ -62,6 +66,31 @@ export function Orb({ state = 'idle', size = 180, accent = W.primary, intensity 
         transform: [{ scale: containerScale }],
       }}
     >
+      {/* Aurora ring — a slowly rotating coral→rose→violet band with a dark
+          disc punched out of the middle. RN has no conic gradient, so this is
+          a linear gradient on a spinning square, clipped to a circle. */}
+      <Animated.View
+        pointerEvents="none"
+        style={[
+          { position: 'absolute', width: size, height: size, borderRadius: size / 2, overflow: 'hidden' },
+          ringSpin,
+        ]}
+      >
+        <LinearGradient
+          colors={[...GRAD.aurora, W.coral]}
+          start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+          style={{ flex: 1 }}
+        />
+      </Animated.View>
+      <View
+        pointerEvents="none"
+        style={{
+          position: 'absolute',
+          width: size - 14, height: size - 14, borderRadius: (size - 14) / 2,
+          backgroundColor: '#120C10',
+        }}
+      />
+
       {/* widest halo bloom */}
       <Animated.View style={[StyleSheet.absoluteFill, { alignItems: 'center', justifyContent: 'center' }, breatheFast]}>
         <RadialGlow
@@ -120,10 +149,11 @@ export function Orb({ state = 'idle', size = 180, accent = W.primary, intensity 
             width={size * 0.62} height={size * 0.62} borderRadius={size * 0.31}
             cx={0.38} cy={0.32}
             stops={[
-              { offset: 0, color: '#ffffff', opacity: 1 },
-              { offset: 0.32, color: W.secondary, opacity: 1 },
-              { offset: 0.72, color: tint, opacity: 1 },
-              { offset: 1, color: tint, opacity: 0 },
+              { offset: 0, color: '#FFFFFF', opacity: 1 },
+              { offset: 0.18, color: '#FFD9C4', opacity: 1 },
+              { offset: 0.44, color: '#FF8E93', opacity: 1 },
+              { offset: 0.72, color: W.violet, opacity: 0.75 },
+              { offset: 1, color: W.violet, opacity: 0 },
             ]}
           />
         </View>

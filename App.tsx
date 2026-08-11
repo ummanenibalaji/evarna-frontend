@@ -1,5 +1,6 @@
-// App.tsx (root) — loads the Manrope + Outfit font faces used by the Txt
-// component, then renders the navigation router inside a SafeAreaProvider.
+// App.tsx (root) — loads the Bricolage Grotesque + Manrope + Outfit font faces
+// used by the Txt component, then renders the navigation router inside a
+// SafeAreaProvider.
 
 // MUST be first: installs DOMException + other shims Hermes lacks, before any
 // other module (e.g. livekit-client) loads and references them.
@@ -17,6 +18,9 @@ import {
 import {
   Outfit_400Regular, Outfit_500Medium, Outfit_600SemiBold, Outfit_700Bold,
 } from '@expo-google-fonts/outfit';
+import {
+  BricolageGrotesque_500Medium, BricolageGrotesque_600SemiBold, BricolageGrotesque_700Bold,
+} from '@expo-google-fonts/bricolage-grotesque';
 import Router from './src/navigation/App';
 import { W } from './src/theme/theme';
 
@@ -37,6 +41,7 @@ export default function App() {
   const [fontsLoaded] = useManrope({
     Manrope_400Regular, Manrope_500Medium, Manrope_600SemiBold, Manrope_700Bold,
     Outfit_400Regular, Outfit_500Medium, Outfit_600SemiBold, Outfit_700Bold,
+    BricolageGrotesque_500Medium, BricolageGrotesque_600SemiBold, BricolageGrotesque_700Bold,
   });
 
   const onLayout = useCallback(async () => {

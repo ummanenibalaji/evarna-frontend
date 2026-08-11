@@ -8,7 +8,7 @@ import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Txt } from './Txt';
 import { NavIcon } from './NavIcon';
-import { W, alpha } from '../theme/theme';
+import { W, GRAD, alpha, rgba } from '../theme/theme';
 
 // ─── Pill ───────────────────────────────────────────────────────────────
 interface PillProps {
@@ -36,7 +36,7 @@ export function Pill({ children, active, accent, color, onPress, style, textStyl
         style={{
           height: 46, paddingHorizontal: 20, borderRadius: 23, width: '100%',
           alignItems: 'center', justifyContent: 'center',
-          backgroundColor: active ? ac : 'rgba(19,21,30,0.55)',
+          backgroundColor: active ? ac : 'rgba(30,21,25,0.55)',
           borderWidth: 1,
           borderColor: active ? ac : 'rgba(255,255,255,0.07)',
           overflow: 'hidden',
@@ -52,8 +52,10 @@ export function Pill({ children, active, accent, color, onPress, style, textStyl
         {active ? (
           <LinearGradient
             pointerEvents="none"
-            colors={[alpha(ac, 'FF'), withAlphaFor(ac)]}
-            start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+            // An accent-tinted pill keeps its own color; the default active
+            // pill gets the aurora.
+            colors={accent ? [alpha(ac, 'FF'), alpha(ac, 'FF')] : [...GRAD.aurora]}
+            start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
             style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }}
           />
         ) : null}
@@ -72,8 +74,6 @@ export function Pill({ children, active, accent, color, onPress, style, textStyl
     </Animated.View>
   );
 }
-// Helper: darkens a hex color slightly for gradient bottom-stop
-function withAlphaFor(hex: string): string { return hex; /* keep gradient flat for now */ }
 
 // ─── PrimaryButton ──────────────────────────────────────────────────────
 // Refined: softer gradient, optional trailing chevron, deep tonal shadow,
@@ -95,11 +95,12 @@ export function PrimaryButton({ children, onPress, disabled, style, variant = 'p
   const scale = press.interpolate({ inputRange: [0, 1], outputRange: [1, 0.97] });
 
   // Softer, more refined gradient stops (less neon, more material)
-  const palette: Record<ButtonVariant, { bg: string; gradTop: string; gradBot: string; color: string; border?: string; shadow?: string }> = {
-    primary:   { bg: W.primary, gradTop: '#9890FF', gradBot: '#7268E8', color: '#FFFFFF', shadow: W.primary },
-    secondary: { bg: 'transparent', gradTop: 'transparent', gradBot: 'transparent', color: W.cream, border: 'rgba(255,255,255,0.10)' },
-    text:      { bg: 'transparent', gradTop: 'transparent', gradBot: 'transparent', color: W.text2 },
-    danger:    { bg: W.danger, gradTop: '#FB8888', gradBot: '#DC5757', color: '#FFFFFF', shadow: W.danger },
+  // Primary is the aurora itself — coral → rose → violet on the diagonal.
+  const palette: Record<ButtonVariant, { bg: string; grad: readonly string[]; color: string; border?: string; shadow?: string }> = {
+    primary:   { bg: W.primary, grad: GRAD.aurora, color: '#FFFFFF', shadow: W.rose },
+    secondary: { bg: 'transparent', grad: ['transparent', 'transparent'], color: W.cream, border: 'rgba(255,255,255,0.10)' },
+    text:      { bg: 'transparent', grad: ['transparent', 'transparent'], color: W.text2 },
+    danger:    { bg: W.danger, grad: GRAD.danger, color: '#FFFFFF', shadow: W.danger },
   };
   const s = palette[variant];
   const isFilled = variant === 'primary' || variant === 'danger';
@@ -118,7 +119,7 @@ export function PrimaryButton({ children, onPress, disabled, style, variant = 'p
           flexDirection: 'row',
           alignItems: 'center',
           justifyContent: 'center',
-          backgroundColor: isGlass ? 'rgba(19,21,30,0.55)' : (isFilled ? s.bg : 'transparent'),
+          backgroundColor: isGlass ? 'rgba(30,21,25,0.55)' : (isFilled ? s.bg : 'transparent'),
           borderWidth: s.border ? 1 : 0,
           borderColor: s.border,
           overflow: 'hidden',
@@ -138,8 +139,8 @@ export function PrimaryButton({ children, onPress, disabled, style, variant = 'p
         {isFilled ? (
           <LinearGradient
             pointerEvents="none"
-            colors={[s.gradTop, s.gradBot]}
-            start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+            colors={s.grad as unknown as readonly [string, string, ...string[]]}
+            start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
             style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }}
           />
         ) : null}
@@ -192,7 +193,7 @@ export function Card({ children, onPress, style, padding = 18, border, bg, glass
           borderRadius, padding,
           borderWidth: 1,
           borderColor: border || (glass ? 'rgba(255,255,255,0.06)' : 'transparent'),
-          backgroundColor: glass ? bg || 'rgba(19,21,30,0.55)' : bg || W.surface1,
+          backgroundColor: glass ? bg || 'rgba(30,21,25,0.55)' : bg || W.surface1,
           overflow: 'hidden',
         },
         glass ? { shadowColor: '#000', shadowOpacity: 0.45, shadowRadius: 28, shadowOffset: { width: 0, height: 12 } } : undefined,
@@ -236,7 +237,7 @@ export function GlassPill({ children, style }: { children: React.ReactNode; styl
           borderRadius: 999, borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)',
           paddingVertical: 10, paddingHorizontal: 14,
           flexDirection: 'row', alignItems: 'center', gap: 12, overflow: 'hidden',
-          backgroundColor: 'rgba(26,29,46,0.5)',
+          backgroundColor: 'rgba(32,22,26,0.5)',
           shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 32, shadowOffset: { width: 0, height: 8 },
         },
         style,
@@ -264,8 +265,11 @@ export function Toggle({ value, onChange }: { value: boolean; onChange: (v: bool
     ]).start();
   }, [value]);
   const translateX = vNative.interpolate({ inputRange: [0, 1], outputRange: [0, 18] });
-  const bg          = vColor.interpolate({ inputRange: [0, 1], outputRange: [W.surface2, W.primary] });
-  const glowOpacity = vColor.interpolate({ inputRange: [0, 1], outputRange: [0, 0.55] });
+  // Track fades to rose; the aurora gradient overlay on top supplies the coral
+  // end, so the "on" state reads as the same warm ramp as every other CTA.
+  const bg          = vColor.interpolate({ inputRange: [0, 1], outputRange: [W.surface2, W.rose] });
+  const gradOpacity = vColor;
+  const glowOpacity = vColor.interpolate({ inputRange: [0, 1], outputRange: [0, 0.45] });
   const thumbScale  = press.interpolate({ inputRange: [0, 1], outputRange: [1, 1.12] });
   return (
     <Pressable
@@ -280,11 +284,19 @@ export function Toggle({ value, onChange }: { value: boolean; onChange: (v: bool
           pointerEvents="none"
           style={{
             position: 'absolute', left: -4, top: -4, right: -4, bottom: -4, borderRadius: 18,
-            backgroundColor: W.primary, opacity: glowOpacity,
+            backgroundColor: W.rose, opacity: glowOpacity,
           }}
         />
         {/* track — backgroundColor needs JS driver */}
-        <Animated.View style={{ width: 46, height: 28, borderRadius: 14, backgroundColor: bg, justifyContent: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)' }} />
+        <Animated.View style={{ width: 46, height: 28, borderRadius: 14, backgroundColor: bg, justifyContent: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
+          <Animated.View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, opacity: gradOpacity }}>
+            <LinearGradient
+              colors={[...GRAD.auroraShort]}
+              start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+              style={{ flex: 1 }}
+            />
+          </Animated.View>
+        </Animated.View>
         {/* thumb — transform only, native driver compatible */}
         <Animated.View
           pointerEvents="none"
@@ -321,7 +333,7 @@ export function StatusPill({ children, accent = W.text2, bg = W.surface1 }: { ch
 }
 
 // ─── MemoryBadge ────────────────────────────────────────────────────────
-export function MemoryBadge({ show, text = 'Memory saved' }: { show: boolean; text?: string }) {
+export function MemoryBadge({ show, text = 'Memory saved · tap to view' }: { show: boolean; text?: string }) {
   const v = useRef(new Animated.Value(show ? 1 : 0)).current;
   useEffect(() => {
     Animated.timing(v, { toValue: show ? 1 : 0, duration: 400, easing: Easing.out(Easing.ease), useNativeDriver: true }).start();
@@ -330,12 +342,14 @@ export function MemoryBadge({ show, text = 'Memory saved' }: { show: boolean; te
   return (
     <Animated.View
       style={{
-        backgroundColor: W.accentDim, borderRadius: 14, paddingVertical: 6, paddingHorizontal: 12,
+        backgroundColor: rgba(W.gold, 0.10),
+        borderWidth: 1, borderColor: rgba(W.gold, 0.25),
+        borderRadius: 14, paddingVertical: 6, paddingHorizontal: 12,
         flexDirection: 'row', alignItems: 'center', gap: 6, opacity: v, transform: [{ translateY }],
       }}
     >
-      <NavIcon name="check" color={W.accent} size={16} />
-      <Txt font="user" weight={500} style={{ fontSize: 12, color: W.accent }}>{text}</Txt>
+      <NavIcon name="check" color={W.gold} size={13} />
+      <Txt font="user" weight={500} style={{ fontSize: 11.5, color: W.gold }}>{text}</Txt>
     </Animated.View>
   );
 }
@@ -381,7 +395,7 @@ export function MemoryRef({ children, onPress }: { children: React.ReactNode; on
     <Txt
       font="user" weight={500}
       onPress={onPress}
-      style={{ color: W.accent, textDecorationLine: 'underline', textDecorationStyle: 'dotted', textDecorationColor: 'rgba(94,234,212,0.4)' }}
+      style={{ color: W.accent, textDecorationLine: 'underline', textDecorationStyle: 'dotted', textDecorationColor: 'rgba(255,201,96,0.4)' }}
     >
       {children}
     </Txt>
@@ -417,8 +431,8 @@ export function MinuteWarningBanner({ minutes, onTopUp }: { minutes: number | nu
         borderRadius: 12, paddingVertical: 8, paddingHorizontal: 14,
         flexDirection: 'row', alignItems: 'center', gap: 10, overflow: 'hidden',
         borderWidth: 1,
-        borderColor: urgency === 'high' ? alpha(W.challenger, '26') : 'rgba(124,114,255,0.10)',
-        backgroundColor: 'rgba(26,29,46,0.6)',
+        borderColor: urgency === 'high' ? alpha(W.challenger, '26') : 'rgba(255,138,118,0.10)',
+        backgroundColor: 'rgba(32,22,26,0.6)',
       }}
     >
       <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
@@ -437,6 +451,133 @@ export function MinuteWarningBanner({ minutes, onTopUp }: { minutes: number | nu
           <Txt font="user" weight={500} style={{ fontSize: 12, color: W.accent }}>Top up</Txt>
         </Pressable>
       )}
+    </View>
+  );
+}
+
+// ═══ Ember Dusk atoms ═══════════════════════════════════════════════════
+
+// ─── AuroraLine ─────────────────────────────────────────────────────────
+// The 1–1.5px gradient hairline that sits on the top edge of a "live" card
+// (tonight's check-in, chat header). Fades out at both ends so it reads as
+// light catching an edge rather than a border.
+export function AuroraLine({ height = 1.5, style }: { height?: number; style?: StyleProp<ViewStyle> }) {
+  return (
+    <LinearGradient
+      pointerEvents="none"
+      colors={[...GRAD.auroraLine]}
+      locations={[0, 0.3, 0.55, 0.85, 1]}
+      start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+      style={[{ position: 'absolute', left: 0, right: 0, top: 0, height }, style]}
+    />
+  );
+}
+
+// ─── SectionLabel ───────────────────────────────────────────────────────
+// Settings-style group heading: colored dot, uppercase label, hairline rule
+// running to the right edge.
+export function SectionLabel({ children, dot = W.primary, rule = true }: { children: React.ReactNode; dot?: string; rule?: boolean }) {
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 6, paddingBottom: 9 }}>
+      <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: dot, opacity: 0.8 }} />
+      <Txt font="user" weight={600} style={{ fontSize: 10, color: W.text2, letterSpacing: 1.4, textTransform: 'uppercase' }}>
+        {children}
+      </Txt>
+      {rule && <View style={{ flex: 1, height: 1, backgroundColor: 'rgba(255,255,255,0.05)' }} />}
+    </View>
+  );
+}
+
+// ─── StreakPill ─────────────────────────────────────────────────────────
+// Gold flame + day count, with a specular sweep crossing it every few
+// seconds. The sweep is what makes the streak feel *alive* — it's the one
+// piece of chrome allowed to move on the home header.
+export function StreakPill({ days, onPress }: { days: number; onPress?: () => void }) {
+  const sweep = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const anim = Animated.loop(
+      Animated.sequence([
+        Animated.timing(sweep, { toValue: 1, duration: 1400, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+        Animated.delay(3100),
+      ]),
+    );
+    anim.start();
+    return () => anim.stop();
+  }, []);
+  const translateX = sweep.interpolate({ inputRange: [0, 1], outputRange: [-70, 90] });
+
+  return (
+    <Pressable onPress={onPress} hitSlop={6}>
+      <View style={{
+        flexDirection: 'row', alignItems: 'center', gap: 6,
+        paddingVertical: 7, paddingHorizontal: 12, borderRadius: 18,
+        backgroundColor: rgba(W.gold, 0.10),
+        borderWidth: 1, borderColor: rgba(W.gold, 0.28),
+        overflow: 'hidden',
+      }}>
+        <Animated.View
+          pointerEvents="none"
+          style={{
+            position: 'absolute', top: 0, bottom: 0, width: 26,
+            backgroundColor: 'rgba(255,255,255,0.14)',
+            transform: [{ translateX }, { skewX: '-20deg' }],
+          }}
+        />
+        <NavIcon name="flame-solid" color={W.gold} size={14} />
+        <Txt font="display" weight={700} style={{ fontSize: 13, color: W.gold }}>{days}</Txt>
+      </View>
+    </Pressable>
+  );
+}
+
+// ─── MemoryChip ─────────────────────────────────────────────────────────
+// Gold-on-dark inline chip. Used for "Memory saved · tap to view" in chat
+// and for memory counts elsewhere. Gold is reserved for memory + streaks.
+export function MemoryChip({ children, icon = 'check', onPress }: { children: React.ReactNode; icon?: 'check' | 'sparkle-solid'; onPress?: () => void }) {
+  const body = (
+    <View style={{
+      flexDirection: 'row', alignItems: 'center', gap: 6,
+      paddingVertical: 6, paddingHorizontal: 12, borderRadius: 14,
+      backgroundColor: rgba(W.gold, 0.10),
+      borderWidth: 1, borderColor: rgba(W.gold, 0.25),
+    }}>
+      <NavIcon name={icon} color={W.gold} size={13} />
+      <Txt font="user" weight={500} style={{ fontSize: 11.5, color: W.gold }}>{children}</Txt>
+    </View>
+  );
+  return onPress ? <Pressable onPress={onPress}>{body}</Pressable> : body;
+}
+
+// ─── QuickReply ─────────────────────────────────────────────────────────
+// Coral-outlined suggestion chip above the composer.
+export function QuickReply({ children, onPress }: { children: React.ReactNode; onPress?: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={{
+        paddingVertical: 8, paddingHorizontal: 14, borderRadius: 17,
+        backgroundColor: rgba(W.primary, 0.08),
+        borderWidth: 1, borderColor: rgba(W.primary, 0.28),
+      }}
+    >
+      <Txt font="user" weight={500} style={{ fontSize: 12.5, color: W.primarySoft }} numberOfLines={1}>
+        {children}
+      </Txt>
+    </Pressable>
+  );
+}
+
+// ─── MeterBar ───────────────────────────────────────────────────────────
+// Thin aurora-filled progress track — voice minutes, usage caps.
+export function MeterBar({ pct, height = 6 }: { pct: number; height?: number }) {
+  const clamped = Math.max(0, Math.min(1, pct));
+  return (
+    <View style={{ height, borderRadius: height / 2, backgroundColor: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
+      <LinearGradient
+        colors={[...GRAD.aurora]}
+        start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+        style={{ height: '100%', width: `${clamped * 100}%`, borderRadius: height / 2 }}
+      />
     </View>
   );
 }

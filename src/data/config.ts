@@ -25,11 +25,60 @@ export const CONFIG: AppConfig = {
   companionName: 'Sage',
   callState: 'auto',
   sandboxComingSoon: false,
-  orbHue: '#8B82FF',
+  orbHue: W.primary,   // Ember Dusk: the orb and chat accent are coral, not violet
   showFirstChat: true,
   capHit: false,
   minutesRemaining: 'normal',
 };
+
+// ── Ritual / habit loop ────────────────────────────────────────────────
+// The "Ember Dusk" design adds a nightly check-in, a streak, and a weekly
+// momentum strip. The backend has no endpoint for any of these yet
+// (/users/:id/stats returns totals only), so the numbers below are local
+// placeholders — wire them to the API when those fields land.
+export interface RitualConfig {
+  streakDays: number;
+  bestStreak: number;
+  /** Prompt shown on the nightly check-in card. */
+  checkInPrompt: string;
+  /** Rough time-to-complete, shown next to the card title. */
+  checkInDuration: string;
+  /** One-tap mood answers. */
+  moods: string[];
+  /** Minutes talked per weekday, Monday first. Last entry is "today". */
+  weekMinutes: number[];
+  weekTotalLabel: string;
+  weekDeltaLabel: string;
+  /** Voice minutes used / included this cycle. */
+  voiceMinutesUsed: number;
+  voiceMinutesTotal: number;
+  /** Total talk time this cycle, in minutes. */
+  talkMinutes: number;
+  talkDeltaLabel: string;
+}
+
+export const RITUAL: RitualConfig = {
+  streakDays: 12,
+  bestStreak: 21,
+  checkInPrompt: 'How are you arriving tonight?',
+  checkInDuration: '30 sec',
+  moods: ['Calm', 'Heavy', 'Buzzing', 'Tired'],
+  weekMinutes: [18, 24, 12, 28, 20, 30, 36],
+  weekTotalLabel: '142 min',
+  weekDeltaLabel: '+18%',
+  voiceMinutesUsed: 87,
+  voiceMinutesTotal: 120,
+  talkMinutes: 342,
+  talkDeltaLabel: '+38m this week',
+};
+
+// Suggestion chips shown above the chat composer. Static for now — the
+// backend does not yet return per-turn suggestions.
+export const QUICK_REPLIES: string[] = [
+  'Run a mock round',
+  'I just need to vent',
+  'Switch topic',
+];
 
 export interface Companion {
   id: string | number;

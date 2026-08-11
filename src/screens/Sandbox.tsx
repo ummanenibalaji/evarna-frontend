@@ -16,7 +16,7 @@ import { SANDBOX_MODES, SandboxMode } from '../data/config';
 import { Go } from '../navigation/types';
 
 // Faint diagonal hatch behind the whole sandbox surface.
-function DiagonalGrid({ color = 'rgba(124,114,255,0.05)', spacing = 16, opacity = 0.7 }: { color?: string; spacing?: number; opacity?: number }) {
+function DiagonalGrid({ color = 'rgba(255,138,118,0.05)', spacing = 16, opacity = 0.7 }: { color?: string; spacing?: number; opacity?: number }) {
   return (
     <View pointerEvents="none" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, opacity }}>
       <Svg width="100%" height="100%">
@@ -53,15 +53,15 @@ export function S19_SandboxHome({ go, comingSoon, isMinor, openMode }: { go: Go;
         )}
       </View>
       <TopBar
-        left={<Txt font="comp" weight={700} style={{ fontSize: 22, color: W.text }}>Sandbox</Txt>}
+        left={<Txt font="display" weight={700} style={{ fontSize: 22, color: W.text }}>Sandbox</Txt>}
         right={
-          <View style={{ width: 28, height: 28, borderRadius: 14, borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', backgroundColor: 'rgba(26,29,46,0.5)', alignItems: 'center', justifyContent: 'center' }}>
+          <View style={{ width: 28, height: 28, borderRadius: 14, borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', backgroundColor: 'rgba(32,22,26,0.5)', alignItems: 'center', justifyContent: 'center' }}>
             <Txt font="user" style={{ fontSize: 12, color: W.text2 }}>i</Txt>
           </View>
         }
       />
       {/* disclaimer */}
-      <View style={{ marginHorizontal: 16, marginBottom: 16, borderRadius: 10, padding: 10, paddingHorizontal: 14, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(196,181,253,0.10)', borderLeftWidth: 2, borderLeftColor: W.secondary, backgroundColor: 'rgba(26,29,46,0.55)' }}>
+      <View style={{ marginHorizontal: 16, marginBottom: 16, borderRadius: 10, padding: 10, paddingHorizontal: 14, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(196,181,253,0.10)', borderLeftWidth: 2, borderLeftColor: W.secondary, backgroundColor: 'rgba(32,22,26,0.55)' }}>
         <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
         <Txt font="user" style={{ fontSize: 12, color: W.text2, lineHeight: 17 }}>
           Sessions here are private. No long-term memory saved unless you choose to.
@@ -81,8 +81,8 @@ export function S19_SandboxHome({ go, comingSoon, isMinor, openMode }: { go: Go;
                 style={{
                   borderRadius: 16, padding: 16, gap: 8, overflow: 'hidden',
                   opacity: comingSoon ? 0.55 : 1,
-                  borderWidth: 1, borderColor: active ? alpha(m.accent, '40') : 'rgba(124,114,255,0.10)',
-                  backgroundColor: m.id === 'intimate' ? 'rgba(15,17,26,0.7)' : 'rgba(26,29,46,0.55)',
+                  borderWidth: 1, borderColor: active ? alpha(m.accent, '40') : 'rgba(255,138,118,0.10)',
+                  backgroundColor: m.id === 'intimate' ? 'rgba(24,16,20,0.7)' : 'rgba(32,22,26,0.55)',
                 }}
               >
                 <BlurView intensity={m.id === 'intimate' ? 32 : 24} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
@@ -112,8 +112,8 @@ export function S19_SandboxHome({ go, comingSoon, isMinor, openMode }: { go: Go;
         </ScrollView>
         {comingSoon && (
           <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', gap: 12, padding: 24, overflow: 'hidden' }}>
-            <BlurView intensity={16} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(15,17,26,0.55)' }} />
-            <View style={{ width: 56, height: 56, borderRadius: 28, backgroundColor: 'rgba(124,114,255,0.12)', borderWidth: 1, borderColor: 'rgba(124,114,255,0.20)', alignItems: 'center', justifyContent: 'center', shadowColor: W.primary, shadowOpacity: 0.4, shadowRadius: 32, shadowOffset: { width: 0, height: 0 } }}>
+            <BlurView intensity={16} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(24,16,20,0.55)' }} />
+            <View style={{ width: 56, height: 56, borderRadius: 28, backgroundColor: 'rgba(255,138,118,0.12)', borderWidth: 1, borderColor: 'rgba(255,138,118,0.20)', alignItems: 'center', justifyContent: 'center', shadowColor: W.primary, shadowOpacity: 0.4, shadowRadius: 32, shadowOffset: { width: 0, height: 0 } }}>
               <NavIcon name="bell" color={W.primary} />
             </View>
             <Txt font="comp" weight={600} style={{ fontSize: 18, color: W.text, textAlign: 'center' }}>Sandbox is coming soon.</Txt>
@@ -178,7 +178,7 @@ export function S20_SandboxSession({ go, mode, onEnd }: { go: Go; mode: SandboxM
             ? <NavIcon name="eye-off" color={W.text2} />
             : <Pressable onPress={() => setShowEnd(true)}><Txt font="user" weight={500} style={{ fontSize: 13, color: W.danger }}>End</Txt></Pressable>
         }
-        bg="rgba(15,17,26,0.55)"
+        bg="rgba(24,16,20,0.55)"
         border
       />
       <ScrollView ref={scrollRef} style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 8, gap: 8 }}>

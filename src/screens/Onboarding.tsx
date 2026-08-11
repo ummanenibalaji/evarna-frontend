@@ -122,7 +122,7 @@ export function S01_Splash({ go, goNew }: { go: Go; goNew?: () => void }) {
               style={{
                 position: 'absolute',
                 width: 240, height: 240, borderRadius: 120,
-                borderWidth: 1, borderColor: 'rgba(94,234,212,0.18)',
+                borderWidth: 1, borderColor: 'rgba(255,201,96,0.18)',
               }}
             />
 
@@ -144,7 +144,7 @@ export function S01_Splash({ go, goNew }: { go: Go; goNew?: () => void }) {
                 <View style={{
                   width: 220, height: 220, borderRadius: 110,
                   alignItems: 'center', justifyContent: 'center',
-                  backgroundColor: 'rgba(19,21,30,0.55)',
+                  backgroundColor: 'rgba(30,21,25,0.55)',
                   borderWidth: 1, borderColor: 'rgba(255,255,255,0.10)',
                   overflow: 'hidden',
                   shadowColor: '#000', shadowOpacity: 0.5, shadowRadius: 30, shadowOffset: { width: 0, height: 16 },
@@ -261,7 +261,7 @@ function DateWheel({ options, value, onChange, width }: {
       {/* Background frosted glass */}
       <View pointerEvents="none" style={{
         position: 'absolute', left: 0, top: 0, right: 0, bottom: 0,
-        backgroundColor: 'rgba(19,21,30,0.55)',
+        backgroundColor: 'rgba(30,21,25,0.55)',
         borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)',
         borderRadius: 18,
       }} />
@@ -272,10 +272,10 @@ function DateWheel({ options, value, onChange, width }: {
         style={{
           position: 'absolute', left: 6, right: 6,
           top: PADDING, height: ROW,
-          backgroundColor: 'rgba(139,130,255,0.12)',
+          backgroundColor: 'rgba(255,138,118,0.12)',
           borderRadius: 12,
           borderTopWidth: 1, borderBottomWidth: 1,
-          borderColor: 'rgba(139,130,255,0.22)',
+          borderColor: 'rgba(255,138,118,0.22)',
         }}
       />
 
@@ -318,12 +318,12 @@ function DateWheel({ options, value, onChange, width }: {
       {/* Subtle top fade — pointerEvents none so scroll still works */}
       <LinearGradient
         pointerEvents="none"
-        colors={['rgba(8,9,13,0.95)', 'rgba(8,9,13,0)']}
+        colors={['rgba(14,10,13,0.95)', 'rgba(14,10,13,0)']}
         style={{ position: 'absolute', top: 0, left: 0, right: 0, height: PADDING - 4 }}
       />
       <LinearGradient
         pointerEvents="none"
-        colors={['rgba(8,9,13,0)', 'rgba(8,9,13,0.95)']}
+        colors={['rgba(14,10,13,0)', 'rgba(14,10,13,0.95)']}
         style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: PADDING - 4 }}
       />
     </View>
@@ -380,7 +380,7 @@ export function S02_Age({ go, onDob }: { go: Go; onDob?: (dob: string) => void }
           </View>
 
           {/* Selected date readout */}
-          <View style={{ marginTop: 24, paddingVertical: 10, paddingHorizontal: 18, borderRadius: 999, borderWidth: 1, borderColor: 'rgba(94,234,212,0.18)', backgroundColor: 'rgba(94,234,212,0.05)' }}>
+          <View style={{ marginTop: 24, paddingVertical: 10, paddingHorizontal: 18, borderRadius: 999, borderWidth: 1, borderColor: 'rgba(255,201,96,0.18)', backgroundColor: 'rgba(255,201,96,0.05)' }}>
             <Txt font="user" weight={500} style={{ fontSize: 12, color: W.accent, letterSpacing: 0.3 }}>
               {months[month]} {String(day).padStart(2, '0')}, {year}
             </Txt>
@@ -410,8 +410,8 @@ export function S03_Disclosure({ go }: { go: Go }) {
           <View style={{
             width: 76, height: 76, borderRadius: 22,
             overflow: 'hidden',
-            backgroundColor: 'rgba(139,130,255,0.12)',
-            borderWidth: 1, borderColor: 'rgba(139,130,255,0.28)',
+            backgroundColor: 'rgba(255,138,118,0.12)',
+            borderWidth: 1, borderColor: 'rgba(255,138,118,0.28)',
             alignItems: 'center', justifyContent: 'center',
             shadowColor: W.primary, shadowOpacity: 0.4, shadowRadius: 24, shadowOffset: { width: 0, height: 8 },
           }}>
@@ -431,14 +431,14 @@ export function S03_Disclosure({ go }: { go: Go }) {
           <View style={{
             borderRadius: 18,
             borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)',
-            backgroundColor: 'rgba(19,21,30,0.55)',
+            backgroundColor: 'rgba(30,21,25,0.55)',
             overflow: 'hidden',
             padding: 18,
             flexDirection: 'row', gap: 14, alignItems: 'flex-start',
           }}>
             <BlurView pointerEvents="none" intensity={36} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
             <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, top: 0, height: 1, backgroundColor: 'rgba(255,255,255,0.08)' }} />
-            <View style={{ width: 28, height: 28, borderRadius: 8, backgroundColor: 'rgba(139,130,255,0.15)', alignItems: 'center', justifyContent: 'center', marginTop: 1 }}>
+            <View style={{ width: 28, height: 28, borderRadius: 8, backgroundColor: 'rgba(255,138,118,0.15)', alignItems: 'center', justifyContent: 'center', marginTop: 1 }}>
               <NavIcon name="sparkle" color={W.primary} size={14} />
             </View>
             <View style={{ flex: 1, minWidth: 0 }}>
@@ -452,14 +452,14 @@ export function S03_Disclosure({ go }: { go: Go }) {
           <View style={{
             borderRadius: 18,
             borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)',
-            backgroundColor: 'rgba(19,21,30,0.55)',
+            backgroundColor: 'rgba(30,21,25,0.55)',
             overflow: 'hidden',
             padding: 18,
             flexDirection: 'row', gap: 14, alignItems: 'flex-start',
           }}>
             <BlurView pointerEvents="none" intensity={36} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
             <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, top: 0, height: 1, backgroundColor: 'rgba(255,255,255,0.08)' }} />
-            <View style={{ width: 28, height: 28, borderRadius: 8, backgroundColor: 'rgba(94,234,212,0.15)', alignItems: 'center', justifyContent: 'center', marginTop: 1 }}>
+            <View style={{ width: 28, height: 28, borderRadius: 8, backgroundColor: 'rgba(255,201,96,0.15)', alignItems: 'center', justifyContent: 'center', marginTop: 1 }}>
               <NavIcon name="heart" color={W.accent} size={14} />
             </View>
             <View style={{ flex: 1, minWidth: 0 }}>
@@ -472,15 +472,15 @@ export function S03_Disclosure({ go }: { go: Go }) {
 
           <View style={{
             borderRadius: 18,
-            borderWidth: 1, borderColor: 'rgba(94,234,212,0.18)',
-            backgroundColor: 'rgba(94,234,212,0.06)',
+            borderWidth: 1, borderColor: 'rgba(255,201,96,0.18)',
+            backgroundColor: 'rgba(255,201,96,0.06)',
             overflow: 'hidden',
             padding: 18,
             flexDirection: 'row', gap: 14, alignItems: 'flex-start',
           }}>
             <BlurView pointerEvents="none" intensity={36} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
             <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, top: 0, height: 1, backgroundColor: 'rgba(255,255,255,0.08)' }} />
-            <View style={{ width: 28, height: 28, borderRadius: 8, backgroundColor: 'rgba(94,234,212,0.2)', alignItems: 'center', justifyContent: 'center', marginTop: 1 }}>
+            <View style={{ width: 28, height: 28, borderRadius: 8, backgroundColor: 'rgba(255,201,96,0.2)', alignItems: 'center', justifyContent: 'center', marginTop: 1 }}>
               <NavIcon name="phone" color={W.accent} size={14} />
             </View>
             <View style={{ flex: 1, minWidth: 0 }}>
@@ -542,7 +542,7 @@ export function S05_Pronouns({
       <TopBar left={<BackBtn onPress={() => go('disclosure')} />} center={<ProgressDots total={5} current={1} />} />
       <View style={{ flex: 1, paddingHorizontal: 24, paddingTop: 12 }}>
         <Txt font="user" weight={600} style={{ fontSize: 11, color: W.text2, textTransform: 'uppercase', letterSpacing: 0.9, marginBottom: 8 }}>About you</Txt>
-        <Txt font="comp" weight={700} style={{ fontSize: 24, color: W.text, lineHeight: 31 }}>What should your companion call you?</Txt>
+        <Txt font="display" weight={700} style={{ fontSize: 24, color: W.text, lineHeight: 31 }}>What should your companion call you?</Txt>
 
         <TextInput
           ref={nameRef}
@@ -558,7 +558,7 @@ export function S05_Pronouns({
             marginTop: 24,
             width: '100%',
             height: 52,
-            backgroundColor: 'rgba(37,40,54,0.7)',
+            backgroundColor: 'rgba(48,32,40,0.7)',
             color: W.text,
             borderWidth: 1,
             borderColor: trimmed ? hexWithOpacity(W.primary, 0.35) : 'rgba(255,255,255,0.05)',
@@ -606,7 +606,7 @@ export function S06_Comm({ go, onCommStyle }: { go: Go; onCommStyle?: (s: string
       <TopBar left={<BackBtn onPress={() => go('pronouns')} />} center={<ProgressDots total={5} current={2} />} />
       <View style={{ flex: 1, paddingHorizontal: 24, paddingTop: 12 }}>
         <Txt font="user" weight={600} style={{ fontSize: 11, color: W.text2, textTransform: 'uppercase', letterSpacing: 0.9, marginBottom: 8 }}>About you</Txt>
-        <Txt font="comp" weight={700} style={{ fontSize: 24, color: W.text, lineHeight: 31 }}>How do you like conversations?</Txt>
+        <Txt font="display" weight={700} style={{ fontSize: 24, color: W.text, lineHeight: 31 }}>How do you like conversations?</Txt>
         <View style={{ marginTop: 32, flexDirection: 'row', flexWrap: 'wrap', gap: 12 }}>
           {opts.map(o => (
             <Pill
@@ -678,7 +678,7 @@ export function S_Handoff({ go }: { go: Go }) {
                 flexDirection: 'row', alignItems: 'center', gap: 16,
                 borderRadius: 18, padding: 16,
                 borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)',
-                backgroundColor: 'rgba(19,21,30,0.55)',
+                backgroundColor: 'rgba(30,21,25,0.55)',
                 overflow: 'hidden',
               }}>
                 <BlurView pointerEvents="none" intensity={36} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
@@ -756,7 +756,7 @@ export function S04_Archetype({ go, onPick, backTo = 'handoff' }: { go: Go; onPi
                   borderRadius: 20,
                   borderWidth: 1,
                   borderColor: isSel ? alpha(accent, '66') : 'rgba(255,255,255,0.06)',
-                  backgroundColor: isSel ? alpha(accent, '14') : 'rgba(19,21,30,0.55)',
+                  backgroundColor: isSel ? alpha(accent, '14') : 'rgba(30,21,25,0.55)',
                   overflow: 'hidden',
                   flexDirection: 'row', alignItems: 'center',
                   paddingVertical: 16, paddingHorizontal: 18, gap: 16,
@@ -851,7 +851,7 @@ export function S07_Voice({
       <TopBar left={<BackBtn onPress={() => go('archetype')} />} center={<ProgressDots total={5} current={4} />} />
       <View style={{ flex: 1, paddingHorizontal: PADDING, paddingTop: 12 }}>
         <Txt font="user" weight={600} style={{ fontSize: 11, color: W.primary, textTransform: 'uppercase', letterSpacing: 0.9, marginBottom: 8 }}>Your companion · 2 of 3</Txt>
-        <Txt font="comp" weight={700} style={{ fontSize: 24, color: W.text, lineHeight: 30 }}>How should they sound?</Txt>
+        <Txt font="display" weight={700} style={{ fontSize: 24, color: W.text, lineHeight: 30 }}>How should they sound?</Txt>
         <Txt font="user" style={{ marginTop: 6, fontSize: 13, color: W.text2 }}>Tap any voice to hear a preview.</Txt>
 
         {/* Gender tabs */}
@@ -876,9 +876,9 @@ export function S07_Voice({
                     style={{
                       width: cardW, height: 110, borderRadius: 16, padding: 12,
                       alignItems: 'center', justifyContent: 'center', gap: 6,
-                      backgroundColor: isSel ? 'rgba(94,234,212,0.10)' : 'rgba(26,29,46,0.6)',
+                      backgroundColor: isSel ? 'rgba(255,201,96,0.10)' : 'rgba(32,22,26,0.6)',
                       borderWidth: isSel ? 2 : 1,
-                      borderColor: isSel ? W.accent : 'rgba(124,114,255,0.10)',
+                      borderColor: isSel ? W.accent : 'rgba(255,138,118,0.10)',
                       shadowColor: isSel ? W.accent : 'transparent',
                       shadowOpacity: isSel ? 0.45 : 0,
                       shadowRadius: isSel ? 14 : 0,
@@ -921,15 +921,15 @@ export function S08_Name({ go, archetype, onPickName }: { go: Go; archetype: Arc
       <TopBar left={<BackBtn onPress={() => go('voice')} />} center={<ProgressDots total={5} current={5} />} />
       <View style={{ flex: 1, paddingHorizontal: 24, paddingTop: 12 }}>
         <Txt font="user" weight={600} style={{ fontSize: 11, color: W.primary, textTransform: 'uppercase', letterSpacing: 0.9, marginBottom: 8 }}>Your companion · 3 of 3</Txt>
-        <Txt font="comp" weight={700} style={{ fontSize: 24, color: W.text, lineHeight: 30 }}>Give them a name.</Txt>
+        <Txt font="display" weight={700} style={{ fontSize: 24, color: W.text, lineHeight: 30 }}>Give them a name.</Txt>
         <Txt font="user" style={{ marginTop: 6, fontSize: 13, color: W.text2 }}>Pick from below or write your own.</Txt>
         <View style={{ marginTop: 28, alignItems: 'center' }}>
           <TextInput
             value={name}
             onChangeText={setName}
             style={{
-              backgroundColor: 'rgba(26,29,46,0.6)', color: W.text,
-              borderWidth: 1, borderColor: 'rgba(124,114,255,0.25)',
+              backgroundColor: 'rgba(32,22,26,0.6)', color: W.text,
+              borderWidth: 1, borderColor: 'rgba(255,138,118,0.25)',
               height: 64, borderRadius: 16, fontFamily: 'Manrope_600SemiBold', fontSize: 24,
               textAlign: 'center', width: '100%', maxWidth: 280,
             }}
@@ -997,7 +997,7 @@ export function S_Meet({ go, companion, accent = W.primary }: { go: Go; companio
           {showCompanion && (
             <Animated.View style={[{ marginTop: -20, flexDirection: 'row', alignItems: 'center', gap: 10 }, nameEntrance]}>
               <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: accent, shadowColor: accent, shadowOpacity: 1, shadowRadius: 10, shadowOffset: { width: 0, height: 0 } }} />
-              <Txt font="comp" weight={600} style={{ fontSize: 28, color: W.text, letterSpacing: -0.3 }}>{companion.name}</Txt>
+              <Txt font="display" weight={600} style={{ fontSize: 28, color: W.text, letterSpacing: -0.3 }}>{companion.name}</Txt>
             </Animated.View>
           )}
           {showCompanion && (

@@ -10,7 +10,9 @@ export type IconName =
   | 'chat' | 'grid' | 'mask' | 'gear' | 'phone' | 'mic' | 'send' | 'back' | 'close'
   | 'down' | 'bell' | 'plus' | 'check' | 'sparkle' | 'shield' | 'eye-off' | 'fire'
   | 'lock' | 'heart' | 'compass' | 'target' | 'briefcase' | 'book' | 'globe' | 'trash'
-  | 'search' | 'kebab' | 'right' | 'mute' | 'two' | 'flash' | 'speaker' | 'play' | 'pause';
+  | 'search' | 'kebab' | 'right' | 'mute' | 'two' | 'flash' | 'speaker' | 'play' | 'pause'
+  // Ember Dusk additions — solid marks for streak / memory, plus a clock.
+  | 'flame' | 'flame-solid' | 'sparkle-solid' | 'clock';
 
 interface NavIconProps {
   name: IconName;
@@ -101,6 +103,25 @@ export function NavIcon({ name, color = W.text, size = 22 }: NavIconProps) {
       return <Svg {...common}><Path d="M6 4l14 8L6 20V4z" fill={color} /></Svg>;
     case 'pause':
       return <Svg {...common}><Rect x={6} y={4} width={4} height={16} rx={1} fill={color} /><Rect x={14} y={4} width={4} height={16} rx={1} fill={color} /></Svg>;
+
+    // ── Ember Dusk ──────────────────────────────────────────────────────
+    // The streak flame. Gold body, coral outline — the one place gold and
+    // coral touch. `flame` is the outline-only version for muted contexts.
+    case 'flame':
+      return <Svg {...common}><Path {...stroke} d="M12 2s5 4 5 9a5 5 0 0 1-10 0c0-2 1-3 2-4-1 2 1 3 2 3 0-3-2-4-2-6 0-1 1-2 3-2z" /></Svg>;
+    case 'flame-solid':
+      return (
+        <Svg {...common}>
+          <Path
+            d="M12 2s5 4 5 9a5 5 0 0 1-10 0c0-2 1-3 2-4-1 2 1 3 2 3 0-3-2-4-2-6 0-1 1-2 3-2z"
+            fill={color} stroke={W.coral} strokeWidth={1.2} strokeLinejoin="round"
+          />
+        </Svg>
+      );
+    case 'sparkle-solid':
+      return <Svg {...common}><Path d="M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2z" fill={color} /></Svg>;
+    case 'clock':
+      return <Svg {...common}><Circle {...stroke} cx={12} cy={12} r={9} /><Path {...stroke} d="M12 7v5l3 3" /></Svg>;
     default:
       return null;
   }

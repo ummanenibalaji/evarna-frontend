@@ -1,12 +1,13 @@
-// AmbientBg.tsx — extremely subtle ambient atmosphere. Two slow-drifting
-// orbs at very low opacity over a deep obsidian backdrop. The point is to add
-// *depth*, not decoration — the eye should barely register the movement.
+// AmbientBg.tsx — the "Ember Dusk" atmosphere. Three slow-drifting aurora
+// blobs (coral, violet, gold) at low opacity over a warm obsidian gradient.
+// The point is to add *depth*, not decoration — the eye should barely
+// register the movement.
 
 import React, { useEffect, useRef } from 'react';
 import { View, Animated, Easing, StyleSheet, Dimensions } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { RadialGlow } from './RadialGlow';
-import { W } from '../theme/theme';
+import { W, GRAD } from '../theme/theme';
 
 interface AmbientBgProps {
   intensity?: number;
@@ -63,35 +64,47 @@ export function AmbientBg({ intensity = 1, includePulse = false }: AmbientBgProp
 
   return (
     <View pointerEvents="none" style={[StyleSheet.absoluteFill, { overflow: 'hidden' }]}>
-      {/* Base graduated darkness — very subtle vertical gradient adds depth */}
+      {/* Base graduated warmth — obsidian, warmed through the middle */}
       <LinearGradient
-        colors={[W.bg, W.bgSoft, W.bg]}
+        colors={[...GRAD.page]}
+        locations={[0, 0.55, 1]}
         start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
         style={StyleSheet.absoluteFill}
       />
 
-      {/* Purple atmosphere — much fainter than before */}
-      <Animated.View style={[{ position: 'absolute', left: -width * 0.25, bottom: -height * 0.2 }, drift1]}>
+      {/* Coral aurora — top-left, the warmest note */}
+      <Animated.View style={[{ position: 'absolute', left: -width * 0.35, top: -height * 0.14 }, drift1]}>
         <RadialGlow
-          width={520} height={520}
+          width={480} height={480}
           stops={[
-            { offset: 0, color: W.primary, opacity: 0.10 * intensity },
-            { offset: 0.55, color: W.primary, opacity: 0.02 * intensity },
-            { offset: 1, color: W.primary, opacity: 0 },
+            { offset: 0, color: W.primary, opacity: 0.16 * intensity },
+            { offset: 0.55, color: W.primary, opacity: 0.03 * intensity },
+            { offset: 0.7, color: W.primary, opacity: 0 },
           ]}
         />
       </Animated.View>
 
-      {/* Teal atmosphere */}
-      <Animated.View style={[{ position: 'absolute', right: -width * 0.2, top: -height * 0.15 }, drift2]}>
+      {/* Violet aurora — right, drifting against the coral */}
+      <Animated.View style={[{ position: 'absolute', right: -width * 0.42, top: height * 0.22 }, drift2]}>
         <RadialGlow
-          width={420} height={420}
+          width={460} height={460}
           stops={[
-            { offset: 0, color: W.accent, opacity: 0.05 * intensity },
-            { offset: 0.6, color: W.accent, opacity: 0 },
+            { offset: 0, color: W.violet, opacity: 0.12 * intensity },
+            { offset: 0.62, color: W.violet, opacity: 0 },
           ]}
         />
       </Animated.View>
+
+      {/* Gold ember — bottom-left, static and very faint */}
+      <View style={{ position: 'absolute', left: -width * 0.3, bottom: -height * 0.18 }}>
+        <RadialGlow
+          width={420} height={420}
+          stops={[
+            { offset: 0, color: W.gold, opacity: 0.09 * intensity },
+            { offset: 0.6, color: W.gold, opacity: 0 },
+          ]}
+        />
+      </View>
 
       {includePulse && (
         <Animated.View
@@ -113,8 +126,8 @@ export function AmbientBg({ intensity = 1, includePulse = false }: AmbientBgProp
       {/* Vignette — gently darkens the edges for that "premium HDR" feel */}
       <LinearGradient
         pointerEvents="none"
-        colors={['rgba(0,0,0,0)', 'rgba(0,0,0,0.35)']}
-        start={{ x: 0.5, y: 0.4 }} end={{ x: 0.5, y: 1 }}
+        colors={['rgba(6,3,5,0)', 'rgba(6,3,5,0.50)']}
+        start={{ x: 0.5, y: 0.45 }} end={{ x: 0.5, y: 1 }}
         style={StyleSheet.absoluteFill}
       />
     </View>

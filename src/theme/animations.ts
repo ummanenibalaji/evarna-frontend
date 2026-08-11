@@ -52,6 +52,15 @@ export function useWave(delayMs = 0) {
   return { transform: [{ scaleY }] };
 }
 
+/** pulse: the "something is live here" dot — opacity 0.45<->1 with a scale
+ *  swell. Used for pending companions and the speaking indicator. */
+export function usePulse(durationMs = 1800) {
+  const v = useLoop(durationMs, { yoyo: true });
+  const opacity = v.interpolate({ inputRange: [0, 1], outputRange: [0.45, 1] });
+  const scale = v.interpolate({ inputRange: [0, 1], outputRange: [0.85, 1.15] });
+  return { opacity, transform: [{ scale }] };
+}
+
 /** ringBreathe: opacity 0.3<->0.7. */
 export function useRingBreathe() {
   const v = useLoop(3000, { yoyo: true });
