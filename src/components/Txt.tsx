@@ -9,7 +9,8 @@ import { Text, TextProps, StyleSheet, TextStyle, StyleProp } from 'react-native'
 import { FontFamily, FontWeightKey, resolveFont, W } from '../theme/theme';
 
 interface TxtProps extends TextProps {
-  /** 'comp' = Manrope (display/companion), 'user' = Outfit (body/labels). Default 'user'. */
+  /** 'display' = Bricolage Grotesque (headlines/numerals), 'comp' = Manrope
+   *  (companion voice), 'user' = Outfit (UI body/labels). Default 'user'. */
   font?: FontFamily;
   weight?: FontWeightKey;
   children?: React.ReactNode;

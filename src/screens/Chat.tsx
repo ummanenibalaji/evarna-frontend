@@ -5,19 +5,22 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { View, ScrollView, Pressable, Animated, Easing, Linking } from 'react-native';
-import { startSession, endSession, getCharacterSessions, getConversationTurns } from '../api';
+import { LinearGradient } from 'expo-linear-gradient';
+import { startSession, endSession, getCharacterSessions, getConversationTurns, getMemories } from '../api';
 import { streamConversation } from '../api/client';
 import { useVoiceCall } from '../hooks/useVoiceCall';
+import { useWave } from '../theme/animations';
 import { Screen, TopBar } from '../components/Chrome';
 import { AmbientBg } from '../components/AmbientBg';
 import { RadialGlow } from '../components/RadialGlow';
 import { Orb } from '../components/Orb';
 import { NavIcon, IconName } from '../components/NavIcon';
 import { Txt } from '../components/Txt';
-import { GlassPill, PrimaryButton, MemoryBadge, MinuteWarningBanner } from '../components/Atoms';
-import { Bubble, BubbleMem, ChatInput, TypingDots, VoiceNoteBubble, CapHitCard, Coachmark } from '../components/ChatBits';
-import { W, alpha } from '../theme/theme';
-import { ARCHETYPE_LABEL, Companion, MinutesRemaining } from '../data/config';
+import { GlassPill, PrimaryButton, MemoryBadge, MinuteWarningBanner, QuickReply } from '../components/Atoms';
+import { Bubble, BubbleMem, ChatInput, TypingDots, VoiceNoteBubble, CapHitCard, Coachmark, RecallIndicator, DayDivider } from '../components/ChatBits';
+import { Avatar } from '../components/Avatar';
+import { W, GRAD, alpha, rgba } from '../theme/theme';
+import { ARCHETYPE_LABEL, Companion, MinutesRemaining, QUICK_REPLIES } from '../data/config';
 import { Go } from '../navigation/types';
 
 const fmt = (s: number) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
@@ -80,6 +83,10 @@ export function S09_FirstChat({ go, companion, userId, characterId }: { go: Go; 
         onError: (err) => {
           console.warn('[FirstChat] Stream error:', err);
           finishStreaming({ text: "(Couldn't reach the server — please try again.)" });
+          // A failed turn used to leave the guided chat with no way forward:
+          // "Continue to home" only appeared from onDone, so an offline
+          // backend trapped the user here. Offer the exit on failure too.
+          setShowContinue(true);
         },
       },
     );
@@ -154,13 +161,23 @@ export function S09_FirstChat({ go, companion, userId, characterId }: { go: Go; 
   return (
     <Screen>
       <TopBar
+        left={
+          <Pressable onPress={() => go('home')} hitSlop={8}>
+            <NavIcon name="back" color={W.text2} size={20} />
+          </Pressable>
+        }
         center={
           <View style={{ alignItems: 'center' }}>
-            <Txt font="comp" weight={600} style={{ fontSize: 15, color: W.text }}>{companion.name}</Txt>
+            <Txt font="comp" weight={600} style={{ fontSize: 15, color: W.cream }}>{companion.name}</Txt>
             <Txt font="user" style={{ fontSize: 11, color: W.text2 }}>Guided first chat</Txt>
           </View>
         }
-        bg="rgba(15,17,26,0.55)"
+        right={
+          <Pressable onPress={() => go('home')} hitSlop={8}>
+            <Txt font="user" weight={500} style={{ fontSize: 13, color: W.primarySoft }}>Skip</Txt>
+          </Pressable>
+        }
+        bg="rgba(24,16,20,0.55)"
         border
       />
       <ScrollView
@@ -178,7 +195,7 @@ export function S09_FirstChat({ go, companion, userId, characterId }: { go: Go; 
         </View>
       </ScrollView>
       {showContinue ? (
-        <View style={{ paddingHorizontal: 16, paddingVertical: 12, backgroundColor: W.surface1, borderTopWidth: 1, borderTopColor: W.surface2 }}>
+        <View style={{ paddingHorizontal: 16, paddingVertical: 12, backgroundColor: W.glassBar, borderTopWidth: 1, borderTopColor: W.hairline }}>
           <PrimaryButton onPress={() => go('home')}>Continue to home</PrimaryButton>
         </View>
       ) : (
@@ -254,10 +271,12 @@ export function S12_VoiceCall({ go, companion, accent = W.primary, orbIntensity 
           </Pressable>
         }
         center={
-          <View style={{ height: 28, borderRadius: 14, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)' }}>
+          <View style={{ height: 30, borderRadius: 15, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' }}>
             <BlurPill>
-              <NavIcon name="sparkle" color={phase === 'reconnecting' ? W.danger : W.secondary} size={14} />
-              <Txt font="user" weight={500} style={{ fontSize: 12, color: W.text2 }}>{pillText}</Txt>
+              {phase === 'connected' && orbState === 'speaking'
+                ? <Equalizer />
+                : <NavIcon name="sparkle" color={phase === 'reconnecting' ? W.danger : W.violet} size={14} />}
+              <Txt font="user" weight={500} style={{ fontSize: 12, color: '#D8CCD1' }}>{pillText}</Txt>
             </BlurPill>
           </View>
         }
@@ -269,21 +288,30 @@ export function S12_VoiceCall({ go, companion, accent = W.primary, orbIntensity 
         <CallErrorView error={error} onRetry={retry} onCancel={handleEnd} />
       ) : (
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 }}>
-          <Orb state={orbState} size={180} accent={accent} intensity={orbIntensity} />
+          <Orb state={orbState} size={200} accent={accent} intensity={orbIntensity} />
           <View style={{ marginTop: -20, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-            <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: accent, shadowColor: accent, shadowOpacity: 1, shadowRadius: 8, shadowOffset: { width: 0, height: 0 } }} />
-            <Txt font="comp" weight={600} style={{ fontSize: 22, color: W.text }}>{companion.name}</Txt>
+            <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: W.primary, shadowColor: W.primary, shadowOpacity: 1, shadowRadius: 10, shadowOffset: { width: 0, height: 0 } }} />
+            <Txt font="display" weight={600} style={{ fontSize: 24, color: W.cream, letterSpacing: -0.3 }}>{companion.name}</Txt>
           </View>
           <BlurInCaption text={null} />
+          <View style={{
+            marginTop: 14, flexDirection: 'row', alignItems: 'center', gap: 6,
+            paddingVertical: 5, paddingHorizontal: 12, borderRadius: 13,
+            backgroundColor: 'rgba(255,255,255,0.05)',
+            borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)',
+          }}>
+            <NavIcon name="chat" color={W.text2} size={12} />
+            <Txt font="user" style={{ fontSize: 10.5, color: W.text2 }}>Live captions on</Txt>
+          </View>
         </View>
       )}
 
       {/* Floating glass control pill */}
       <View style={{ paddingHorizontal: 24, paddingBottom: 80, alignItems: 'center' }}>
-        <GlassPill style={{ padding: 8 }}>
-          <CallBtn icon="chat" onPress={() => { void hangUp(); navigatedRef.current = true; go('chat'); }} />
-          <CallBtn icon="close" bg={W.danger} size={60} onPress={handleEnd} />
-          <CallBtn icon={muted ? 'mute' : 'mic'} active={muted} onPress={toggleMute} />
+        <GlassPill style={{ padding: 10, gap: 12 }}>
+          <CallBtn icon="chat" size={54} onPress={() => { void hangUp(); navigatedRef.current = true; go('chat'); }} />
+          <CallBtn icon="close" bg={W.danger} size={64} onPress={handleEnd} />
+          <CallBtn icon={muted ? 'mute' : 'mic'} size={54} active={muted} onPress={toggleMute} />
         </GlassPill>
       </View>
     </Screen>
@@ -312,10 +340,14 @@ function CallErrorView({ error, onRetry, onCancel }: { error: { kind: string; me
       <Txt font="user" style={{ fontSize: 14, color: W.text2, textAlign: 'center', marginBottom: 24, lineHeight: 20 }}>
         {error.message}
       </Txt>
-      <View style={{ flexDirection: 'row', gap: 12 }}>
-        <PrimaryButton onPress={isPermission ? () => Linking.openSettings() : onRetry}>
-          {isPermission ? 'Open Settings' : 'Try again'}
-        </PrimaryButton>
+      {/* PrimaryButton is width:100%, so it needs a flex parent of its own —
+          without this it pushes Cancel off the right edge. */}
+      <View style={{ flexDirection: 'row', gap: 12, alignItems: 'center' }}>
+        <View style={{ flex: 1 }}>
+          <PrimaryButton onPress={isPermission ? () => Linking.openSettings() : onRetry}>
+            {isPermission ? 'Open Settings' : 'Try again'}
+          </PrimaryButton>
+        </View>
         <Pressable
           onPress={onCancel}
           style={{ paddingHorizontal: 18, paddingVertical: 12, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.10)' }}
@@ -327,9 +359,22 @@ function CallErrorView({ error, onRetry, onCancel }: { error: { kind: string; me
   );
 }
 
+// Three bars bouncing out of phase — the call's "they're talking now" mark.
+function Equalizer() {
+  return (
+    <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 2, height: 12 }}>
+      {[W.coral, '#FF7A8A', W.violet].map((c, i) => <EqBar key={c} color={c} delay={i * 180} />)}
+    </View>
+  );
+}
+function EqBar({ color, delay }: { color: string; delay: number }) {
+  const wave = useWave(delay);
+  return <Animated.View style={[{ width: 2.5, height: 12, borderRadius: 1.25, backgroundColor: color }, wave]} />;
+}
+
 function BlurPill({ children }: { children: React.ReactNode }) {
   return (
-    <View style={{ flex: 1, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: 'rgba(26,29,46,0.55)' }}>
+    <View style={{ flex: 1, paddingHorizontal: 15, flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: 'rgba(34,22,26,0.60)' }}>
       {children}
     </View>
   );
@@ -353,7 +398,7 @@ function Word({ word, index }: { word: string; index: number }) {
   return (
     <Animated.Text
       style={{
-        opacity: v, color: W.text, fontFamily: 'Manrope_500Medium', fontSize: 16, lineHeight: 23,
+        opacity: v, color: '#E8DEE1', fontFamily: 'Manrope_500Medium', fontSize: 16, lineHeight: 24,
         marginRight: 6, transform: [{ translateY: v.interpolate({ inputRange: [0, 1], outputRange: [4, 0] }) }],
       }}
     >
@@ -365,18 +410,23 @@ function Word({ word, index }: { word: string; index: number }) {
 function CallBtn({ icon, onPress, bg, active, size = 52 }: { icon: IconName; onPress?: () => void; bg?: string; active?: boolean; size?: number }) {
   const isDanger = bg === W.danger;
   const content = (
-    <NavIcon name={icon} color={isDanger ? '#fff' : active ? W.danger : W.text} />
+    <NavIcon name={icon} color={isDanger ? '#fff' : active ? W.dangerSoft : '#EDE4E7'} size={isDanger ? 24 : 21} />
   );
   if (bg) {
     return (
       <Pressable
         onPress={onPress}
         style={{
-          width: size, height: size, borderRadius: size / 2, backgroundColor: bg,
-          alignItems: 'center', justifyContent: 'center',
-          shadowColor: isDanger ? W.danger : '#000', shadowOpacity: isDanger ? 0.5 : 0, shadowRadius: 24, shadowOffset: { width: 0, height: 8 },
+          width: size, height: size, borderRadius: size / 2,
+          alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
+          shadowColor: isDanger ? W.dangerSoft : '#000', shadowOpacity: isDanger ? 0.5 : 0, shadowRadius: 28, shadowOffset: { width: 0, height: 10 },
         }}
       >
+        <LinearGradient
+          colors={isDanger ? [...GRAD.danger] : [bg, bg]}
+          start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+          style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }}
+        />
         {content}
       </Pressable>
     );
@@ -386,7 +436,7 @@ function CallBtn({ icon, onPress, bg, active, size = 52 }: { icon: IconName; onP
       onPress={onPress}
       style={{
         width: size, height: size, borderRadius: size / 2,
-        backgroundColor: active ? 'rgba(248,113,113,0.18)' : 'rgba(255,255,255,0.06)',
+        backgroundColor: active ? rgba(W.danger, 0.18) : 'rgba(255,255,255,0.06)',
         borderWidth: 1, borderColor: 'rgba(255,255,255,0.10)',
         alignItems: 'center', justifyContent: 'center',
       }}
@@ -474,6 +524,9 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
   const [showBadge, setShowBadge] = useState(false);
   const [showPhoneTip, setShowPhoneTip] = useState(firstRun);
   const [showMemoryTip, setShowMemoryTip] = useState(false);
+  // How much of the user this companion is holding — shown in the header, and
+  // the reason the design puts memory in gold everywhere else.
+  const [memoryCount, setMemoryCount] = useState<number | null>(null);
   const [seenFirstMemory, setSeenFirstMemory] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
 
@@ -601,6 +654,15 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
   }, [characterId, firstRun]);
 
   useEffect(() => {
+    if (!characterId) return;
+    let cancelled = false;
+    getMemories(characterId)
+      .then(ms => { if (!cancelled) setMemoryCount(ms.length); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [characterId]);
+
+  useEffect(() => {
     if (!showPhoneTip) return;
     const t = setTimeout(() => setShowPhoneTip(false), 5000);
     return () => clearTimeout(t);
@@ -649,44 +711,70 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
 
   return (
     <Screen>
-      <TopBar
-        left={
-          <Pressable onPress={() => {
-            const hasTalked = !firstRun && backendMode && msgs.some(m => m.from === 'user');
-            go(hasTalked ? 'recap' : 'home');
-          }}>
-            <NavIcon name="back" color={W.text2} />
+      {/* Header — presence first: who you're talking to, whether they're
+          here, and how much of you they hold (memory count). */}
+      <View style={{ paddingHorizontal: 16, paddingTop: 6, paddingBottom: 12, flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+        <LinearGradient
+          pointerEvents="none"
+          colors={['transparent', rgba(W.coral, 0.35), rgba(W.violet, 0.3), 'transparent']}
+          start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}
+          style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: 1 }}
+        />
+        <Pressable onPress={() => {
+          const hasTalked = !firstRun && backendMode && msgs.some(m => m.from === 'user');
+          go(hasTalked ? 'recap' : 'home');
+        }} hitSlop={8}>
+          <NavIcon name="back" color={W.text2} size={20} />
+        </Pressable>
+
+        <Pressable onPress={() => go('profile')}>
+          <Avatar name={companion.name} color={accent} size={40} image={companion.image} breathe={false} />
+        </Pressable>
+
+        <Pressable onPress={() => go('profile')} style={{ flex: 1 }}>
+          <Txt font="comp" weight={600} style={{ fontSize: 16, color: W.cream, letterSpacing: -0.2 }}>{companion.name}</Txt>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 1 }}>
+            <View style={{
+              width: 5, height: 5, borderRadius: 2.5, backgroundColor: W.success,
+              shadowColor: W.success, shadowOpacity: 0.8, shadowRadius: 6, shadowOffset: { width: 0, height: 0 },
+            }} />
+            <Txt font="user" style={{ fontSize: 11, color: W.text2 }}>
+              Online · <Txt font="user" style={{ fontSize: 11, color: W.gold }}>
+                {memoryCount != null ? `${memoryCount} ${memoryCount === 1 ? 'memory' : 'memories'}` : ARCHETYPE_LABEL[companion.archetype]}
+              </Txt>
+            </Txt>
+          </View>
+        </Pressable>
+
+        <View>
+          <Pressable
+            onPress={() => { setShowPhoneTip(false); go('call'); }}
+            style={{
+              flexDirection: 'row', alignItems: 'center', gap: 7,
+              paddingVertical: 9, paddingHorizontal: 16, borderRadius: 20,
+              overflow: 'hidden',
+              shadowColor: W.rose, shadowOpacity: 0.35, shadowRadius: 20, shadowOffset: { width: 0, height: 8 },
+            }}
+          >
+            <LinearGradient
+              colors={[...GRAD.aurora]}
+              locations={[0, 0.6, 1]}
+              start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+              style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }}
+            />
+            <NavIcon name="phone" color="#fff" size={14} />
+            <Txt font="user" weight={700} style={{ fontSize: 12.5, color: '#fff' }}>Call</Txt>
+            {showPhoneTip && <PhoneHalo />}
           </Pressable>
-        }
-        center={
-          <View style={{ alignItems: 'center' }}>
-            <Txt font="comp" weight={600} style={{ fontSize: 15, color: W.text }}>{companion.name}</Txt>
-            <Txt font="user" style={{ fontSize: 11, color: W.text2 }}>{ARCHETYPE_LABEL[companion.archetype]}</Txt>
-          </View>
-        }
-        right={
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-            <View>
-              <Pressable onPress={() => { setShowPhoneTip(false); go('call'); }} style={{ padding: 4 }}>
-                <NavIcon name="phone" color={W.primary} />
-                {showPhoneTip && <PhoneHalo />}
-              </Pressable>
-              {showPhoneTip && (
-                <Coachmark
-                  text={`Tap to talk to ${companion.name} with your voice`}
-                  onDismiss={() => setShowPhoneTip(false)}
-                  style={{ top: '100%', right: 0, marginTop: 12 }}
-                />
-              )}
-            </View>
-            <Pressable onPress={() => go('profile')} style={{ padding: 4 }}>
-              <NavIcon name="kebab" color={W.text2} />
-            </Pressable>
-          </View>
-        }
-        bg="rgba(15,17,26,0.6)"
-        border
-      />
+          {showPhoneTip && (
+            <Coachmark
+              text={`Tap to talk to ${companion.name} with your voice`}
+              onDismiss={() => setShowPhoneTip(false)}
+              style={{ top: '100%', right: 0, marginTop: 12 }}
+            />
+          )}
+        </View>
+      </View>
       <ScrollView
         ref={scrollRef}
         style={{ flex: 1 }}
@@ -695,13 +783,19 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
         {loadingHistory
           ? <TypingDots />
           : <>
+              {msgs.length > 0 && <DayDivider />}
               {msgs.map((m, i) => {
                 if (m.from === 'voiceUser' || m.from === 'voiceComp')
                   return <VoiceNoteBubble key={i} from={m.from === 'voiceUser' ? 'user' : 'comp'} duration={m.duration} />;
                 // While a streamed reply has no text yet, show the typing indicator
                 // instead of an empty bubble; it swaps to text once tokens arrive.
                 if (m.streaming && !m.text)
-                  return <TypingDots key={i} />;
+                  return (
+                    <View key={i} style={{ gap: 6 }}>
+                      <RecallIndicator />
+                      <TypingDots />
+                    </View>
+                  );
                 return <BubbleMem key={i} from={m.from} text={m.text || ''} memoryRefs={m.memoryRefs} accent={accent} onMemoryClick={openMemorySheet} />;
               })}
               {typing && <TypingDots />}
@@ -713,11 +807,11 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
             <View
               style={{
                 marginTop: 10, width: 240, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 12,
-                backgroundColor: 'rgba(26,29,46,0.85)', borderWidth: 1, borderColor: 'rgba(94,234,212,0.22)',
+                backgroundColor: 'rgba(32,22,26,0.85)', borderWidth: 1, borderColor: 'rgba(255,201,96,0.22)',
               }}
             >
               <Txt font="user" style={{ fontSize: 12, color: W.text, lineHeight: 18 }}>
-                This is how {companion.name} remembers you. Tap any <Txt font="user" weight={500} style={{ color: W.accent }}>teal phrase</Txt> to see what they recall.
+                This is how {companion.name} remembers you. Tap any <Txt font="user" weight={500} style={{ color: W.gold }}>gold phrase</Txt> to see what they recall.
               </Txt>
             </View>
           )}
@@ -730,6 +824,19 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
           onSend={(d) => { setMsgs(m => [...m, { from: 'voiceUser', duration: d || 8 }]); setRecording(false); }}
         />
       )}
+      {/* Quick replies — only offered when the thread is idle and the user
+          hasn't started typing, so they never compete with a live draft. */}
+      {!draft.trim() && !typing && !msgs.some(m => m.streaming) ? (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={{ paddingHorizontal: 16, paddingBottom: 8, gap: 8 }}
+        >
+          {QUICK_REPLIES.map(q => (
+            <QuickReply key={q} onPress={() => { setDraft(q); }}>{q}</QuickReply>
+          ))}
+        </ScrollView>
+      ) : null}
       <ChatInput draft={draft} setDraft={setDraft} onSend={send} onMic={() => setRecording(true)} companionName={companion.name} />
     </Screen>
   );

@@ -10,14 +10,14 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
-import Svg, { Path } from 'react-native-svg';
+import Svg, { Path, Circle, Defs, LinearGradient as SvgLinearGradient, Stop } from 'react-native-svg';
 import { Screen, TopBar } from '../components/Chrome';
-import { NavIcon } from '../components/NavIcon';
+import { NavIcon, IconName } from '../components/NavIcon';
 import { Txt } from '../components/Txt';
-import { Card, Toggle, PrimaryButton } from '../components/Atoms';
+import { Card, Toggle, PrimaryButton, MeterBar } from '../components/Atoms';
 import { useEntrance, usePressScale, useCountUp } from '../theme/animations';
-import { W, alpha } from '../theme/theme';
-import { ARCHETYPE_COLORS, ARCHETYPE_LABEL, MEM_TYPES, SAMPLE_MEMORIES, Companion, Tier, Memory } from '../data/config';
+import { W, GRAD, alpha, rgba } from '../theme/theme';
+import { ARCHETYPE_COLORS, ARCHETYPE_LABEL, MEM_TYPES, SAMPLE_MEMORIES, Companion, Tier, Memory, RITUAL } from '../data/config';
 import { Go, ScreenName } from '../navigation/types';
 import { getMemories, deleteMemory, deleteAllMemories, ApiMemory, getUserStats, ApiUserStats } from '../api';
 
@@ -66,7 +66,7 @@ export function S21_Settings({ go, tier, companions, userName, userEmail, settin
         height={64}
         left={
           <View>
-            <Txt font="comp" weight={700} style={{ fontSize: 24, color: W.cream, letterSpacing: -0.5 }}>Settings</Txt>
+            <Txt font="display" weight={700} style={{ fontSize: 27, color: W.cream, letterSpacing: -0.5 }}>Settings</Txt>
             <Txt font="user" style={{ fontSize: 11, color: W.text2, letterSpacing: 0.4, marginTop: 1 }}>Personalize your whisper</Txt>
           </View>
         }
@@ -74,12 +74,22 @@ export function S21_Settings({ go, tier, companions, userName, userEmail, settin
       <Animated.ScrollView style={[{ flex: 1 }, enter]} contentContainerStyle={{ paddingTop: 8, paddingHorizontal: 16, paddingBottom: 32, gap: 18 }} showsVerticalScrollIndicator={false}>
         {/* User card — tap to edit your own profile (not a companion) */}
         <Card onPress={() => go('user-profile')} style={{ flexDirection: 'row', alignItems: 'center', gap: 14 }}>
-          <View style={{ width: 48, height: 48, borderRadius: 24, backgroundColor: W.surface2, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
-            <LinearGradient colors={[alpha(W.primary, '80'), alpha(W.accent, '60')]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-            <Txt font="user" weight={600} style={{ fontSize: 18, color: '#fff' }}>{userName[0]}</Txt>
+          <View style={{ width: 48, height: 48, borderRadius: 24, padding: 2, overflow: 'hidden' }}>
+            <LinearGradient colors={[W.coral, W.rose, W.violet, W.coral]} start={{ x: 0.1, y: 0 }} end={{ x: 0.9, y: 1 }} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
+            <View style={{ flex: 1, borderRadius: 22, backgroundColor: '#1C1216', alignItems: 'center', justifyContent: 'center' }}>
+              <Txt font="user" weight={600} style={{ fontSize: 17, color: W.cream }}>{userName[0]}</Txt>
+            </View>
           </View>
           <View style={{ flex: 1 }}>
-            <Txt font="user" weight={500} style={{ fontSize: 15, color: W.text }}>{userName}</Txt>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Txt font="user" weight={600} style={{ fontSize: 15, color: W.cream }}>{userName}</Txt>
+              {tier !== 'free' ? (
+                <View style={{ borderRadius: 9, overflow: 'hidden', paddingVertical: 2, paddingHorizontal: 9 }}>
+                  <LinearGradient colors={[...GRAD.auroraShort]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
+                  <Txt font="user" weight={700} style={{ fontSize: 9.5, color: '#fff', letterSpacing: 1 }}>{tier.toUpperCase()}</Txt>
+                </View>
+              ) : null}
+            </View>
             {/* Only render an email when there actually is one. This used to
                 display a fabricated `${name}@whisper.app` address. */}
             {userEmail ? (
@@ -89,17 +99,18 @@ export function S21_Settings({ go, tier, companions, userName, userEmail, settin
             )}
           </View>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-            <Txt font="user" style={{ fontSize: 12, color: W.secondary }}>Edit</Txt>
-            <NavIcon name="right" color={W.secondary} size={16} />
+            <Txt font="user" style={{ fontSize: 12, color: W.primarySoft }}>Edit</Txt>
+            <NavIcon name="right" color={W.primarySoft} size={14} />
           </View>
         </Card>
 
         {/* Premium stats hero — streak, minutes left, total talk time */}
         <StatsHero
-          streak={userStats?.total_sessions ?? 12}
-          minutesLeft={87}
-          minutesTotal={120}
-          talkTimeMinutes={userStats?.total_voice_minutes ?? 342}
+          streak={RITUAL.streakDays}
+          bestStreak={RITUAL.bestStreak}
+          minutesLeft={RITUAL.voiceMinutesUsed}
+          minutesTotal={RITUAL.voiceMinutesTotal}
+          talkTimeMinutes={userStats?.total_voice_minutes ?? RITUAL.talkMinutes}
           onMinutesPress={() => go('topup')}
         />
 
@@ -128,23 +139,25 @@ export function S21_Settings({ go, tier, companions, userName, userEmail, settin
           })}
         </Section>
 
-        <Section title="Communication">
-          <Row label="Daily check-in" right={<Toggle value={settings.dailyCheckin} onChange={v => setSettings({ ...settings, dailyCheckin: v })} />} />
+        <Section title="Communication" accent={W.coral}>
+          <Row icon="bell" iconColor={W.coral} label="Daily check-in" right={<Toggle value={settings.dailyCheckin} onChange={v => setSettings({ ...settings, dailyCheckin: v })} />} />
           <Row
+            icon="clock" iconColor={W.gold}
             onPress={() => setShowTimePicker(true)}
             label="Notification time"
             right={
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                 <Txt font="user" style={{ fontSize: 13, color: W.secondary }}>{notifTimeLabel}</Txt>
-                <NavIcon name="right" color={W.text2} size={16} />
+                <NavIcon name="right" color={W.text3} size={14} />
               </View>
             }
           />
-          <Row label="Weekly reflection" right={<Toggle value={settings.weeklyReflection} onChange={v => setSettings({ ...settings, weeklyReflection: v })} />} />
+          <Row icon="sparkle" iconColor={W.secondary} label="Weekly reflection" right={<Toggle value={settings.weeklyReflection} onChange={v => setSettings({ ...settings, weeklyReflection: v })} />} />
         </Section>
 
-        <Section title="Voice">
+        <Section title="Voice" accent={W.violet}>
           <Row
+            icon="mic" iconColor={W.secondary}
             label="Voice speed"
             right={
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
@@ -156,27 +169,29 @@ export function S21_Settings({ go, tier, companions, userName, userEmail, settin
             }
           />
           <Row
+            icon="speaker" iconColor={W.success}
             onPress={() => setBgSoundIdx((bgSoundIdx + 1) % BG_SOUNDS.length)}
             label="Background sounds"
             right={
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
                 <Txt font="user" style={{ fontSize: 13, color: bgSoundIdx === 0 ? W.text2 : W.secondary }}>{BG_SOUNDS[bgSoundIdx]}</Txt>
-                <NavIcon name="right" color={W.text2} size={16} />
+                <NavIcon name="right" color={W.text3} size={14} />
               </View>
             }
           />
-          <Row label="Auto-play voice notes" right={<Toggle value={settings.autoPlay} onChange={v => setSettings({ ...settings, autoPlay: v })} />} />
-          <Row label="Show live text during calls" right={<Toggle value={settings.liveCaptions} onChange={v => setSettings({ ...settings, liveCaptions: v })} />} />
+          <Row icon="play" iconColor={W.coral} label="Auto-play voice notes" right={<Toggle value={settings.autoPlay} onChange={v => setSettings({ ...settings, autoPlay: v })} />} />
+          <Row icon="chat" iconColor={W.secondary} label="Show live text during calls" right={<Toggle value={settings.liveCaptions} onChange={v => setSettings({ ...settings, liveCaptions: v })} />} />
         </Section>
 
-        <Section title="Memories">
+        <Section title="Memories" accent={W.gold}>
           <Row
+            icon="sparkle-solid" iconColor={W.gold}
             onPress={() => go('memories')}
             label="View all memories"
             right={
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                <Txt font="user" style={{ fontSize: 12, color: W.text2 }}>47</Txt>
-                <NavIcon name="right" color={W.text2} size={18} />
+                <Txt font="user" weight={600} style={{ fontSize: 12, color: W.gold }}>47</Txt>
+                <NavIcon name="right" color={W.text3} size={14} />
               </View>
             }
           />
@@ -278,10 +293,10 @@ function TimePickerSheet({ hour, minute, onCancel, onConfirm }: { hour: number; 
   const a = useEntrance({ fromTranslateY: 60, durationMs: 380 });
 
   return (
-    <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(8,9,13,0.6)', zIndex: 60, justifyContent: 'flex-end' }}>
+    <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(14,10,13,0.6)', zIndex: 60, justifyContent: 'flex-end' }}>
       <Pressable onPress={onCancel} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
       <Animated.View style={[{ borderTopLeftRadius: 28, borderTopRightRadius: 28, overflow: 'hidden', borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.10)' }, a]}>
-        <LinearGradient colors={['rgba(37,40,54,0.95)', 'rgba(15,17,26,0.95)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
+        <LinearGradient colors={['rgba(48,32,40,0.95)', 'rgba(24,16,20,0.95)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
         <BlurView intensity={40} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
         <View style={{ paddingHorizontal: 24, paddingTop: 14, paddingBottom: 28 }}>
           <View style={{ width: 36, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.18)', alignSelf: 'center', marginBottom: 14 }} />
@@ -329,7 +344,7 @@ function Wheel({ items, value, onChange, width }: { items: string[]; value: stri
 
   return (
     <View style={{ width, height: 5 * WHEEL_ITEM_HEIGHT, position: 'relative' }}>
-      <View pointerEvents="none" style={{ position: 'absolute', left: 4, right: 4, top: 2 * WHEEL_ITEM_HEIGHT, height: WHEEL_ITEM_HEIGHT, borderRadius: 12, backgroundColor: 'rgba(124,114,255,0.14)', borderWidth: 1, borderColor: 'rgba(124,114,255,0.30)' }} />
+      <View pointerEvents="none" style={{ position: 'absolute', left: 4, right: 4, top: 2 * WHEEL_ITEM_HEIGHT, height: WHEEL_ITEM_HEIGHT, borderRadius: 12, backgroundColor: 'rgba(255,138,118,0.14)', borderWidth: 1, borderColor: 'rgba(255,138,118,0.30)' }} />
       <ScrollView
         ref={ref}
         showsVerticalScrollIndicator={false}
@@ -346,10 +361,10 @@ function Wheel({ items, value, onChange, width }: { items: string[]; value: stri
         ))}
       </ScrollView>
       <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, top: 0, height: WHEEL_ITEM_HEIGHT, overflow: 'hidden' }}>
-        <LinearGradient colors={['rgba(15,17,26,1)', 'rgba(15,17,26,0)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
+        <LinearGradient colors={['rgba(24,16,20,1)', 'rgba(24,16,20,0)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
       </View>
       <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: WHEEL_ITEM_HEIGHT, overflow: 'hidden' }}>
-        <LinearGradient colors={['rgba(15,17,26,0)', 'rgba(15,17,26,1)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
+        <LinearGradient colors={['rgba(24,16,20,0)', 'rgba(24,16,20,1)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
       </View>
     </View>
   );
@@ -382,7 +397,7 @@ export function S_UserProfile({ go, userName, userEmail, backTo = 'settings' }: 
             {editName ? (
               <TextInput
                 value={name} onChangeText={setName} autoFocus onBlur={() => setEditName(false)} onSubmitEditing={() => setEditName(false)}
-                style={{ backgroundColor: 'rgba(37,40,54,0.7)', color: W.text, borderWidth: 1, borderColor: alpha(W.primary, '66'), borderRadius: 10, height: 36, paddingHorizontal: 12, fontFamily: 'Manrope_600SemiBold', fontSize: 20, textAlign: 'center', minWidth: 180 }}
+                style={{ backgroundColor: 'rgba(48,32,40,0.7)', color: W.text, borderWidth: 1, borderColor: alpha(W.primary, '66'), borderRadius: 10, height: 36, paddingHorizontal: 12, fontFamily: 'Manrope_600SemiBold', fontSize: 20, textAlign: 'center', minWidth: 180 }}
               />
             ) : (
               <>
@@ -429,11 +444,11 @@ export function S_UserProfile({ go, userName, userEmail, backTo = 'settings' }: 
 // ─── InfoSheet — simple bottom sheet for informational settings rows ──────
 function InfoSheet({ title, body, onClose }: { title: string; body: string; onClose: () => void }) {
   return (
-    <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(8,9,13,0.6)', zIndex: 50, justifyContent: 'flex-end' }}>
+    <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(14,10,13,0.6)', zIndex: 50, justifyContent: 'flex-end' }}>
       <Pressable onPress={onClose} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
       <View style={{ borderTopLeftRadius: 28, borderTopRightRadius: 28, overflow: 'hidden', borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.1)' }}>
         <BlurView intensity={50} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-        <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(19,21,30,0.7)' }} />
+        <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(30,21,25,0.7)' }} />
         <View style={{ paddingHorizontal: 24, paddingTop: 14, paddingBottom: 36 }}>
           <View style={{ width: 36, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.18)', alignSelf: 'center', marginBottom: 20 }} />
           <Txt font="comp" weight={600} style={{ fontSize: 20, color: W.cream, letterSpacing: -0.3 }}>{title}</Txt>
@@ -447,11 +462,15 @@ function InfoSheet({ title, body, onClose }: { title: string; body: string; onCl
   );
 }
 
-// ─── StatsHero — premium glass card with streak / minutes / talk-time ─────
+// ─── StatsHero — the streak ring, voice minutes, and talk time ────────────
+// The streak ring is the emotional anchor of this screen, so it gets the only
+// conic-style arc in the app: an aurora sweep whose length *is* the progress
+// toward the personal best.
 function StatsHero({
-  streak, minutesLeft, minutesTotal, talkTimeMinutes, onMinutesPress,
+  streak, bestStreak, minutesLeft, minutesTotal, talkTimeMinutes, onMinutesPress,
 }: {
-  streak: number; minutesLeft: number; minutesTotal: number; talkTimeMinutes: number; onMinutesPress?: () => void;
+  streak: number; bestStreak: number; minutesLeft: number; minutesTotal: number;
+  talkTimeMinutes: number; onMinutesPress?: () => void;
 }) {
   const streakN = useCountUp(streak, 1100, 200);
   const minutesN = useCountUp(minutesLeft, 1300, 250);
@@ -460,85 +479,114 @@ function StatsHero({
   const talkMinAnim = talkN % 60;
   const pct = Math.max(0, Math.min(1, minutesLeft / minutesTotal));
 
-  const shimmer = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    Animated.loop(Animated.timing(shimmer, { toValue: 1, duration: 4200, easing: Easing.inOut(Easing.ease), useNativeDriver: true })).start();
-  }, []);
-  const shimmerX = shimmer.interpolate({ inputRange: [0, 1], outputRange: [-80, 80] });
-
-  const bar = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    Animated.timing(bar, { toValue: pct, duration: 1300, easing: Easing.bezier(0.22, 1, 0.36, 1), useNativeDriver: false }).start();
-  }, [pct]);
-  const barWidth = bar.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] });
-
   return (
-    <View style={{ borderRadius: 22, overflow: 'hidden', borderWidth: 1, borderColor: alpha(W.primary, '22'), shadowColor: W.primary, shadowOpacity: 0.18, shadowRadius: 28, shadowOffset: { width: 0, height: 14 } }}>
-      <LinearGradient colors={['rgba(45,38,90,0.55)', 'rgba(26,29,46,0.85)', 'rgba(15,17,26,0.95)']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
+    <View style={{
+      borderRadius: 22, overflow: 'hidden',
+      borderWidth: 1, borderColor: rgba(W.primary, 0.20),
+      shadowColor: '#000', shadowOpacity: 0.45, shadowRadius: 34, shadowOffset: { width: 0, height: 16 },
+    }}>
+      <LinearGradient
+        colors={['rgba(72,38,44,0.55)', 'rgba(34,22,30,0.85)', 'rgba(20,13,17,0.95)']}
+        locations={[0, 0.5, 1]}
+        start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+        style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }}
+      />
       <BlurView intensity={30} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-      <View pointerEvents="none" style={{ position: 'absolute', top: -60, right: -40, width: 200, height: 200, borderRadius: 100, backgroundColor: W.accent, opacity: 0.10 }} />
-      <View pointerEvents="none" style={{ position: 'absolute', bottom: -50, left: -40, width: 180, height: 180, borderRadius: 90, backgroundColor: W.primary, opacity: 0.12 }} />
+      <View pointerEvents="none" style={{ position: 'absolute', top: -60, right: -40, width: 190, height: 190, borderRadius: 95, backgroundColor: W.gold, opacity: 0.10 }} />
+      <View pointerEvents="none" style={{ position: 'absolute', bottom: -50, left: -40, width: 170, height: 170, borderRadius: 85, backgroundColor: W.violet, opacity: 0.12 }} />
       <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, top: 0, height: 1, backgroundColor: 'rgba(255,255,255,0.10)' }} />
 
-      <View style={{ padding: 18, gap: 16 }}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 14 }}>
-          <View style={{ width: 56, height: 56, borderRadius: 18, overflow: 'hidden', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: 'rgba(251,201,96,0.35)' }}>
-            <LinearGradient colors={['rgba(251,113,133,0.35)', 'rgba(251,201,96,0.35)']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-            <Animated.View pointerEvents="none" style={{ position: 'absolute', top: 0, bottom: 0, width: 30, backgroundColor: 'rgba(255,255,255,0.18)', transform: [{ translateX: shimmerX }, { skewX: '-20deg' }] }} />
-            <FlameIcon />
-          </View>
+      <View style={{ padding: 18, gap: 15 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 16 }}>
+          <StreakRing progress={Math.min(1, streak / Math.max(bestStreak, 1))} />
           <View style={{ flex: 1 }}>
-            <Txt font="user" weight={600} style={{ fontSize: 10, color: '#FBC960', letterSpacing: 1.4, textTransform: 'uppercase' }}>Current streak</Txt>
+            <Txt font="user" weight={600} style={{ fontSize: 10, color: W.gold, letterSpacing: 1.6, textTransform: 'uppercase' }}>Current streak</Txt>
             <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 6, marginTop: 2 }}>
-              <Txt font="comp" weight={700} style={{ fontSize: 30, color: W.cream, letterSpacing: -1 }}>{streakN}</Txt>
+              <Txt font="display" weight={700} style={{ fontSize: 31, color: W.cream, letterSpacing: -1 }}>{streakN}</Txt>
               <Txt font="user" weight={500} style={{ fontSize: 14, color: W.text2 }}>{streak === 1 ? 'day' : 'days'}</Txt>
+              <Txt font="user" weight={500} style={{ fontSize: 11, color: W.textMuted, marginLeft: 6 }}>best {bestStreak}</Txt>
             </View>
-            <Txt font="user" style={{ marginTop: 2, fontSize: 11, color: W.text2 }}>Keep it going — talk today to extend</Txt>
+            <Txt font="user" style={{ marginTop: 2, fontSize: 11, color: W.text2 }}>Talk today to extend it</Txt>
           </View>
         </View>
 
         <View style={{ height: 1, backgroundColor: 'rgba(255,255,255,0.06)' }} />
 
         <View style={{ flexDirection: 'row', gap: 14 }}>
-          <Pressable onPress={onMinutesPress} style={{ flex: 1.3 }}>
-            <View style={{ gap: 8 }}>
+          <Pressable onPress={onMinutesPress} style={{ flex: 1.25 }}>
+            <View style={{ gap: 7 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: pct > 0.3 ? W.primary : W.danger, shadowColor: pct > 0.3 ? W.primary : W.danger, shadowOpacity: 1, shadowRadius: 6, shadowOffset: { width: 0, height: 0 } }} />
-                <Txt font="user" weight={600} style={{ fontSize: 10, color: W.text2, letterSpacing: 1.2, textTransform: 'uppercase' }}>Voice minutes left</Txt>
+                <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: pct > 0.3 ? W.primary : W.danger, shadowColor: pct > 0.3 ? W.primary : W.danger, shadowOpacity: 0.9, shadowRadius: 6, shadowOffset: { width: 0, height: 0 } }} />
+                <Txt font="user" weight={600} style={{ fontSize: 10, color: W.text2, letterSpacing: 1.2, textTransform: 'uppercase' }}>Voice minutes</Txt>
               </View>
               <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}>
-                <Txt font="comp" weight={700} style={{ fontSize: 28, color: W.cream, letterSpacing: -0.8 }}>{minutesN}</Txt>
+                <Txt font="display" weight={700} style={{ fontSize: 26, color: W.cream, letterSpacing: -0.8 }}>{minutesN}</Txt>
                 <Txt font="user" weight={500} style={{ fontSize: 12, color: W.text2 }}>/ {minutesTotal} min</Txt>
               </View>
-              <View style={{ height: 6, borderRadius: 3, backgroundColor: 'rgba(255,255,255,0.06)', overflow: 'hidden' }}>
-                <Animated.View style={{ height: '100%', width: barWidth, borderRadius: 3, overflow: 'hidden' }}>
-                  <LinearGradient colors={pct > 0.3 ? [W.primary, W.secondary] : ['#F87171', '#FB9DA8']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-                </Animated.View>
-              </View>
+              <MeterBar pct={pct} />
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                <Txt font="user" weight={500} style={{ fontSize: 11, color: W.accent }}>Top up</Txt>
-                <NavIcon name="right" color={W.accent} size={12} />
+                <Txt font="user" weight={500} style={{ fontSize: 11, color: W.gold }}>Top up</Txt>
+                <NavIcon name="right" color={W.gold} size={11} />
               </View>
             </View>
           </Pressable>
 
           <View style={{ width: 1, backgroundColor: 'rgba(255,255,255,0.06)' }} />
 
-          <View style={{ flex: 1, gap: 8 }}>
+          <View style={{ flex: 1, gap: 7 }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-              <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: W.accent, shadowColor: W.accent, shadowOpacity: 1, shadowRadius: 6, shadowOffset: { width: 0, height: 0 } }} />
-              <Txt font="user" weight={600} style={{ fontSize: 10, color: W.text2, letterSpacing: 1.2, textTransform: 'uppercase' }}>Total talk time</Txt>
+              <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: W.violet, shadowColor: W.violet, shadowOpacity: 0.9, shadowRadius: 6, shadowOffset: { width: 0, height: 0 } }} />
+              <Txt font="user" weight={600} style={{ fontSize: 10, color: W.text2, letterSpacing: 1.2, textTransform: 'uppercase' }}>Talk time</Txt>
             </View>
-            <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}>
-              <Txt font="comp" weight={700} style={{ fontSize: 28, color: W.cream, letterSpacing: -0.8 }}>{talkHrsAnim}</Txt>
+            <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 3 }}>
+              <Txt font="display" weight={700} style={{ fontSize: 26, color: W.cream, letterSpacing: -0.8 }}>{talkHrsAnim}</Txt>
               <Txt font="user" weight={500} style={{ fontSize: 12, color: W.text2 }}>h</Txt>
-              <Txt font="comp" weight={700} style={{ fontSize: 22, color: W.cream, letterSpacing: -0.5, marginLeft: 4 }}>{talkMinAnim}</Txt>
+              <Txt font="display" weight={700} style={{ fontSize: 21, color: W.cream, marginLeft: 3 }}>{talkMinAnim}</Txt>
               <Txt font="user" weight={500} style={{ fontSize: 12, color: W.text2 }}>m</Txt>
             </View>
-            <Txt font="user" style={{ fontSize: 11, color: W.text2 }}>Across all companions</Txt>
-            <Sparkline data={[3, 5, 4, 7, 6, 9, 12]} color={W.accent} />
+            <Sparkline data={[3, 5, 4, 7, 6, 9, 12]} color={W.gold} />
+            <Txt font="user" weight={500} style={{ fontSize: 11, color: W.gold }}>{RITUAL.talkDeltaLabel}</Txt>
           </View>
         </View>
+      </View>
+    </View>
+  );
+}
+
+// The streak arc: a 74px ring, drawn as a dashed stroke so its length tracks
+// progress toward the personal best, with the flame sitting in the well.
+function StreakRing({ progress }: { progress: number }) {
+  const size = 74;
+  const stroke = 6;
+  const r = (size - stroke) / 2;
+  const circumference = 2 * Math.PI * r;
+  const filled = Math.max(0.02, progress) * circumference;
+
+  return (
+    <View style={{ width: size, height: size, alignItems: 'center', justifyContent: 'center' }}>
+      <Svg width={size} height={size} style={{ position: 'absolute' }}>
+        <Defs>
+          <SvgLinearGradient id="streakArc" x1="0" y1="0" x2="1" y2="1">
+            <Stop offset="0" stopColor={W.coral} />
+            <Stop offset="0.55" stopColor={W.rose} />
+            <Stop offset="1" stopColor={W.violet} />
+          </SvgLinearGradient>
+        </Defs>
+        <Circle
+          cx={size / 2} cy={size / 2} r={r}
+          stroke="rgba(255,255,255,0.08)" strokeWidth={stroke} fill="none"
+        />
+        <Circle
+          cx={size / 2} cy={size / 2} r={r}
+          stroke="url(#streakArc)" strokeWidth={stroke} fill="none"
+          strokeLinecap="round"
+          strokeDasharray={`${filled} ${circumference}`}
+          // Start the sweep at 12 o'clock rather than 3 o'clock.
+          transform={`rotate(-90 ${size / 2} ${size / 2})`}
+        />
+      </Svg>
+      <View style={{ width: size - stroke * 2 - 4, height: size - stroke * 2 - 4, borderRadius: size, backgroundColor: '#160E12', alignItems: 'center', justifyContent: 'center' }}>
+        <FlameIcon />
       </View>
     </View>
   );
@@ -547,7 +595,7 @@ function StatsHero({
 function FlameIcon() {
   return (
     <Svg width={26} height={26} viewBox="0 0 24 24" fill="none">
-      <Path d="M12 2s5 4 5 9a5 5 0 0 1-10 0c0-2 1-3 2-4-1 2 1 3 2 3 0-3-2-4-2-6 0-1 1-2 3-2z" fill="#FBC960" stroke="#FB9DA8" strokeWidth={1.2} strokeLinejoin="round" />
+      <Path d="M12 2s5 4 5 9a5 5 0 0 1-10 0c0-2 1-3 2-4-1 2 1 3 2 3 0-3-2-4-2-6 0-1 1-2 3-2z" fill={W.gold} stroke={W.coral} strokeWidth={1.2} strokeLinejoin="round" />
       <Path d="M12 12s2 1.5 2 4a2 2 0 0 1-4 0c0-1 .5-1.5 1-2 0 1 1 1.5 1 1.5 0-1.5-1-2.5-1-3 0-.5.5-1 1-.5z" fill="#fff" opacity={0.85} />
     </Svg>
   );
@@ -584,7 +632,7 @@ function Section({ title, children, accent }: { title: string; children: React.R
         <Txt font="user" weight={600} style={{ fontSize: 10, color: W.text2, textTransform: 'uppercase', letterSpacing: 1.4 }}>{title}</Txt>
         <View style={{ flex: 1, height: 1, backgroundColor: 'rgba(255,255,255,0.05)' }} />
       </View>
-      <View style={{ borderRadius: 18, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)', backgroundColor: 'rgba(20,22,32,0.65)', shadowColor: '#000', shadowOpacity: 0.35, shadowRadius: 20, shadowOffset: { width: 0, height: 10 } }}>
+      <View style={{ borderRadius: 18, overflow: 'hidden', borderWidth: 1, borderColor: W.hairline, backgroundColor: W.glassRaised, shadowColor: '#000', shadowOpacity: 0.35, shadowRadius: 20, shadowOffset: { width: 0, height: 10 } }}>
         <BlurView intensity={28} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
         <LinearGradient pointerEvents="none" colors={['rgba(255,255,255,0.03)', 'rgba(0,0,0,0.08)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
         <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, top: 0, height: 1, backgroundColor: 'rgba(255,255,255,0.08)' }} />
@@ -596,19 +644,30 @@ function Section({ title, children, accent }: { title: string; children: React.R
   );
 }
 
-function Row({ label, right, onPress }: { label: React.ReactNode; right?: React.ReactNode; onPress?: () => void }) {
+function Row({ label, right, onPress, icon, iconColor }: {
+  label: React.ReactNode; right?: React.ReactNode; onPress?: () => void;
+  icon?: IconName; iconColor?: string;
+}) {
   const press = usePressScale(0.985);
+  const tint = iconColor || W.primary;
   const content = (
-    <View style={{ minHeight: 52, paddingVertical: 12, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-      <View style={{ flex: 1 }}>
-        {typeof label === 'string' ? <Txt font="user" style={{ fontSize: 14, color: W.text }}>{label}</Txt> : label}
+    <View style={{ minHeight: 52, paddingVertical: 11, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+      <View style={{ flex: 1, flexDirection: 'row', alignItems: 'center', gap: 11 }}>
+        {icon ? (
+          <View style={{ width: 30, height: 30, borderRadius: 9, backgroundColor: rgba(tint, 0.13), alignItems: 'center', justifyContent: 'center' }}>
+            <NavIcon name={icon} color={tint} size={15} />
+          </View>
+        ) : null}
+        <View style={{ flex: 1 }}>
+          {typeof label === 'string' ? <Txt font="user" style={{ fontSize: 14, color: W.text }}>{label}</Txt> : label}
+        </View>
       </View>
       {right != null && <View>{right}</View>}
     </View>
   );
   if (!onPress) return content;
   return (
-    <Pressable onPress={onPress} onPressIn={press.onPressIn} onPressOut={press.onPressOut} android_ripple={{ color: 'rgba(124,114,255,0.12)' }}>
+    <Pressable onPress={onPress} onPressIn={press.onPressIn} onPressOut={press.onPressOut} android_ripple={{ color: 'rgba(255,138,118,0.12)' }}>
       <Animated.View style={press.style}>{content}</Animated.View>
     </Pressable>
   );
@@ -661,7 +720,7 @@ export function S22_Memories({ go, characterId, companionName }: { go: Go; chara
         left={<Pressable onPress={() => go('settings')}><NavIcon name="back" color={W.text2} /></Pressable>}
         center={<Txt font="comp" weight={600} style={{ fontSize: 16, color: W.text }}>Memories</Txt>}
         right={<Pressable><NavIcon name="search" color={W.text2} /></Pressable>}
-        bg="rgba(15,17,26,0.55)"
+        bg="rgba(24,16,20,0.55)"
         border
       />
       <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0 }} contentContainerStyle={{ paddingVertical: 12, paddingHorizontal: 16, gap: 8 }}>
@@ -675,7 +734,7 @@ export function S22_Memories({ go, characterId, companionName }: { go: Go; chara
         {filtered.map(m => {
           const mt = MEM_TYPES[m.type];
           return (
-            <View key={m.id} style={{ borderRadius: 14, padding: 12, flexDirection: 'row', alignItems: 'flex-start', gap: 10, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(124,114,255,0.08)', backgroundColor: 'rgba(26,29,46,0.55)' }}>
+            <View key={m.id} style={{ borderRadius: 14, padding: 12, flexDirection: 'row', alignItems: 'flex-start', gap: 10, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,138,118,0.08)', backgroundColor: 'rgba(32,22,26,0.55)' }}>
               <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
               <View style={{ paddingVertical: 3, paddingHorizontal: 8, borderRadius: 8, backgroundColor: alpha(mt.color, '26'), borderWidth: 1, borderColor: alpha(mt.color, '40') }}>
                 <Txt font="user" weight={600} style={{ fontSize: 10, color: mt.color }}>{mt.l}</Txt>
@@ -770,7 +829,7 @@ function PlanCard({ tier, accent, secondary, annual, price, features, bestValue,
   return (
     <Pressable onPress={onPick} style={{ flex: 1, borderRadius: 18, overflow: 'hidden' }}>
       <LinearGradient colors={[accent, secondary]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={{ borderRadius: 18, padding: picked ? 2 : 1, opacity: picked ? 1 : 0.35 }}>
-        <View style={{ borderRadius: 17, padding: 14, backgroundColor: picked ? alpha(accent, '1f') : 'rgba(37,40,54,0.9)' }}>
+        <View style={{ borderRadius: 17, padding: 14, backgroundColor: picked ? alpha(accent, '1f') : 'rgba(48,32,40,0.9)' }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
             <View style={{ paddingVertical: 2, paddingHorizontal: 8, borderRadius: 6, backgroundColor: alpha(accent, '33') }}>
               <Txt font="user" weight={600} style={{ fontSize: 10, color: accent, textTransform: 'capitalize' }}>{tier}</Txt>
@@ -849,7 +908,7 @@ export function S24_TopUp({ go, backTo = 'home' }: { go: Go; backTo?: ScreenName
 }
 
 // ─── Shared modal sheet (paywall / top-up) ───────────────────────────────
-function ModalSheet({ children, zIndex = 40, radius = 24, maxHeightPct = 0.9, solid = false, backdrop = 'rgba(15,17,26,0.55)', onClose }: {
+function ModalSheet({ children, zIndex = 40, radius = 24, maxHeightPct = 0.9, solid = false, backdrop = 'rgba(24,16,20,0.55)', onClose }: {
   children: React.ReactNode; zIndex?: number; radius?: number; maxHeightPct?: number; solid?: boolean; backdrop?: string; onClose?: () => void;
 }) {
   const v = useRef(new Animated.Value(0)).current;
@@ -868,7 +927,7 @@ function ModalSheet({ children, zIndex = 40, radius = 24, maxHeightPct = 0.9, so
           <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: W.surface1 }} />
         ) : (
           <>
-            <LinearGradient colors={['rgba(37,40,54,0.95)', 'rgba(15,17,26,0.95)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
+            <LinearGradient colors={['rgba(48,32,40,0.95)', 'rgba(24,16,20,0.95)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
             <BlurView intensity={36} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
           </>
         )}

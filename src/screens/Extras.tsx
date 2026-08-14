@@ -37,7 +37,7 @@ export function S25_NotifPermission({ go, companion }: { go: Go; companion: Comp
         </Txt>
 
         {/* iOS-style notification preview */}
-        <View style={{ marginTop: 32, width: '100%', maxWidth: 320, backgroundColor: 'rgba(37,40,54,0.78)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', borderRadius: 16, padding: 14, overflow: 'hidden' }}>
+        <View style={{ marginTop: 32, width: '100%', maxWidth: 320, backgroundColor: 'rgba(48,32,40,0.78)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', borderRadius: 16, padding: 14, overflow: 'hidden' }}>
           <BlurView intensity={24} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
             <View style={{ width: 24, height: 24, borderRadius: 6, backgroundColor: W.primary, alignItems: 'center', justifyContent: 'center', shadowColor: W.primary, shadowOpacity: 0.4, shadowRadius: 10 }}>
@@ -113,10 +113,10 @@ export function S26_CompanionEdit({
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
             {editName ? (
               <TextInput value={name} onChangeText={setName} autoFocus onBlur={() => setEditName(false)} onSubmitEditing={() => setEditName(false)}
-                style={{ backgroundColor: 'rgba(37,40,54,0.7)', color: W.text, borderWidth: 1, borderColor: alpha(W.primary, '66'), borderRadius: 10, height: 36, paddingHorizontal: 12, fontFamily: 'Manrope_600SemiBold', fontSize: 20, textAlign: 'center', minWidth: 160 }} />
+                style={{ backgroundColor: 'rgba(48,32,40,0.7)', color: W.text, borderWidth: 1, borderColor: alpha(W.primary, '66'), borderRadius: 10, height: 36, paddingHorizontal: 12, fontFamily: 'Manrope_600SemiBold', fontSize: 20, textAlign: 'center', minWidth: 160 }} />
             ) : (
               <>
-                <Txt font="comp" weight={600} style={{ fontSize: 22, color: W.text }}>{name}</Txt>
+                <Txt font="display" weight={600} style={{ fontSize: 22, color: W.text }}>{name}</Txt>
                 <Pressable onPress={() => setEditName(true)} style={{ padding: 4, opacity: 0.6 }}>
                   <Svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke={W.text2} strokeWidth={1.8} strokeLinecap="round"><Path d="M14 4l6 6-12 12H2v-6L14 4z" /></Svg>
                 </Pressable>
@@ -147,7 +147,7 @@ export function S26_CompanionEdit({
                 </View>
               </View>
             ))}
-            <View style={{ marginTop: 4, paddingVertical: 8, paddingHorizontal: 12, backgroundColor: 'rgba(124,114,255,0.08)', borderRadius: 8 }}>
+            <View style={{ marginTop: 4, paddingVertical: 8, paddingHorizontal: 12, backgroundColor: 'rgba(255,138,118,0.08)', borderRadius: 8 }}>
               <Txt font="user" style={{ fontSize: 12, color: W.secondary, fontStyle: 'italic' }}>
                 {sliders.map(s => traitWord(s.k, traits[s.k])).join(', ')}
               </Txt>
@@ -190,7 +190,7 @@ function ProfileSection({ title, children }: { title: string; children: React.Re
   return (
     <View>
       <Txt font="user" weight={600} style={{ fontSize: 11, color: W.text2, textTransform: 'uppercase', letterSpacing: 0.9, paddingHorizontal: 4, paddingBottom: 8 }}>{title}</Txt>
-      <View style={{ backgroundColor: 'rgba(26,29,46,0.55)', borderWidth: 1, borderColor: 'rgba(124,114,255,0.08)', borderRadius: 14, overflow: 'hidden' }}>
+      <View style={{ backgroundColor: 'rgba(32,22,26,0.55)', borderWidth: 1, borderColor: 'rgba(255,138,118,0.08)', borderRadius: 14, overflow: 'hidden' }}>
         <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
         {items.map((child, i) => (
           <View key={i} style={{ borderTopWidth: i > 0 ? 1 : 0, borderTopColor: 'rgba(255,255,255,0.04)' }}>{child}</View>
@@ -246,12 +246,14 @@ function TraitSlider({ value, onChange }: { value: number; onChange: (v: number)
 }
 
 function AvatarSheet({ onClose }: { onClose: () => void }) {
-  const colors = ['#7C72FF', '#5EEAD4', '#FB7185', '#FBBF24', '#60A5FA', '#34D399', '#A78BFA', '#C4B5FD'];
+  // Avatar swatches, re-cut for Ember Dusk: the aurora three, gold, and the
+  // archetype accents.
+  const colors = [W.coral, W.rose, W.violet, W.gold, W.mentor, W.friend, W.partner, W.secondary];
   return (
-    <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(15,17,26,0.55)', zIndex: 30, justifyContent: 'flex-end' }}>
+    <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(24,16,20,0.55)', zIndex: 30, justifyContent: 'flex-end' }}>
       <BlurView intensity={8} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
       <View style={{ width: '100%', borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 20, paddingTop: 12, paddingBottom: 24, overflow: 'hidden', borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.10)' }}>
-        <LinearGradient colors={['rgba(37,40,54,0.85)', 'rgba(15,17,26,0.75)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
+        <LinearGradient colors={['rgba(48,32,40,0.88)', 'rgba(20,13,17,0.80)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
         <BlurView intensity={36} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
         <View style={{ width: 36, height: 4, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 2, alignSelf: 'center', marginBottom: 14 }} />
         <Txt font="comp" weight={600} style={{ fontSize: 17, color: W.text }}>Change avatar</Txt>
@@ -275,10 +277,10 @@ function AvatarSheet({ onClose }: { onClose: () => void }) {
 
 function DeleteConfirm({ name, onCancel, onConfirm }: { name: string; onCancel: () => void; onConfirm: () => void }) {
   return (
-    <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(15,17,26,0.55)', zIndex: 30, alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+    <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(24,16,20,0.55)', zIndex: 30, alignItems: 'center', justifyContent: 'center', padding: 24 }}>
       <BlurView intensity={8} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
       <View style={{ width: '100%', borderRadius: 18, padding: 22, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' }}>
-        <LinearGradient colors={['rgba(37,40,54,0.95)', 'rgba(15,17,26,0.95)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
+        <LinearGradient colors={['rgba(48,32,40,0.95)', 'rgba(24,16,20,0.95)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
         <BlurView intensity={28} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
         <Txt font="comp" weight={600} style={{ fontSize: 17, color: W.text }}>Delete {name}?</Txt>
         <Txt font="user" style={{ marginTop: 8, fontSize: 13, color: W.text2, lineHeight: 20 }}>
@@ -303,11 +305,11 @@ function DeleteConfirm({ name, onCancel, onConfirm }: { name: string; onCancel: 
 function Sheet({ children, onClose }: { children: React.ReactNode; onClose?: () => void }) {
   const a = useEntrance({ fromTranslateY: 40, durationMs: 450 });
   return (
-    <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(15,17,26,0.55)', zIndex: 30, justifyContent: 'flex-end' }}>
+    <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(24,16,20,0.55)', zIndex: 30, justifyContent: 'flex-end' }}>
       <BlurView intensity={8} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
       {onClose ? <Pressable onPress={onClose} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} /> : null}
       <Animated.View style={[{ width: '100%', borderTopLeftRadius: 24, borderTopRightRadius: 24, overflow: 'hidden', borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.10)' }, a]}>
-        <LinearGradient colors={['rgba(37,40,54,0.85)', 'rgba(15,17,26,0.75)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
+        <LinearGradient colors={['rgba(48,32,40,0.88)', 'rgba(20,13,17,0.80)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
         <BlurView intensity={36} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
         {children}
       </Animated.View>
@@ -411,18 +413,18 @@ export function CrisisResourceCard() {
   ];
   return (
     <View style={{ alignSelf: 'stretch', marginVertical: 6, borderWidth: 1, borderColor: 'rgba(251,191,36,0.18)', borderRadius: 16, padding: 16, gap: 12, overflow: 'hidden' }}>
-      <LinearGradient colors={['rgba(251,191,36,0.06)', 'rgba(26,29,46,0.65)']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
+      <LinearGradient colors={['rgba(251,191,36,0.06)', 'rgba(32,22,26,0.65)']} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
       <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
       <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-        <View style={{ width: 32, height: 32, borderRadius: 10, backgroundColor: 'rgba(94,234,212,0.12)', borderWidth: 1, borderColor: 'rgba(94,234,212,0.20)', alignItems: 'center', justifyContent: 'center' }}>
+        <View style={{ width: 32, height: 32, borderRadius: 10, backgroundColor: 'rgba(255,201,96,0.12)', borderWidth: 1, borderColor: 'rgba(255,201,96,0.20)', alignItems: 'center', justifyContent: 'center' }}>
           <NavIcon name="heart" color={W.accent} />
         </View>
         <Txt font="comp" weight={600} style={{ fontSize: 16, color: W.text }}>You're not alone</Txt>
       </View>
       <View style={{ gap: 8 }}>
         {resources.map((r, i) => (
-          <Pressable key={i} style={{ backgroundColor: 'rgba(15,17,26,0.4)', borderWidth: 1, borderColor: 'rgba(94,234,212,0.10)', borderRadius: 10, paddingVertical: 10, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-            <View style={{ width: 30, height: 30, borderRadius: 8, backgroundColor: 'rgba(94,234,212,0.10)', alignItems: 'center', justifyContent: 'center' }}>
+          <Pressable key={i} style={{ backgroundColor: 'rgba(24,16,20,0.4)', borderWidth: 1, borderColor: 'rgba(255,201,96,0.10)', borderRadius: 10, paddingVertical: 10, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+            <View style={{ width: 30, height: 30, borderRadius: 8, backgroundColor: 'rgba(255,201,96,0.10)', alignItems: 'center', justifyContent: 'center' }}>
               <NavIcon name={r.icon} color={W.accent} />
             </View>
             <View style={{ flex: 1, minWidth: 0 }}>
@@ -454,7 +456,7 @@ export function S28_CrisisChat({ go, companion }: { go: Go; companion: Companion
           <Txt font="user" style={{ fontSize: 11, color: W.text2 }}>{ARCHETYPE_LABEL[companion.archetype] || 'Mentor'}</Txt>
         </View>}
         right={<Pressable><NavIcon name="kebab" color={W.text2} /></Pressable>}
-        bg="rgba(15,17,26,0.55)" border
+        bg="rgba(24,16,20,0.55)" border
       />
       <CrisisBanner />
       <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 8, gap: 8 }} showsVerticalScrollIndicator={false}>
@@ -484,10 +486,10 @@ export function S29_Recap({
   const a = useEntrance({ fromTranslateY: 40, durationMs: 500 });
 
   return (
-    <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(15,17,26,0.55)', zIndex: 30, justifyContent: 'flex-end' }}>
+    <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(24,16,20,0.55)', zIndex: 30, justifyContent: 'flex-end' }}>
       <BlurView intensity={8} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
       <Animated.View style={[{ width: '100%', maxHeight: '85%', borderTopLeftRadius: 24, borderTopRightRadius: 24, overflow: 'hidden', borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.10)' }, a]}>
-        <LinearGradient colors={['rgba(37,40,54,0.85)', 'rgba(15,17,26,0.75)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
+        <LinearGradient colors={['rgba(48,32,40,0.88)', 'rgba(20,13,17,0.80)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
         <BlurView intensity={36} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
         <ScrollView contentContainerStyle={{ paddingHorizontal: 24, paddingTop: 12, paddingBottom: 24 }} showsVerticalScrollIndicator={false}>
           <View style={{ width: 36, height: 4, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 2, alignSelf: 'center', marginBottom: 16 }} />
@@ -520,7 +522,7 @@ export function S29_Recap({
                   const mt = MEM_TYPES[m.type];
                   const c = mt?.color || W.accent;
                   return (
-                    <View key={m.id} style={{ backgroundColor: 'rgba(94,234,212,0.06)', borderWidth: 1, borderColor: 'rgba(94,234,212,0.15)', borderRadius: 10, paddingVertical: 10, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}>
+                    <View key={m.id} style={{ backgroundColor: 'rgba(255,201,96,0.06)', borderWidth: 1, borderColor: 'rgba(255,201,96,0.15)', borderRadius: 10, paddingVertical: 10, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}>
                       <View style={{ backgroundColor: alpha(c, '26'), paddingVertical: 3, paddingHorizontal: 7, borderRadius: 6 }}>
                         <Txt font="user" weight={600} style={{ fontSize: 9, color: c, textTransform: 'uppercase', letterSpacing: 0.4 }}>{mt?.l || m.type}</Txt>
                       </View>
@@ -579,7 +581,7 @@ export function S30_Login({ go, isNew = false }: { go: Go; isNew?: boolean }) {
       <AmbientBg intensity={1.6} includePulse />
       <View style={{ flex: 1, padding: 24, position: 'relative', zIndex: 1 }}>
         <View style={{ marginTop: '18%', alignItems: 'center' }}>
-          <Txt font="comp" weight={700} style={{ fontSize: 34, color: W.primary, letterSpacing: -1 }}>whisper</Txt>
+          <Txt font="display" weight={700} style={{ fontSize: 34, color: W.primary, letterSpacing: -1 }}>whisper</Txt>
           <Animated.View style={welcome}>
             <Txt font="comp" weight={600} style={{ marginTop: 14, fontSize: 20, color: W.text }}>
               {isNew ? 'Create your account' : 'Welcome back'}
@@ -601,7 +603,7 @@ export function S30_Login({ go, isNew = false }: { go: Go; isNew?: boolean }) {
           {/* Google */}
           <View style={{ width: '100%', height: 52, borderRadius: 12, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' }}>
             <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-            <Pressable onPress={() => go('age')} style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: 'rgba(26,29,46,0.6)' }}>
+            <Pressable onPress={() => go('age')} style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: 'rgba(32,22,26,0.6)' }}>
               <Svg width={18} height={18} viewBox="0 0 18 18">
                 <Path fill="#4285F4" d="M17.6 9.2c0-.6-.1-1.2-.2-1.7H9v3.3h4.8c-.2 1.1-.9 2.1-1.8 2.7v2.3h3c1.7-1.6 2.6-3.9 2.6-6.6z" />
                 <Path fill="#34A853" d="M9 18c2.4 0 4.5-.8 6-2.2l-3-2.3c-.8.5-1.9.9-3 .9-2.3 0-4.3-1.6-5-3.7H1v2.3C2.5 15.9 5.5 18 9 18z" />
@@ -615,7 +617,7 @@ export function S30_Login({ go, isNew = false }: { go: Go; isNew?: boolean }) {
           {!showEmail ? (
             <View style={{ width: '100%', height: 52, borderRadius: 12, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' }}>
               <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-              <Pressable onPress={() => setShowEmail(true)} style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: 'rgba(26,29,46,0.6)' }}>
+              <Pressable onPress={() => setShowEmail(true)} style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: 'rgba(32,22,26,0.6)' }}>
                 <Svg width={18} height={18} viewBox="0 0 24 24" fill="none" stroke={W.text2} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
                   <Rect x={3} y={5} width={18} height={14} rx={2} />
                   <Path d="M3 7l9 6 9-6" />
@@ -624,7 +626,7 @@ export function S30_Login({ go, isNew = false }: { go: Go; isNew?: boolean }) {
               </Pressable>
             </View>
           ) : (
-            <View style={{ borderWidth: 1, borderColor: 'rgba(124,114,255,0.15)', borderRadius: 14, padding: 14, gap: 10, overflow: 'hidden' }}>
+            <View style={{ borderWidth: 1, borderColor: 'rgba(255,138,118,0.15)', borderRadius: 14, padding: 14, gap: 10, overflow: 'hidden' }}>
               <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
               {sent ? (
                 <View style={{ paddingVertical: 6, paddingHorizontal: 4, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
@@ -639,7 +641,7 @@ export function S30_Login({ go, isNew = false }: { go: Go; isNew?: boolean }) {
               ) : (
                 <>
                   <TextInput value={email} onChangeText={setEmail} placeholder="Email address" placeholderTextColor={W.text2} keyboardType="email-address" autoCapitalize="none" autoFocus
-                    style={{ width: '100%', backgroundColor: 'rgba(37,40,54,0.7)', color: W.text, borderWidth: 1, borderColor: 'rgba(255,255,255,0.05)', height: 44, borderRadius: 10, paddingHorizontal: 14, fontFamily: 'Outfit_400Regular', fontSize: 15 }} />
+                    style={{ width: '100%', backgroundColor: 'rgba(48,32,40,0.7)', color: W.text, borderWidth: 1, borderColor: 'rgba(255,255,255,0.05)', height: 44, borderRadius: 10, paddingHorizontal: 14, fontFamily: 'Outfit_400Regular', fontSize: 15 }} />
                   <Pressable onPress={() => email.includes('@') && setSent(true)} style={{ width: '100%', height: 44, backgroundColor: W.primary, borderRadius: 10, alignItems: 'center', justifyContent: 'center', opacity: email.includes('@') ? 1 : 0.5 }}>
                     <Txt font="user" weight={500} style={{ fontSize: 14, color: '#fff' }}>Send magic link</Txt>
                   </Pressable>

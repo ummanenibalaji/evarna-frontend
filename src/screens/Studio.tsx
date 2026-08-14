@@ -57,7 +57,7 @@ export function S15_StudioHome({ go, tier, characters, activeConvos = [], setupS
   return (
     <Screen>
       <TopBar
-        left={<Txt font="comp" weight={700} style={{ fontSize: 22, color: W.text }}>Studio</Txt>}
+        left={<Txt font="display" weight={700} style={{ fontSize: 22, color: W.text }}>Studio</Txt>}
         right={
           <Pressable onPress={() => (locked ? go('paywall') : openCreator())} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
             <NavIcon name="plus" color={W.accent} size={18} />
@@ -81,7 +81,7 @@ export function S15_StudioHome({ go, tier, characters, activeConvos = [], setupS
                   onPress={() => resumeConvo(c)}
                   style={{
                     width: 220, borderRadius: 16, padding: 14, gap: 8, overflow: 'hidden',
-                    borderWidth: 1, borderColor: alpha(c.accent, '26'), backgroundColor: 'rgba(26,29,46,0.55)',
+                    borderWidth: 1, borderColor: alpha(c.accent, '26'), backgroundColor: 'rgba(32,22,26,0.55)',
                   }}
                 >
                   <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
@@ -124,7 +124,7 @@ export function S15_StudioHome({ go, tier, characters, activeConvos = [], setupS
                 style={{
                   width: 160, height: 200, borderRadius: 18, padding: 16, overflow: 'hidden',
                   justifyContent: 'space-between',
-                  borderWidth: 1, borderColor: alpha(s.accent, '1f'), backgroundColor: 'rgba(26,29,46,0.55)',
+                  borderWidth: 1, borderColor: alpha(s.accent, '1f'), backgroundColor: 'rgba(32,22,26,0.55)',
                 }}
               >
                 <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
@@ -288,7 +288,7 @@ export function S16_ScenarioSetup({ go, scenario, onStart }: { go: Go; scenario:
           </View>
         )}
         {/* Memory toggle */}
-        <View style={{ marginTop: 4, borderRadius: 14, padding: 14, paddingLeft: 16, flexDirection: 'row', alignItems: 'center', gap: 12, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(124,114,255,0.10)', backgroundColor: 'rgba(26,29,46,0.55)' }}>
+        <View style={{ marginTop: 4, borderRadius: 14, padding: 14, paddingLeft: 16, flexDirection: 'row', alignItems: 'center', gap: 12, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,138,118,0.10)', backgroundColor: 'rgba(32,22,26,0.55)' }}>
           <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
           <View style={{ width: 32, height: 32, borderRadius: 10, backgroundColor: remember ? alpha(W.accent, '1f') : 'rgba(139,143,163,0.10)', alignItems: 'center', justifyContent: 'center' }}>
             <NavIcon name="sparkle" color={remember ? W.accent : W.text2} />
@@ -336,11 +336,11 @@ export function S17_StudioSession({ go, scenario, onEnd, sessionN = 4, memoryCou
         left={<Pressable onPress={() => go('studio')}><NavIcon name="back" color={W.text2} /></Pressable>}
         center={<Txt font="comp" weight={600} style={{ fontSize: 15, color: W.text }}>{scenario.name}</Txt>}
         right={<Pressable onPress={() => setShowSummary(true)}><Txt font="user" weight={500} style={{ fontSize: 13, color: W.danger }}>End</Txt></Pressable>}
-        bg="rgba(15,17,26,0.55)"
+        bg="rgba(24,16,20,0.55)"
         border
       />
       {/* context banner */}
-      <View style={{ marginHorizontal: 16, marginTop: 10, marginBottom: 6, borderRadius: 10, padding: 8, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, overflow: 'hidden', borderWidth: 1, borderColor: alpha(scenario.accent, '1f'), borderLeftWidth: 2, borderLeftColor: scenario.accent, backgroundColor: 'rgba(26,29,46,0.55)' }}>
+      <View style={{ marginHorizontal: 16, marginTop: 10, marginBottom: 6, borderRadius: 10, padding: 8, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, overflow: 'hidden', borderWidth: 1, borderColor: alpha(scenario.accent, '1f'), borderLeftWidth: 2, borderLeftColor: scenario.accent, backgroundColor: 'rgba(32,22,26,0.55)' }}>
         <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
         <Txt font="user" style={{ flex: 1, fontSize: 12, color: W.text2 }} numberOfLines={1}>Playing: Interviewer at a tech startup</Txt>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
@@ -380,7 +380,7 @@ function StudioSummary({ scenario, sessionN, memoryCount, onClose }: { scenario:
       </View>
 
       {/* Coaching feedback */}
-      <View style={{ marginTop: 16, padding: 14, borderRadius: 12, backgroundColor: 'rgba(37,40,54,0.6)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.04)', gap: 10 }}>
+      <View style={{ marginTop: 16, padding: 14, borderRadius: 12, backgroundColor: 'rgba(48,32,40,0.6)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.04)', gap: 10 }}>
         <View>
           <Txt font="user" weight={600} style={{ fontSize: 11, color: W.accent, textTransform: 'uppercase', letterSpacing: 0.9 }}>What went well</Txt>
           <Txt font="user" style={{ marginTop: 4, fontSize: 13, color: W.text, lineHeight: 19 }}>Clean STAR format. Specific projects mentioned with timelines.</Txt>
@@ -399,7 +399,7 @@ function StudioSummary({ scenario, sessionN, memoryCount, onClose }: { scenario:
         </View>
         <View style={{ gap: 6 }}>
           {newMemories.map(m => (
-            <View key={m.id} style={{ backgroundColor: 'rgba(94,234,212,0.06)', borderWidth: 1, borderColor: 'rgba(94,234,212,0.15)', borderRadius: 10, padding: 10, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}>
+            <View key={m.id} style={{ backgroundColor: 'rgba(255,201,96,0.06)', borderWidth: 1, borderColor: 'rgba(255,201,96,0.15)', borderRadius: 10, padding: 10, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}>
               <Txt font="user" style={{ flex: 1, fontSize: 13, color: W.text, lineHeight: 18 }}>{m.text}</Txt>
               <Pressable onPress={() => setNewMemories(ms => ms.filter(x => x.id !== m.id))} style={{ padding: 2, opacity: 0.6 }}>
                 <NavIcon name="close" color={W.text2} size={18} />
@@ -411,7 +411,7 @@ function StudioSummary({ scenario, sessionN, memoryCount, onClose }: { scenario:
       </View>
 
       <View style={{ marginTop: 18, flexDirection: 'row', gap: 10 }}>
-        <Pressable onPress={onClose} style={{ flex: 1, height: 44, backgroundColor: W.accentDim, borderWidth: 1, borderColor: 'rgba(94,234,212,0.20)', borderRadius: 12, alignItems: 'center', justifyContent: 'center' }}>
+        <Pressable onPress={onClose} style={{ flex: 1, height: 44, backgroundColor: W.accentDim, borderWidth: 1, borderColor: 'rgba(255,201,96,0.20)', borderRadius: 12, alignItems: 'center', justifyContent: 'center' }}>
           <Txt font="user" weight={500} style={{ fontSize: 14, color: W.accent }}>Save & close</Txt>
         </Pressable>
         <Pressable onPress={onClose} style={{ flex: 1, height: 44, borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', borderRadius: 12, alignItems: 'center', justifyContent: 'center' }}>
@@ -581,11 +581,11 @@ export function SheetOverlay({ children, onClose }: { children: React.ReactNode;
   const translateY = v.interpolate({ inputRange: [0, 1], outputRange: [400, 0] });
   return (
     <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, zIndex: 30, justifyContent: 'flex-end' }}>
-      <Pressable onPress={onClose} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(15,17,26,0.55)' }}>
+      <Pressable onPress={onClose} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(24,16,20,0.55)' }}>
         <BlurView intensity={8} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
       </Pressable>
       <Animated.View style={{ transform: [{ translateY }], maxHeight: '85%', borderTopLeftRadius: 24, borderTopRightRadius: 24, overflow: 'hidden', borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.10)' }}>
-        <LinearGradient colors={['rgba(37,40,54,0.95)', 'rgba(15,17,26,0.95)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
+        <LinearGradient colors={['rgba(48,32,40,0.95)', 'rgba(24,16,20,0.95)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
         <BlurView intensity={36} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
         <ScrollView contentContainerStyle={{ paddingTop: 12, paddingHorizontal: 24, paddingBottom: 24 }}>
           {children}
