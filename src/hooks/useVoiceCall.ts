@@ -91,7 +91,7 @@ export function useVoiceCall(params: UseVoiceCallParams): UseVoiceCallReturn {
 
     (async () => {
       try {
-        const res = await startVoiceSession(userId!, characterId!);
+        const res = await startVoiceSession(characterId!);
         sessionIdRef.current = res.session_id;
         if (cancelledRef.current) return;
 

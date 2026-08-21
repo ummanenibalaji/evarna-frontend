@@ -10,7 +10,12 @@ import {
   CONFIG, PLUS_COMPANIONS, FREE_COMPANIONS, STUDIO_ACTIVE_CONVOS,
   SCENARIOS, SANDBOX_MODES, ARCHETYPE_COLORS, Companion, Scenario, SandboxMode,
 } from '../data/config';
-import { onboardUser, getVoices, ApiVoice, getUserCharacters, ApiCharacter, createCharacter } from '../api';
+import {
+  onboardUser, getVoices, ApiVoice, getUserCharacters, ApiCharacter, createCharacter,
+  signInWithGoogle, signInWithApple, requestEmailCode, verifyEmailCode, getMe, logout, AuthSession,
+  updateCharacter, deleteCharacter, updateMe, deleteMe,
+} from '../api';
+import { loadAuthToken, setAuthToken, ApiError } from '../api/client';
 
 const SESSION_KEY = 'whisper_session';
 import { BottomNav, TabId } from '../components/BottomNav';
@@ -48,7 +53,7 @@ const ARCHETYPE_MAP_REV: Record<string, Companion['archetype']> = {
 // Phase 1 cap: keep things sane until paywall lands in Phase 2.
 const MAX_COMPANIONS = 5;
 
-// Convert ApiCharacter from /characters/user/:id into the home-screen Companion shape.
+// Convert ApiCharacter from GET /characters into the home-screen Companion shape.
 function apiCharacterToCompanion(c: ApiCharacter): Companion {
   return {
     id: c._id,
@@ -71,13 +76,21 @@ const INTENT_MAP: Record<string, string> = {
 
 export default function App() {
   // Routing
-  const [screen, setScreen] = useState<ScreenName>(t.showFirstChat ? 'splash' : 'home');
+  // Splash is only the boot placeholder now — the effect below routes to
+  // home / onboarding / login once the auth token has been checked.
+  const [screen, setScreen] = useState<ScreenName>('splash');
   const [activeTab, setActiveTab] = useState<TabId>('home');
   const [activeCompanion, setActiveCompanion] = useState<Companion | null>(null);
   const [scenario, setScenario] = useState<Scenario | null>(null);
   const [sandboxMode, setSandboxMode] = useState<SandboxMode | null>(null);
   const [paywallTrigger] = useState('voice');
   const [isNewUser, setIsNewUser] = useState(false);
+  // Login screen state
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [pendingEmail, setPendingEmail] = useState('');
+  // The signed-in user's email, from GET /auth/me — shown in Settings.
+  const [userEmail, setUserEmail] = useState('');
   // Track where modal/edit screens were opened from so the back button returns correctly.
   const [profileBack, setProfileBack] = useState<ScreenName>('chat');
   const [paywallBack, setPaywallBack] = useState<ScreenName>('home');
@@ -111,14 +124,14 @@ export default function App() {
   // The companion created during onboarding — replaces static placeholder on home screen
   const [userCompanion, setUserCompanion] = useState<Companion | null>(null);
 
-  // All of the user's companions, fetched from /characters/user/:user_id.
+  // All of the user's companions, fetched from GET /characters (token-scoped).
   // Sorted newest-interaction-first; drives the multi-companion list view on home.
   const [userCharacters, setUserCharacters] = useState<Companion[] | null>(null);
 
   // Refetch the user's companions from the backend. Safe to call after onboarding,
   // after creating a new companion, or whenever returning to home.
-  const refreshUserCharacters = (uid: string) =>
-    getUserCharacters(uid)
+  const refreshUserCharacters = () =>
+    getUserCharacters()
       .then(list => {
         const sorted = [...list].sort((a, b) => {
           const ta = a.last_interaction_at ? new Date(a.last_interaction_at).getTime() : 0;
@@ -132,32 +145,173 @@ export default function App() {
   // Prevent double-write on first restore
   const restoredRef = useRef(false);
 
-  // Restore persisted session on launch so the companion survives app restarts
+  // Boot. Two steps, in order:
+  //   1. Restore the cached session blob — companion + display data only, so the
+  //      home screen has something to paint immediately.
+  //   2. Check the auth token. It, not the blob, decides *who* the user is:
+  //      valid + onboarded → home, valid + not onboarded → onboarding, else login.
   useEffect(() => {
-    AsyncStorage.getItem(SESSION_KEY)
-      .then(raw => {
-        if (!raw) return;
-        const saved = JSON.parse(raw) as {
-          userId: string;
-          characterId: string;
-          companion: Companion;
-          isMinor?: boolean;
-          userName?: string;
-        };
-        if (saved.userId) setUserId(saved.userId);
-        if (saved.characterId) setCharacterId(saved.characterId);
-        if (saved.isMinor !== undefined) setIsMinor(saved.isMinor);
-        if (saved.userName) setUserName(saved.userName);
-        if (saved.companion) {
-          setUserCompanion(saved.companion);
-          setCompanionName(saved.companion.name);
-          setArchetypePick(saved.companion.archetype);
+    (async () => {
+      try {
+        const raw = await AsyncStorage.getItem(SESSION_KEY);
+        if (raw) {
+          const saved = JSON.parse(raw) as {
+            userId: string;
+            characterId: string;
+            companion: Companion;
+            isMinor?: boolean;
+            userName?: string;
+          };
+          if (saved.characterId) setCharacterId(saved.characterId);
+          if (saved.isMinor !== undefined) setIsMinor(saved.isMinor);
+          if (saved.userName) setUserName(saved.userName);
+          if (saved.companion) {
+            setUserCompanion(saved.companion);
+            setCompanionName(saved.companion.name);
+            setArchetypePick(saved.companion.archetype);
+          }
+          restoredRef.current = true;
         }
-        restoredRef.current = true;
-        if (saved.userId) refreshUserCharacters(saved.userId);
-      })
-      .catch(() => {});
+      } catch { /* corrupt blob — the token check below still decides the route */ }
+
+      const token = await loadAuthToken();
+      if (!token) { setScreen('login'); return; }
+      try {
+        const me = await getMe();
+        setUserId(me.user_id);
+        if (me.display_name) setUserName(me.display_name);
+        setUserEmail(me.email ?? '');
+        setIsMinor(!!me.is_minor);
+        if (me.onboarding_completed) {
+          refreshUserCharacters();
+          setScreen('home');
+        } else {
+          setIsNewUser(true);
+          setScreen('age');
+        }
+      } catch {
+        // 401 already cleared the token inside the client. Anything else (offline)
+        // just means we can't confirm the session — ask them to sign in again.
+        // ponytail: no offline grace period; add one if flaky networks bite.
+        setScreen('login');
+      }
+    })();
   }, []);
+
+  // ── Auth handlers ────────────────────────────────────────────────────────
+
+  const applySession = (s: AuthSession) => {
+    setAuthToken(s.token);
+    setUserId(s.user_id);
+    if (s.onboarding_completed) {
+      refreshUserCharacters();
+      go('home');
+    } else {
+      setIsNewUser(true);
+      go('age');
+    }
+  };
+
+  // TODO(auth): this is where the native sign-in SDKs plug in. Both should
+  // return the provider's id_token (or null if the user cancelled):
+  //   google → @react-native-google-signin/google-signin
+  //     GoogleSignin.configure({ webClientId: '...' });
+  //     const { data } = await GoogleSignin.signIn(); return data?.idToken ?? null;
+  //   apple  → expo-apple-authentication
+  //     const c = await AppleAuthentication.signInAsync({ requestedScopes: [FULL_NAME, EMAIL] });
+  //     return c.identityToken;
+  // Until then Google/Apple show an "unavailable" message and email is the
+  // working path. Nothing else needs to change when they land.
+  const nativeIdToken = async (_provider: 'google' | 'apple'): Promise<string | null> => null;
+
+  const handleOAuth = async (provider: 'google' | 'apple') => {
+    setAuthBusy(true);
+    setAuthError(null);
+    try {
+      const idToken = await nativeIdToken(provider);
+      if (!idToken) {
+        setAuthError(`${provider === 'google' ? 'Google' : 'Apple'} sign-in isn't wired up yet — continue with email.`);
+        return;
+      }
+      applySession(provider === 'google' ? await signInWithGoogle(idToken) : await signInWithApple(idToken));
+    } catch (e) {
+      console.warn('[Auth] oauth failed:', e);
+      setAuthError("Couldn't sign you in. Please try again.");
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleEmailRequest = async (email: string): Promise<boolean> => {
+    setAuthBusy(true);
+    setAuthError(null);
+    try {
+      await requestEmailCode(email);
+      setPendingEmail(email);
+      return true;
+    } catch (e) {
+      console.warn('[Auth] email request failed:', e);
+      setAuthError("Couldn't send a code to that address. Check it and try again.");
+      return false;
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleEmailVerify = async (code: string) => {
+    setAuthBusy(true);
+    setAuthError(null);
+    try {
+      applySession(await verifyEmailCode(pendingEmail, code));
+    } catch (e) {
+      console.warn('[Auth] email verify failed:', e);
+      setAuthError('That code didn\'t work. Check it or request a new one.');
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  // Signs out every device (backend-side), then wipes local identity.
+  const signOut = async () => {
+    try { await logout(); } catch { /* offline — sign out locally anyway */ }
+    setAuthToken(null);
+    await AsyncStorage.removeItem(SESSION_KEY).catch(() => {});
+    setUserId(null);
+    setCharacterId(null);
+    setUserCompanion(null);
+    setUserCharacters(null);
+    setUserName('');
+    setUserEmail('');
+    setPendingEmail('');
+    setAuthError(null);
+    setScreen('login');
+  };
+
+  // Irreversible account deletion (App Store 5.1.1(v)). Reuses signOut's local
+  // teardown; its logout() call just 401s on an already-deleted account.
+  const deleteAccount = async () => {
+    try {
+      await deleteMe();
+    } catch (e) {
+      console.warn('[Account] delete failed:', e);
+      Alert.alert('Couldn\'t delete your account', 'We couldn\'t reach the server. Please try again.');
+      return;
+    }
+    await signOut();
+  };
+
+  const handleDeleteCompanion = async (id: string) => {
+    try {
+      await deleteCharacter(id);
+    } catch (e) {
+      console.warn('[Companion] delete failed:', e);
+      Alert.alert('Couldn\'t delete', "We couldn't reach the server. Please try again.");
+      return;
+    }
+    setActiveCompanion(null);
+    if (id === characterId) setCharacterId(null);
+    refreshUserCharacters();
+  };
 
   // Persist session whenever IDs are set (only after onboarding, not on restore)
   useEffect(() => {
@@ -175,7 +329,7 @@ export default function App() {
     ).catch(() => {});
     // After a fresh onboarding or new-character creation, sync the home list
     // so the new companion appears alongside the existing ones.
-    refreshUserCharacters(userId);
+    refreshUserCharacters();
   }, [userId, characterId]);
 
   // Voice catalog from backend (fetched once on mount)
@@ -199,9 +353,8 @@ export default function App() {
   // value; the CONFIG constant is only a last resort for the pre-onboarding
   // prototype screens so nothing renders blank.
   const displayName = userName.trim() || t.userName;
-  // No email is collected anywhere yet (the login screen is not wired to auth),
-  // so there is deliberately none to show — better than a fabricated address.
-  const displayEmail = '';
+  // Comes from GET /auth/me on boot; empty until then (better than a fabricated address).
+  const displayEmail = userEmail;
 
   // Prefer the live backend list when present; fall back to the locally onboarded
   // companion (so the screen still renders if the API is unreachable), and finally
@@ -214,7 +367,7 @@ export default function App() {
         : (t.tier === 'free' ? FREE_COMPANIONS : PLUS_COMPANIONS.slice(0, 1));
   const currentCompanion: Companion = activeCompanion || companions[0];
 
-  // Real backend characters from /characters/user/:id have UUIDs as ids. The
+  // Real backend characters from GET /characters have UUIDs as ids. The
   // static placeholder companions use string slugs ("sage", "atlas", ...). Treat
   // anything from `userCharacters` as a real backend character so each list-row
   // tap routes through the real chat session.
@@ -251,9 +404,9 @@ export default function App() {
     if (tab === 'settings') setScreen('settings');
   };
 
-  // Called from S08_Name. In "onboarding" mode this hits POST /users/onboard
-  // (creates both user + first companion). In "add" mode we already have a
-  // user_id, so we hit POST /characters/create to add another companion.
+  // Called from S08_Name. In "onboarding" mode this hits POST /users/onboard,
+  // which fills in the signed-in user + their first companion. In "add" mode
+  // the user is already onboarded, so we hit POST /characters/create.
   const handlePickName = async (name: string) => {
     setCompanionName(name);
     const apiArchetype = ARCHETYPE_MAP[archetypePick] ?? archetypePick;
@@ -291,7 +444,6 @@ export default function App() {
     if (addMode === 'add' && userId) {
       try {
         const res = await createCharacter({
-          user_id: userId,
           archetype: apiArchetype,
           gender: chosenVoice.gender,
           voice_id: chosenVoice.id,
@@ -308,7 +460,7 @@ export default function App() {
         };
         setUserCompanion(newCompanion);
         setActiveCompanion(newCompanion);
-        refreshUserCharacters(userId);
+        refreshUserCharacters();
       } catch (e) {
         console.warn('[AddCompanion] API failed:', e);
         Alert.alert(
@@ -352,10 +504,24 @@ export default function App() {
       setUserCompanion(newCompanion);
     } catch (e) {
       console.warn('[Onboarding] API failed:', e);
-      Alert.alert(
-        'Connection problem',
-        "Couldn't reach the server to create your companion, so replies won't be real yet. Make sure the backend is reachable and try onboarding again.",
-      );
+      const code = e instanceof ApiError ? e.code : undefined;
+      if (code === 'UNDER_MINIMUM_AGE') {
+        Alert.alert(
+          'You need to be 15 or older',
+          "Whisper isn't available to under-15s, so we can't finish setting up your account. If your birth date is wrong, go back and correct it.",
+        );
+      } else if (code === 'ALREADY_ONBOARDED') {
+        // Onboarding ran twice (e.g. a retry after a dropped response). The
+        // account already exists — just take them home.
+        Alert.alert('You\'re already set up', 'Taking you to your companions.');
+        refreshUserCharacters();
+        go('home');
+      } else {
+        Alert.alert(
+          'Connection problem',
+          "Couldn't reach the server to create your companion, so replies won't be real yet. Make sure the backend is reachable and try onboarding again.",
+        );
+      }
     }
   };
 
@@ -412,8 +578,21 @@ export default function App() {
       case 'call': return <S12_VoiceCall go={(s) => go(s)} companion={currentCompanion} accent={t.orbHue} orbIntensity={1} minutesRemaining={t.minutesRemaining} userId={activeCharacterId ? userId ?? undefined : undefined} characterId={activeCharacterId ?? undefined} />;
       case 'chat': return <S14_Chat go={(s) => go(s)} companion={currentCompanion} accent={t.orbHue} capHit={t.capHit} userName={displayName} openMemorySheet={() => {}} userId={activeCharacterId ? userId ?? undefined : undefined} characterId={activeCharacterId ?? undefined} />;
       case 'crisis': return <S28_CrisisChat go={go} companion={currentCompanion} />;
-      case 'profile': return <S26_CompanionEdit go={(s) => go(s)} companion={currentCompanion} onDelete={() => {}} backTo={profileBack} />;
-      case 'user-profile': return <S_UserProfile go={(s) => go(s)} userName={displayName} userEmail={displayEmail} backTo={profileBack} />;
+      case 'profile': return <S26_CompanionEdit
+        go={(s) => go(s)}
+        companion={currentCompanion}
+        onSave={activeCharacterId ? (p) => { updateCharacter(activeCharacterId, p).then(refreshUserCharacters).catch(e => console.warn('[Companion] save failed:', e)); } : undefined}
+        onDelete={activeCharacterId ? () => handleDeleteCompanion(activeCharacterId) : () => {}}
+        backTo={profileBack}
+      />;
+      case 'user-profile': return <S_UserProfile
+        go={(sc) => { if (sc === 'login') signOut(); else go(sc); }}
+        userName={displayName}
+        userEmail={displayEmail}
+        onSave={(p) => { if (p.display_name) setUserName(p.display_name); updateMe(p).catch(e => console.warn('[Profile] save failed:', e)); }}
+        onDeleteAccount={deleteAccount}
+        backTo={profileBack}
+      />;
       case 'recap': return (
         <View style={{ flex: 1 }}>
           {renderHome(false)}
@@ -432,11 +611,21 @@ export default function App() {
       case 'character-creator': return <S18_CharacterCreator go={go} onSave={(c) => setCharacters(cs => [...cs, c])} />;
       case 'sandbox': return <S19_SandboxHome go={go} comingSoon={t.sandboxComingSoon} isMinor={isMinor} openMode={(m) => { setSandboxMode(m); setScreen('sandbox-session'); }} />;
       case 'sandbox-session': return <S20_SandboxSession go={go} mode={sandboxMode || SANDBOX_MODES[0]} />;
-      case 'settings': return <S21_Settings go={go} tier={t.tier} companions={companions} userName={displayName} userEmail={displayEmail} settings={settings} setSettings={setSettings} openCompanionProfile={openCompanionProfile} userId={userId ?? undefined} />;
+      // Settings' only route to 'login' is its Sign out row — intercept it so it
+      // actually ends the session instead of just showing the login screen.
+      case 'settings': return <S21_Settings go={(sc) => { if (sc === 'login') signOut(); else go(sc); }} tier={t.tier} companions={companions} userName={displayName} userEmail={displayEmail} settings={settings} setSettings={setSettings} openCompanionProfile={openCompanionProfile} userId={userId ?? undefined} onDeleteAccount={deleteAccount} />;
       case 'memories': return <S22_Memories go={go} characterId={activeCharacterId ?? undefined} companionName={currentCompanion.name} />;
       case 'paywall': return <S23_Paywall go={go} trigger={paywallTrigger} currentTier={t.tier} backTo={paywallBack} />;
       case 'topup': return <S24_TopUp go={go} backTo={topupBack} />;
-      case 'login': return <S30_Login go={go} isNew={isNewUser} />;
+      case 'login': return <S30_Login
+        isNew={isNewUser}
+        onGoogle={() => handleOAuth('google')}
+        onApple={() => handleOAuth('apple')}
+        onEmailRequest={handleEmailRequest}
+        onEmailVerify={handleEmailVerify}
+        busy={authBusy}
+        error={authError}
+      />;
       default: return renderHome(true);
     }
   };

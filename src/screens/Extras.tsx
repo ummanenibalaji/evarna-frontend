@@ -68,8 +68,13 @@ export function S25_NotifPermission({ go, companion }: { go: Go; companion: Comp
 type TraitKey = 'warmth' | 'humor' | 'directness' | 'energy' | 'formality';
 
 export function S26_CompanionEdit({
-  go, companion, onDelete, backTo = 'chat',
-}: { go: Go; companion: Companion; onChange?: (c: Companion) => void; onDelete?: () => void; backTo?: ScreenName }) {
+  go, companion, onSave, onDelete, backTo = 'chat',
+}: {
+  go: Go; companion: Companion; onChange?: (c: Companion) => void;
+  // Fired once, on leaving the screen, with whatever actually changed.
+  onSave?: (p: { name?: string; personality_sliders?: Record<string, number> }) => void;
+  onDelete?: () => void; backTo?: ScreenName;
+}) {
   const [name, setName] = useState(companion.name);
   const [editName, setEditName] = useState(false);
   const [archetype] = useState(companion.archetype || 'mentor');
@@ -80,6 +85,17 @@ export function S26_CompanionEdit({
   const [showAvatarSheet, setShowAvatarSheet] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
   const accent = ARCHETYPE_COLORS[archetype] || W.primary;
+  const initialTraits = useRef(traits).current;
+
+  // ponytail: saves on back-nav rather than per-edit — no save button to add and
+  // no PATCH per slider drag. Failures only log; add an inline error if it matters.
+  const saveAndLeave = () => {
+    const patch: { name?: string; personality_sliders?: Record<string, number> } = {};
+    if (name.trim() && name.trim() !== companion.name) patch.name = name.trim();
+    if (JSON.stringify(traits) !== JSON.stringify(initialTraits)) patch.personality_sliders = traits;
+    if (onSave && Object.keys(patch).length > 0) onSave(patch);
+    go(backTo);
+  };
 
   const sliders: { k: TraitKey; l: string; left: string; right: string }[] = [
     { k: 'warmth', l: 'Warmth', left: '❄️', right: '☀️' },
@@ -100,7 +116,7 @@ export function S26_CompanionEdit({
   return (
     <Screen label="26 Companion Profile">
       <TopBar
-        left={<Pressable onPress={() => go(backTo)} hitSlop={12}><NavIcon name="back" color={W.text2} /></Pressable>}
+        left={<Pressable onPress={saveAndLeave} hitSlop={12}><NavIcon name="back" color={W.text2} /></Pressable>}
         center={<Txt font="comp" weight={600} style={{ fontSize: 16, color: W.text }}>Edit {companion.name}</Txt>}
       />
       <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 24, gap: 18 }} showsVerticalScrollIndicator={false}>
@@ -570,11 +586,25 @@ function RecapSection({ title, children }: { title: string; children: React.Reac
 }
 
 // ─── S30 — LOGIN / RETURNING USER ───────────────────────────────────────────
-export function S30_Login({ go, isNew = false }: { go: Go; isNew?: boolean }) {
+export function S30_Login({
+  isNew = false, onGoogle, onApple, onEmailRequest, onEmailVerify, busy = false, error,
+}: {
+  isNew?: boolean;
+  onGoogle: () => void;
+  onApple: () => void;
+  // Resolves true when the code was actually sent — that's what flips this
+  // screen to its "enter the code" step.
+  onEmailRequest: (email: string) => Promise<boolean>;
+  onEmailVerify: (code: string) => void;
+  busy?: boolean;
+  error?: string | null;
+}) {
   const [showEmail, setShowEmail] = useState(false);
   const [email, setEmail] = useState('');
   const [sent, setSent] = useState(false);
+  const [code, setCode] = useState('');
   const welcome = useEntrance({ durationMs: 600, fromTranslateY: 0 });
+  const codeReady = /^\d{6}$/.test(code);
 
   return (
     <Screen label="30 Login" hideHomeIndicator>
@@ -594,7 +624,7 @@ export function S30_Login({ go, isNew = false }: { go: Go; isNew?: boolean }) {
 
         <View style={{ marginTop: 44, gap: 12 }}>
           {/* Apple */}
-          <Pressable onPress={() => go('age')} style={{ width: '100%', height: 52, backgroundColor: '#F0F0F5', borderRadius: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, paddingHorizontal: 16 }}>
+          <Pressable onPress={onApple} disabled={busy} style={{ opacity: busy ? 0.5 : 1, width: '100%', height: 52, backgroundColor: '#F0F0F5', borderRadius: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, paddingHorizontal: 16 }}>
             <Svg width={16} height={20} viewBox="0 0 24 28" fill="#000">
               <Path d="M18.7 14.6c0-3.2 2.6-4.8 2.7-4.9-1.5-2.2-3.8-2.5-4.6-2.5-2-.2-3.8 1.1-4.8 1.1-1 0-2.5-1.1-4.2-1.1-2.2 0-4.2 1.3-5.3 3.2-2.3 3.9-.6 9.7 1.6 12.9 1.1 1.6 2.4 3.3 4.1 3.3 1.7-.1 2.3-1.1 4.3-1.1s2.6 1.1 4.3 1c1.8 0 2.9-1.6 4-3.2 1.3-1.8 1.8-3.6 1.8-3.7-.1-.1-3.5-1.3-3.5-5z M15.7 5c.9-1.1 1.5-2.6 1.3-4.1-1.3.1-2.8.9-3.7 2-.8 1-1.6 2.5-1.4 3.9 1.4.1 2.9-.7 3.8-1.8z" />
             </Svg>
@@ -603,7 +633,7 @@ export function S30_Login({ go, isNew = false }: { go: Go; isNew?: boolean }) {
           {/* Google */}
           <View style={{ width: '100%', height: 52, borderRadius: 12, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' }}>
             <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-            <Pressable onPress={() => go('age')} style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: 'rgba(32,22,26,0.6)' }}>
+            <Pressable onPress={onGoogle} disabled={busy} style={{ flex: 1, opacity: busy ? 0.5 : 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: 'rgba(32,22,26,0.6)' }}>
               <Svg width={18} height={18} viewBox="0 0 18 18">
                 <Path fill="#4285F4" d="M17.6 9.2c0-.6-.1-1.2-.2-1.7H9v3.3h4.8c-.2 1.1-.9 2.1-1.8 2.7v2.3h3c1.7-1.6 2.6-3.9 2.6-6.6z" />
                 <Path fill="#34A853" d="M9 18c2.4 0 4.5-.8 6-2.2l-3-2.3c-.8.5-1.9.9-3 .9-2.3 0-4.3-1.6-5-3.7H1v2.3C2.5 15.9 5.5 18 9 18z" />
@@ -629,32 +659,50 @@ export function S30_Login({ go, isNew = false }: { go: Go; isNew?: boolean }) {
             <View style={{ borderWidth: 1, borderColor: 'rgba(255,138,118,0.15)', borderRadius: 14, padding: 14, gap: 10, overflow: 'hidden' }}>
               <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
               {sent ? (
-                <View style={{ paddingVertical: 6, paddingHorizontal: 4, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                  <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: W.accentDim, alignItems: 'center', justifyContent: 'center' }}>
-                    <NavIcon name="check" color={W.accent} />
+                <>
+                  <View style={{ paddingVertical: 6, paddingHorizontal: 4, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                    <View style={{ width: 32, height: 32, borderRadius: 16, backgroundColor: W.accentDim, alignItems: 'center', justifyContent: 'center' }}>
+                      <NavIcon name="check" color={W.accent} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Txt font="user" weight={500} style={{ fontSize: 14, color: W.text }}>Check your email</Txt>
+                      <Txt font="user" style={{ fontSize: 12, color: W.text2 }}>We sent a 6-digit code to {email}</Txt>
+                    </View>
                   </View>
-                  <View style={{ flex: 1 }}>
-                    <Txt font="user" weight={500} style={{ fontSize: 14, color: W.text }}>Check your email</Txt>
-                    <Txt font="user" style={{ fontSize: 12, color: W.text2 }}>We sent a sign-in link to {email}</Txt>
-                  </View>
-                </View>
+                  <TextInput value={code} onChangeText={(v) => setCode(v.replace(/[^0-9]/g, '').slice(0, 6))} placeholder="6-digit code" placeholderTextColor={W.text2} keyboardType="number-pad" autoFocus maxLength={6}
+                    style={{ width: '100%', backgroundColor: 'rgba(37,40,54,0.7)', color: W.text, borderWidth: 1, borderColor: 'rgba(255,255,255,0.05)', height: 44, borderRadius: 10, paddingHorizontal: 14, fontFamily: 'Outfit_400Regular', fontSize: 15, letterSpacing: 6 }} />
+                  <Pressable onPress={() => codeReady && !busy && onEmailVerify(code)} style={{ width: '100%', height: 44, backgroundColor: W.primary, borderRadius: 10, alignItems: 'center', justifyContent: 'center', opacity: codeReady && !busy ? 1 : 0.5 }}>
+                    <Txt font="user" weight={500} style={{ fontSize: 14, color: '#fff' }}>{busy ? 'Signing in…' : 'Verify code'}</Txt>
+                  </Pressable>
+                  <Pressable onPress={() => { setCode(''); setSent(false); }} style={{ alignItems: 'center', paddingVertical: 4 }}>
+                    <Txt font="user" style={{ fontSize: 12, color: W.text2 }}>Use a different email</Txt>
+                  </Pressable>
+                </>
               ) : (
                 <>
                   <TextInput value={email} onChangeText={setEmail} placeholder="Email address" placeholderTextColor={W.text2} keyboardType="email-address" autoCapitalize="none" autoFocus
                     style={{ width: '100%', backgroundColor: 'rgba(48,32,40,0.7)', color: W.text, borderWidth: 1, borderColor: 'rgba(255,255,255,0.05)', height: 44, borderRadius: 10, paddingHorizontal: 14, fontFamily: 'Outfit_400Regular', fontSize: 15 }} />
-                  <Pressable onPress={() => email.includes('@') && setSent(true)} style={{ width: '100%', height: 44, backgroundColor: W.primary, borderRadius: 10, alignItems: 'center', justifyContent: 'center', opacity: email.includes('@') ? 1 : 0.5 }}>
-                    <Txt font="user" weight={500} style={{ fontSize: 14, color: '#fff' }}>Send magic link</Txt>
+                  <Pressable
+                    onPress={async () => {
+                      if (!email.includes('@') || busy) return;
+                      if (await onEmailRequest(email.trim())) setSent(true);
+                    }}
+                    style={{ width: '100%', height: 44, backgroundColor: W.primary, borderRadius: 10, alignItems: 'center', justifyContent: 'center', opacity: email.includes('@') && !busy ? 1 : 0.5 }}>
+                    <Txt font="user" weight={500} style={{ fontSize: 14, color: '#fff' }}>{busy ? 'Sending…' : 'Send code'}</Txt>
                   </Pressable>
                 </>
               )}
             </View>
           )}
+          {error ? (
+            <Txt font="user" style={{ marginTop: 2, fontSize: 12, color: W.danger, textAlign: 'center' }}>{error}</Txt>
+          ) : null}
         </View>
 
         <View style={{ flex: 1 }} />
         <View style={{ flexDirection: 'row', justifyContent: 'center' }}>
           <Txt font="user" style={{ fontSize: 13, color: W.text2 }}>Don't have an account? </Txt>
-          <Pressable onPress={() => go('age')}><Txt font="user" weight={500} style={{ fontSize: 13, color: W.primary }}>Get started</Txt></Pressable>
+          <Pressable onPress={() => setShowEmail(true)}><Txt font="user" weight={500} style={{ fontSize: 13, color: W.primary }}>Get started</Txt></Pressable>
         </View>
       </View>
       <HomeIndicator />

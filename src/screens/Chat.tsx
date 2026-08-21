@@ -4,9 +4,9 @@
 // with RadialGlow / BlurView / Animated equivalents.
 
 import React, { useEffect, useRef, useState } from 'react';
-import { View, ScrollView, Pressable, Animated, Easing, Linking } from 'react-native';
+import { View, ScrollView, Pressable, Animated, Easing, Linking, TextInput } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import { startSession, endSession, getCharacterSessions, getConversationTurns, getMemories } from '../api';
+import { startSession, endSession, getCharacterSessions, getConversationTurns, getMemories, createReport, ReportReason } from '../api';
 import { streamConversation } from '../api/client';
 import { useVoiceCall } from '../hooks/useVoiceCall';
 import { useWave } from '../theme/animations';
@@ -16,7 +16,7 @@ import { RadialGlow } from '../components/RadialGlow';
 import { Orb } from '../components/Orb';
 import { NavIcon, IconName } from '../components/NavIcon';
 import { Txt } from '../components/Txt';
-import { GlassPill, PrimaryButton, MemoryBadge, MinuteWarningBanner, QuickReply } from '../components/Atoms';
+import { GlassPill, Pill, PrimaryButton, MemoryBadge, MinuteWarningBanner, QuickReply } from '../components/Atoms';
 import { Bubble, BubbleMem, ChatInput, TypingDots, VoiceNoteBubble, CapHitCard, Coachmark, RecallIndicator, DayDivider } from '../components/ChatBits';
 import { Avatar } from '../components/Avatar';
 import { W, GRAD, alpha, rgba } from '../theme/theme';
@@ -27,6 +27,8 @@ const fmt = (s: number) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${Str
 
 type Msg = {
   from: string;
+  // Backend turn id for assistant replies — what a content report points at.
+  turnId?: string;
   text?: string;
   memoryRefs?: string[];
   duration?: number;
@@ -63,7 +65,7 @@ export function S09_FirstChat({ go, companion, userId, characterId }: { go: Go; 
   const runBackendTurn = (sid: string, text: string, userMsgCount: number) => {
     abortRef.current?.abort();
     abortRef.current = streamConversation(
-      { session_id: sid, character_id: characterId!, user_id: userId!, message: text },
+      { session_id: sid, message: text },
       {
         onChunk: (content) => {
           setMsgs(m => {
@@ -103,7 +105,7 @@ export function S09_FirstChat({ go, companion, userId, characterId }: { go: Go; 
   useEffect(() => {
     if (!userId || !characterId) return;
     let mounted = true;
-    startSession(userId, characterId, 'text')
+    startSession(characterId, 'text')
       .then(res => {
         if (!mounted) return;
         setSessionId(res.session_id);
@@ -528,6 +530,8 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
   // the reason the design puts memory in gold everywhere else.
   const [memoryCount, setMemoryCount] = useState<number | null>(null);
   const [seenFirstMemory, setSeenFirstMemory] = useState(false);
+  // Long-pressed assistant turn awaiting a report (Apple Guideline 1.2).
+  const [reportTurn, setReportTurn] = useState<string | null>(null);
   const scrollRef = useRef<ScrollView>(null);
 
   // Active backend session ID (null when no backend or not yet started)
@@ -553,7 +557,7 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
   const runBackendTurn = (sid: string, text: string) => {
     abortRef.current?.abort();
     abortRef.current = streamConversation(
-      { session_id: sid, character_id: characterId!, user_id: userId!, message: text },
+      { session_id: sid, message: text },
       {
         onChunk: (content) => {
           setMsgs(m => {
@@ -563,8 +567,8 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
             return updated;
           });
         },
-        onDone: () => {
-          finishStreaming({});
+        onDone: (turnId) => {
+          finishStreaming({ turnId });
           setShowBadge(true);
           setTimeout(() => setShowBadge(false), 3000);
         },
@@ -590,7 +594,7 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
   useEffect(() => {
     if (!userId || !characterId) return;
     let mounted = true;
-    startSession(userId, characterId, 'text')
+    startSession(characterId, 'text')
       .then(res => {
         if (!mounted) return;
         setSessionId(res.session_id);
@@ -633,6 +637,7 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
           if (cancelled) return;
           setMsgs(turns.map(t => ({
             from: t.role === 'user' ? 'user' : 'comp',
+            turnId: t._id,
             text: t.content_text,
           })));
           return;
@@ -796,7 +801,11 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
                       <TypingDots />
                     </View>
                   );
-                return <BubbleMem key={i} from={m.from} text={m.text || ''} memoryRefs={m.memoryRefs} accent={accent} onMemoryClick={openMemorySheet} />;
+                // Long-press only on companion messages, and only once the turn
+                // has an id — there is nothing to report until the backend has
+                // persisted it.
+                return <BubbleMem key={i} from={m.from} text={m.text || ''} memoryRefs={m.memoryRefs} accent={accent} onMemoryClick={openMemorySheet}
+                  onLongPress={m.from === 'comp' && m.turnId ? () => setReportTurn(m.turnId!) : undefined} />;
               })}
               {typing && <TypingDots />}
             </>
@@ -837,8 +846,67 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
           ))}
         </ScrollView>
       ) : null}
+      {reportTurn && <ReportSheet turnId={reportTurn} onClose={() => setReportTurn(null)} />}
       <ChatInput draft={draft} setDraft={setDraft} onSend={send} onMic={() => setRecording(true)} companionName={companion.name} />
     </Screen>
+  );
+}
+
+// ─── ReportSheet — report an AI reply (long-press a companion message) ────
+const REPORT_REASONS: { k: ReportReason; l: string }[] = [
+  { k: 'harmful', l: 'Harmful or unsafe' },
+  { k: 'sexual', l: 'Sexual content' },
+  { k: 'inappropriate_minor', l: 'Inappropriate for a minor' },
+  { k: 'inaccurate', l: 'Inaccurate' },
+  { k: 'other', l: 'Something else' },
+];
+
+function ReportSheet({ turnId, onClose }: { turnId: string; onClose: () => void }) {
+  const [reason, setReason] = useState<ReportReason | null>(null);
+  const [note, setNote] = useState('');
+  const [state, setState] = useState<'idle' | 'sending' | 'sent'>('idle');
+
+  const submit = async () => {
+    if (!reason || state !== 'idle') return;
+    setState('sending');
+    try {
+      await createReport(turnId, reason, note.trim() || undefined);
+      setState('sent');
+      setTimeout(onClose, 1200);
+    } catch (e) {
+      console.warn('[Report] failed:', e);
+      setState('idle');
+    }
+  };
+
+  return (
+    <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(8,9,13,0.6)', zIndex: 60, justifyContent: 'flex-end' }}>
+      <Pressable onPress={onClose} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
+      <View style={{ borderTopLeftRadius: 28, borderTopRightRadius: 28, overflow: 'hidden', borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.1)', backgroundColor: 'rgba(19,21,30,0.96)' }}>
+        <View style={{ paddingHorizontal: 24, paddingTop: 14, paddingBottom: 32 }}>
+          <View style={{ width: 36, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.18)', alignSelf: 'center', marginBottom: 18 }} />
+          {state === 'sent' ? (
+            <Txt font="comp" weight={600} style={{ fontSize: 18, color: W.cream, textAlign: 'center', paddingVertical: 16 }}>Thanks — we'll review it.</Txt>
+          ) : (
+            <>
+              <Txt font="comp" weight={600} style={{ fontSize: 20, color: W.cream, letterSpacing: -0.3 }}>Report this reply</Txt>
+              <Txt font="user" style={{ marginTop: 8, fontSize: 13, color: W.text2, lineHeight: 20 }}>What was wrong with it?</Txt>
+              <View style={{ marginTop: 14, gap: 8 }}>
+                {REPORT_REASONS.map(r => (
+                  <Pill key={r.k} active={reason === r.k} onPress={() => setReason(r.k)} style={{ height: 40 }} textStyle={{ fontSize: 13 }}>{r.l}</Pill>
+                ))}
+              </View>
+              <TextInput
+                value={note} onChangeText={(v) => setNote(v.slice(0, 1000))} placeholder="Add a note (optional)" placeholderTextColor={W.text2} multiline
+                style={{ marginTop: 12, minHeight: 60, backgroundColor: 'rgba(37,40,54,0.7)', color: W.text, borderWidth: 1, borderColor: 'rgba(255,255,255,0.05)', borderRadius: 10, paddingHorizontal: 14, paddingTop: 10, fontFamily: 'Outfit_400Regular', fontSize: 14 }} />
+              <View style={{ marginTop: 12, opacity: reason && state === 'idle' ? 1 : 0.5 }}>
+                <PrimaryButton onPress={submit}>{state === 'sending' ? 'Sending…' : 'Submit report'}</PrimaryButton>
+              </View>
+            </>
+          )}
+        </View>
+      </View>
+    </View>
   );
 }
 

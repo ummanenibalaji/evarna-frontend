@@ -4,6 +4,8 @@
 //   Physical device→ EXPO_PUBLIC_API_URL=http://<your-LAN-IP>:3000
 //   Staging / prod → EXPO_PUBLIC_API_URL=https://api.evarna.app
 // Falls back to localhost:3000 if the variable is unset (simulator dev).
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
 export const BASE_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:3000';
 export const API_BASE = `${BASE_URL}/api/v1`;
 
@@ -13,9 +15,64 @@ const TUNNEL_HEADERS = { 'bypass-tunnel-reminder': 'true' };
 
 type ApiResponse<T> = { success: boolean; data: T };
 
+// ── Auth token ─────────────────────────────────────────────────────────────
+// Kept in memory (every request reads it synchronously) and mirrored to
+// AsyncStorage so a relaunch stays signed in. loadAuthToken() rehydrates it.
+const TOKEN_KEY = 'whisper_auth_token';
+let authToken: string | null = null;
+
+/** Non-2xx that isn't a 401. Carries the backend's `code` so callers can tell
+ *  ALREADY_ONBOARDED / UNDER_MINIMUM_AGE apart from a generic failure. */
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number, readonly code?: string) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+/** Thrown on any 401 so the UI can route back to login instead of showing a generic failure. */
+export class AuthExpiredError extends Error {
+  constructor(message = 'Session expired') {
+    super(message);
+    this.name = 'AuthExpiredError';
+  }
+}
+
+export function getAuthToken(): string | null {
+  return authToken;
+}
+
+export function setAuthToken(t: string | null) {
+  authToken = t;
+  // Fire-and-forget: the in-memory copy is what requests use, so a failed
+  // write only costs the user a re-login after a cold start.
+  (t ? AsyncStorage.setItem(TOKEN_KEY, t) : AsyncStorage.removeItem(TOKEN_KEY)).catch(() => {});
+}
+
+/** Read the persisted token into memory. Call once on app start, before any API call. */
+export async function loadAuthToken(): Promise<string | null> {
+  authToken = await AsyncStorage.getItem(TOKEN_KEY).catch(() => null);
+  return authToken;
+}
+
+const authHeaders = (): Record<string, string> =>
+  authToken ? { Authorization: `Bearer ${authToken}` } : {};
+
+// 401 → the token is dead; drop it so nothing retries with it. Anything else
+// non-2xx surfaces the backend's error code alongside the status.
+async function assertOk(res: Response, label: string) {
+  if (res.ok) return;
+  if (res.status === 401) {
+    setAuthToken(null);
+    throw new AuthExpiredError(`${label} → 401`);
+  }
+  const body = (await res.json().catch(() => null)) as { error?: string; code?: string } | null;
+  throw new ApiError(`${label} → ${res.status}${body?.code ? ` ${body.code}` : ''}`, res.status, body?.code);
+}
+
 export async function apiGet<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, { headers: { ...TUNNEL_HEADERS } });
-  if (!res.ok) throw new Error(`GET ${path} → ${res.status}`);
+  const res = await fetch(`${API_BASE}${path}`, { headers: { ...TUNNEL_HEADERS, ...authHeaders() } });
+  await assertOk(res, `GET ${path}`);
   const json = (await res.json()) as ApiResponse<T>;
   return json.data;
 }
@@ -23,17 +80,33 @@ export async function apiGet<T>(path: string): Promise<T> {
 export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...TUNNEL_HEADERS },
+    headers: { 'Content-Type': 'application/json', ...TUNNEL_HEADERS, ...authHeaders() },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`POST ${path} → ${res.status}`);
+  await assertOk(res, `POST ${path}`);
   const json = (await res.json()) as ApiResponse<T>;
   return json.data;
 }
 
-export async function apiDelete<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, { method: 'DELETE', headers: { ...TUNNEL_HEADERS } });
-  if (!res.ok) throw new Error(`DELETE ${path} → ${res.status}`);
+export async function apiPatch<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...TUNNEL_HEADERS, ...authHeaders() },
+    body: JSON.stringify(body),
+  });
+  await assertOk(res, `PATCH ${path}`);
+  const json = (await res.json()) as ApiResponse<T>;
+  return json.data;
+}
+
+// `body` is only sent when given — DELETE /users/me requires { confirm: 'DELETE' }.
+export async function apiDelete<T>(path: string, body?: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'DELETE',
+    headers: { ...TUNNEL_HEADERS, ...authHeaders(), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  await assertOk(res, `DELETE ${path}`);
   const json = (await res.json()) as ApiResponse<T>;
   return json.data;
 }
@@ -56,7 +129,7 @@ export interface SseHandlers {
  *   event: error\ndata: {"message":"..."}\n\n
  */
 export function streamConversation(
-  payload: { session_id: string; character_id: string; user_id: string; message: string },
+  payload: { session_id: string; message: string },
   handlers: SseHandlers,
 ): AbortController {
   const ctrl = new AbortController();
@@ -70,6 +143,7 @@ export function streamConversation(
           'Content-Type': 'application/json',
           Accept: 'text/event-stream',
           ...TUNNEL_HEADERS,
+          ...authHeaders(),
         },
         body: JSON.stringify(payload),
         signal: ctrl.signal,
@@ -79,6 +153,9 @@ export function streamConversation(
       return;
     }
 
+    // ponytail: SSE reports auth failure as a plain message rather than AuthExpiredError
+    // (handlers only take strings). Widen SseHandlers if chat needs to auto-route to login.
+    if (res.status === 401) { setAuthToken(null); handlers.onError('UNAUTHENTICATED'); return; }
     if (!res.ok) { handlers.onError(`HTTP ${res.status}`); return; }
 
     const parseBlock = (text: string) => {

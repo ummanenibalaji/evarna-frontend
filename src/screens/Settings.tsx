@@ -6,7 +6,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   View, ScrollView, Pressable, Animated, Easing,
-  LayoutChangeEvent, PanResponder, TextInput,
+  LayoutChangeEvent, PanResponder, TextInput, Share,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
@@ -19,7 +19,7 @@ import { useEntrance, usePressScale, useCountUp } from '../theme/animations';
 import { W, GRAD, alpha, rgba } from '../theme/theme';
 import { ARCHETYPE_COLORS, ARCHETYPE_LABEL, MEM_TYPES, SAMPLE_MEMORIES, Companion, Tier, Memory, RITUAL } from '../data/config';
 import { Go, ScreenName } from '../navigation/types';
-import { getMemories, deleteMemory, deleteAllMemories, ApiMemory, getUserStats, ApiUserStats } from '../api';
+import { getMemories, deleteMemory, deleteAllMemories, ApiMemory, getUserStats, ApiUserStats, exportMyData } from '../api';
 
 export interface AppSettings {
   dailyCheckin: boolean;
@@ -39,22 +39,40 @@ interface SettingsProps {
   setSettings: (s: AppSettings) => void;
   openCompanionProfile?: (c: Companion) => void;
   userId?: string;
+  // Deletes the account server-side, then signs out. Owned by App.tsx.
+  onDeleteAccount?: () => void | Promise<void>;
 }
 
-export function S21_Settings({ go, tier, companions, userName, userEmail, settings, setSettings, openCompanionProfile, userId }: SettingsProps) {
+export function S21_Settings({ go, tier, companions, userName, userEmail, settings, setSettings, openCompanionProfile, userId, onDeleteAccount }: SettingsProps) {
   const [voiceSpeed, setVoiceSpeed] = useState(1.0);
   const [userStats, setUserStats] = useState<ApiUserStats | null>(null);
 
   useEffect(() => {
     if (!userId) return;
-    getUserStats(userId).then(setUserStats).catch(() => {});
+    getUserStats().then(setUserStats).catch(() => {});
   }, [userId]);
   const [bgSoundIdx, setBgSoundIdx] = useState(0);
   // Notification time as an exact moment of day.
   const [notifHour, setNotifHour] = useState(21);   // 9 PM default
   const [notifMinute, setNotifMinute] = useState(0);
   const [showTimePicker, setShowTimePicker] = useState(false);
-  const [info, setInfo] = useState<{ title: string; body: string } | null>(null);
+  const [info, setInfo] = useState<{ title: string; body: string; danger?: { label: string; onPress: () => void } } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // ponytail: hands the whole export JSON to the OS share sheet. Fine for a
+  // normal account; swap for a file write + share if exports get large.
+  const exportData = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const data = await exportMyData();
+      await Share.share({ message: JSON.stringify(data, null, 2) });
+    } catch {
+      setInfo({ title: 'Export failed', body: "We couldn't prepare your data right now. Please try again." });
+    } finally {
+      setBusy(false);
+    }
+  };
   const enter = useEntrance({ durationMs: 420, fromTranslateY: 14 });
 
   const BG_SOUNDS = ['Off', 'Rain', 'Ocean', 'Fireplace', 'White noise'];
@@ -216,7 +234,7 @@ export function S21_Settings({ go, tier, companions, userName, userEmail, settin
 
         <Section title="Privacy & safety">
           <Row
-            onPress={() => setInfo({ title: 'Export my data', body: 'We\'ll prepare a copy of your conversations, memories, and account info and email you a download link within 24 hours.' })}
+            onPress={exportData}
             label="Export my data"
             right={<NavIcon name="right" color={W.text2} size={18} />}
           />
@@ -226,7 +244,11 @@ export function S21_Settings({ go, tier, companions, userName, userEmail, settin
             right={<NavIcon name="right" color={W.text2} size={18} />}
           />
           <Row
-            onPress={() => setInfo({ title: 'Delete my account', body: 'This permanently removes your account, all companions, and every memory. This cannot be undone. Contact support@whisper.app to confirm deletion.' })}
+            onPress={() => setInfo({
+              title: 'Delete my account',
+              body: 'This permanently removes your account, every companion, and every memory. It cannot be undone and we cannot recover any of it afterwards.',
+              danger: { label: 'Delete permanently', onPress: () => { setInfo(null); onDeleteAccount && onDeleteAccount(); } },
+            })}
             label={<Txt font="user" style={{ fontSize: 14, color: W.danger }}>Delete my account</Txt>}
             right={<NavIcon name="right" color={W.danger} size={18} />}
           />
@@ -253,7 +275,7 @@ export function S21_Settings({ go, tier, companions, userName, userEmail, settin
       </Animated.ScrollView>
 
       {/* Lightweight info sheet for informational rows */}
-      {info && <InfoSheet title={info.title} body={info.body} onClose={() => setInfo(null)} />}
+      {info && <InfoSheet title={info.title} body={info.body} danger={info.danger} onClose={() => setInfo(null)} />}
       {showTimePicker && (
         <TimePickerSheet
           hour={notifHour}
@@ -371,16 +393,24 @@ function Wheel({ items, value, onChange, width }: { items: string[]; value: stri
 }
 
 // ─── S_UserProfile — edit your own account (separate from companion edit) ──
-export function S_UserProfile({ go, userName, userEmail, backTo = 'settings' }: { go: Go; userName: string; userEmail: string; backTo?: ScreenName }) {
+export function S_UserProfile({ go, userName, userEmail, onSave, onDeleteAccount, backTo = 'settings' }: { go: Go; userName: string; userEmail: string; onSave?: (p: { display_name?: string }) => void; onDeleteAccount?: () => void | Promise<void>; backTo?: ScreenName }) {
   const [name, setName] = useState(userName);
   const [email, setEmail] = useState(userEmail);
   const [editName, setEditName] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const enter = useEntrance({ durationMs: 420, fromTranslateY: 16 });
+
+  // Same save-on-back pattern as the companion edit screen. Email isn't
+  // editable server-side (it's the sign-in identity), so it isn't sent.
+  const saveAndLeave = () => {
+    if (onSave && name.trim() && name.trim() !== userName) onSave({ display_name: name.trim() });
+    go(backTo);
+  };
 
   return (
     <Screen>
       <TopBar
-        left={<Pressable onPress={() => go(backTo)} hitSlop={12}><NavIcon name="back" color={W.text2} /></Pressable>}
+        left={<Pressable onPress={saveAndLeave} hitSlop={12}><NavIcon name="back" color={W.text2} /></Pressable>}
         center={<Txt font="comp" weight={600} style={{ fontSize: 16, color: W.text }}>Your profile</Txt>}
       />
       <Animated.ScrollView style={[{ flex: 1 }, enter]} contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 24, gap: 18 }} showsVerticalScrollIndicator={false}>
@@ -434,15 +464,23 @@ export function S_UserProfile({ go, userName, userEmail, backTo = 'settings' }: 
 
         <Section title="Account actions">
           <Row label="Sign out" right={<NavIcon name="right" color={W.text2} size={18} />} onPress={() => go('login')} />
-          <Row label={<Txt font="user" style={{ fontSize: 14, color: W.danger }}>Delete account</Txt>} right={<NavIcon name="right" color={W.danger} size={18} />} onPress={() => {}} />
+          <Row label={<Txt font="user" style={{ fontSize: 14, color: W.danger }}>Delete account</Txt>} right={<NavIcon name="right" color={W.danger} size={18} />} onPress={() => setConfirmDelete(true)} />
         </Section>
       </Animated.ScrollView>
+      {confirmDelete && (
+        <InfoSheet
+          title="Delete my account"
+          body="This permanently removes your account, every companion, and every memory. It cannot be undone and we cannot recover any of it afterwards."
+          danger={{ label: 'Delete permanently', onPress: () => { setConfirmDelete(false); onDeleteAccount && onDeleteAccount(); } }}
+          onClose={() => setConfirmDelete(false)}
+        />
+      )}
     </Screen>
   );
 }
 
 // ─── InfoSheet — simple bottom sheet for informational settings rows ──────
-function InfoSheet({ title, body, onClose }: { title: string; body: string; onClose: () => void }) {
+function InfoSheet({ title, body, onClose, danger }: { title: string; body: string; onClose: () => void; danger?: { label: string; onPress: () => void } }) {
   return (
     <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(14,10,13,0.6)', zIndex: 50, justifyContent: 'flex-end' }}>
       <Pressable onPress={onClose} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
@@ -453,8 +491,13 @@ function InfoSheet({ title, body, onClose }: { title: string; body: string; onCl
           <View style={{ width: 36, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.18)', alignSelf: 'center', marginBottom: 20 }} />
           <Txt font="comp" weight={600} style={{ fontSize: 20, color: W.cream, letterSpacing: -0.3 }}>{title}</Txt>
           <Txt font="user" style={{ marginTop: 12, fontSize: 14, color: W.text2, lineHeight: 22, letterSpacing: 0.15 }}>{body}</Txt>
-          <View style={{ marginTop: 24 }}>
-            <PrimaryButton onPress={onClose}>Got it</PrimaryButton>
+          <View style={{ marginTop: 24, gap: 10 }}>
+            {danger ? (
+              <Pressable onPress={danger.onPress} style={{ height: 52, borderRadius: 14, borderWidth: 1, borderColor: alpha(W.danger, '66'), backgroundColor: alpha(W.danger, '1a'), alignItems: 'center', justifyContent: 'center' }}>
+                <Txt font="user" weight={600} style={{ fontSize: 15, color: W.danger }}>{danger.label}</Txt>
+              </Pressable>
+            ) : null}
+            <PrimaryButton onPress={onClose}>{danger ? 'Cancel' : 'Got it'}</PrimaryButton>
           </View>
         </View>
       </View>

@@ -1,4 +1,44 @@
-import { apiGet, apiPost, apiDelete } from './client';
+import { apiGet, apiPost, apiPatch, apiDelete } from './client';
+
+// ── Auth ───────────────────────────────────────────────────────────────────
+
+// Every sign-in route returns the same session shape. `token` goes to
+// setAuthToken(); everything after that is authenticated by header, not by a
+// client-supplied user_id.
+export interface AuthSession {
+  token: string;
+  user_id: string;
+  onboarding_completed: boolean;
+}
+
+export const signInWithGoogle = (idToken: string): Promise<AuthSession> =>
+  apiPost<AuthSession>('/auth/google', { id_token: idToken });
+
+export const signInWithApple = (idToken: string): Promise<AuthSession> =>
+  apiPost<AuthSession>('/auth/apple', { id_token: idToken });
+
+export const requestEmailCode = (email: string): Promise<{ sent: boolean }> =>
+  apiPost<{ sent: boolean }>('/auth/email/request', { email });
+
+// `code` is exactly 6 digits.
+export const verifyEmailCode = (email: string, code: string): Promise<AuthSession> =>
+  apiPost<AuthSession>('/auth/email/verify', { email, code });
+
+export interface ApiMe {
+  user_id: string;
+  email: string;
+  display_name: string;
+  gender: string;
+  communication_style: string;
+  onboarding_completed: boolean;
+  is_minor: boolean;
+  member_since: string;
+}
+
+export const getMe = (): Promise<ApiMe> => apiGet<ApiMe>('/auth/me');
+
+// Signs out ALL devices.
+export const logout = (): Promise<unknown> => apiPost('/auth/logout', {});
 
 // ── Onboarding ─────────────────────────────────────────────────────────────
 
@@ -27,8 +67,9 @@ export const onboardUser = (p: OnboardPayload): Promise<OnboardResponse> =>
 
 // ── Characters ─────────────────────────────────────────────────────────────
 
-// Shape returned by GET /characters/user/:user_id. The backend is the source of
-// truth for archetype names ("bestfriend" — frontend maps that to "friend").
+// Shape returned by GET /characters (scoped to the signed-in user by the token).
+// The backend is the source of truth for archetype names ("bestfriend" —
+// frontend maps that to "friend").
 export interface ApiCharacter {
   _id: string;
   user_id: string;
@@ -44,13 +85,12 @@ export interface ApiCharacter {
 
 // Backend returns { characters: [...] } inside ApiResponse.data; unwrap here so
 // the consumer just gets the array.
-export const getUserCharacters = async (userId: string): Promise<ApiCharacter[]> => {
-  const res = await apiGet<{ characters: ApiCharacter[] }>(`/characters/user/${userId}`);
+export const getUserCharacters = async (): Promise<ApiCharacter[]> => {
+  const res = await apiGet<{ characters: ApiCharacter[] }>('/characters');
   return res.characters;
 };
 
 export interface CreateCharacterPayload {
-  user_id: string;
   archetype: string;
   gender: string;
   voice_id: string;
@@ -64,6 +104,19 @@ export interface CreateCharacterResponse {
 export const createCharacter = (p: CreateCharacterPayload): Promise<CreateCharacterResponse> =>
   apiPost<CreateCharacterResponse>('/characters/create', p);
 
+export interface UpdateCharacterPayload {
+  name?: string;
+  voice_id?: string;
+  personality_sliders?: Record<string, number>;
+}
+
+export const updateCharacter = (characterId: string, p: UpdateCharacterPayload): Promise<unknown> =>
+  apiPatch(`/characters/${characterId}`, p);
+
+// Soft delete — the companion disappears from GET /characters.
+export const deleteCharacter = (characterId: string): Promise<unknown> =>
+  apiDelete(`/characters/${characterId}`);
+
 // ── User stats ─────────────────────────────────────────────────────────────
 
 export interface ApiUserStats {
@@ -74,17 +127,35 @@ export interface ApiUserStats {
   member_since: string;
 }
 
-export const getUserStats = (userId: string): Promise<ApiUserStats> =>
-  apiGet<ApiUserStats>(`/users/${userId}/stats`);
+export const getUserStats = (): Promise<ApiUserStats> =>
+  apiGet<ApiUserStats>('/users/me/stats');
+
+// ── Account ────────────────────────────────────────────────────────────────
+
+export interface UpdateMePayload {
+  display_name?: string;
+  communication_style?: string;
+  gender?: string;
+}
+
+export const updateMe = (p: UpdateMePayload): Promise<unknown> =>
+  apiPatch('/users/me', p);
+
+// Irreversible. The backend requires the literal confirmation string.
+export const deleteMe = (): Promise<unknown> =>
+  apiDelete('/users/me', { confirm: 'DELETE' });
+
+// The user's full data as JSON (App Store data-portability requirement).
+export const exportMyData = (): Promise<unknown> =>
+  apiGet('/users/me/export');
 
 // ── Sessions ───────────────────────────────────────────────────────────────
 
 export const startSession = (
-  userId: string,
   characterId: string,
   sessionType: 'text' | 'voice' = 'text',
 ): Promise<{ session_id: string }> =>
-  apiPost('/sessions/start', { user_id: userId, character_id: characterId, session_type: sessionType });
+  apiPost('/sessions/start', { character_id: characterId, session_type: sessionType });
 
 export const endSession = (sessionId: string): Promise<unknown> =>
   apiPost(`/sessions/${sessionId}/end`, {});
@@ -154,10 +225,18 @@ export interface VoiceSessionResponse {
   room_name: string;
 }
 
-export const startVoiceSession = (userId: string, characterId: string): Promise<VoiceSessionResponse> =>
-  apiPost('/voice/sessions/start', { user_id: userId, character_id: characterId });
+export const startVoiceSession = (characterId: string): Promise<VoiceSessionResponse> =>
+  apiPost('/voice/sessions/start', { character_id: characterId });
 
 // Defensive end-of-call call. Backend also auto-ends on LiveKit ParticipantDisconnected,
 // so this is idempotent and safe to fire-and-forget.
 export const endVoiceSession = (sessionId: string): Promise<unknown> =>
   apiPost(`/sessions/${sessionId}/end`, {});
+
+// ── Reports ────────────────────────────────────────────────────────────────
+
+// Apple Guideline 1.2 — users must be able to report AI-generated content.
+export type ReportReason = 'harmful' | 'sexual' | 'inappropriate_minor' | 'inaccurate' | 'other';
+
+export const createReport = (turnId: string, reason: ReportReason, note?: string): Promise<{ report_id: string }> =>
+  apiPost('/reports', { turn_id: turnId, reason, ...(note ? { note: note.slice(0, 1000) } : {}) });

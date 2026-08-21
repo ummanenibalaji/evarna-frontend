@@ -140,16 +140,23 @@ function RefText({
 
 // ─── BubbleMem (glassy, with tappable memory refs) ───────────────────────
 export function BubbleMem({
-  from, text, memoryRefs = [], accent = W.primary, onMemoryClick,
+  from, text, memoryRefs = [], accent = W.primary, onMemoryClick, onLongPress,
 }: {
-  from: string; text: string; memoryRefs?: string[]; accent?: string; onMemoryClick?: (ref: string) => void;
+  from: string; text: string; memoryRefs?: string[]; accent?: string;
+  onMemoryClick?: (ref: string) => void; onLongPress?: () => void;
 }) {
   const isUser = from === 'user';
   return (
     <BubbleEntrance isUser={isUser}>
-      <BubbleSkin isUser={isUser} accent={accent}>
-        <RefText text={text} memoryRefs={memoryRefs} isUser={isUser} onMemoryClick={onMemoryClick} asMemoryRef />
-      </BubbleSkin>
+      {/* Pressable wraps BubbleSkin rather than replacing it: the skin owns the
+          Ember Dusk styling, this only adds the long-press that opens the
+          report sheet. App Store Guideline 1.2 requires a way to report
+          AI-generated content. */}
+      <Pressable onLongPress={onLongPress} delayLongPress={400} disabled={!onLongPress}>
+        <BubbleSkin isUser={isUser} accent={accent}>
+          <RefText text={text} memoryRefs={memoryRefs} isUser={isUser} onMemoryClick={onMemoryClick} asMemoryRef />
+        </BubbleSkin>
+      </Pressable>
     </BubbleEntrance>
   );
 }
