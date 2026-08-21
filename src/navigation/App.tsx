@@ -7,13 +7,14 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { W } from '../theme/theme';
 import { ScreenName } from './types';
 import {
-  CONFIG, PLUS_COMPANIONS, FREE_COMPANIONS, STUDIO_ACTIVE_CONVOS,
+  CONFIG, PLUS_COMPANIONS, FREE_COMPANIONS,
   SCENARIOS, SANDBOX_MODES, ARCHETYPE_COLORS, Companion, Scenario, SandboxMode,
 } from '../data/config';
 import {
   onboardUser, getVoices, ApiVoice, getUserCharacters, ApiCharacter, createCharacter,
   signInWithGoogle, signInWithApple, requestEmailCode, verifyEmailCode, getMe, logout, AuthSession,
   updateCharacter, deleteCharacter, updateMe, deleteMe,
+  getScenarios, getStudioCharacters, ApiScenario, ApiStudioCharacter,
 } from '../api';
 import { loadAuthToken, setAuthToken, ApiError } from '../api/client';
 
@@ -28,7 +29,6 @@ import { S10_Home } from '../screens/Home';
 import { S09_FirstChat, S12_VoiceCall, S14_Chat } from '../screens/Chat';
 import {
   S15_StudioHome, S16_ScenarioSetup, S17_StudioSession, S18_CharacterCreator,
-  Character,
 } from '../screens/Studio';
 import { S19_SandboxHome, S20_SandboxSession } from '../screens/Sandbox';
 import { S21_Settings, S22_Memories, S23_Paywall, S24_TopUp, S_UserProfile } from '../screens/Settings';
@@ -67,6 +67,13 @@ function apiCharacterToCompanion(c: ApiCharacter): Companion {
     memoryHighlight: c.memory_highlight ?? undefined,
     memory: c.memory_highlight ?? undefined,
   };
+}
+
+// Studio cards carry icon + accent, which the backend doesn't return. Match a
+// scenario character to its local look; custom characters get a neutral one.
+function studioScenarioFor(c: ApiStudioCharacter): Scenario {
+  return SCENARIOS.find(s => s.id === c.scenario_id)
+    ?? { id: 'custom', icon: 'sparkle', name: c.name, desc: '', accent: W.secondary };
 }
 
 const INTENT_MAP: Record<string, string> = {
@@ -341,8 +348,31 @@ export default function App() {
       .catch(() => { /* backend offline — S07_Voice falls back to config voices */ });
   }, []);
 
-  // characters (Studio)
-  const [characters, setCharacters] = useState<Character[]>([]);
+  // Studio: server-owned scenario definitions (the setup form renders from these)
+  // and the user's studio characters. Both are token-scoped.
+  const [backendScenarios, setBackendScenarios] = useState<ApiScenario[]>([]);
+  const [studioCharacters, setStudioCharacters] = useState<ApiStudioCharacter[]>([]);
+  // The studio character the session screen is talking to.
+  const [studioCharacter, setStudioCharacter] = useState<ApiStudioCharacter | null>(null);
+  const [studioCharacterId, setStudioCharacterId] = useState<string | null>(null);
+  // S16's "Remember this session" choice, held here between setup and S17,
+  // which is what actually calls startSession. Resumed sessions remember.
+  const [studioRemember, setStudioRemember] = useState(true);
+
+  useEffect(() => {
+    getScenarios()
+      .then(setBackendScenarios)
+      .catch(() => { /* backend offline — S16 shows its loading state */ });
+  }, []);
+
+  // Refetch whenever the studio tab is opened. That also covers "just created a
+  // character", since both creator flows land back on 'studio'.
+  useEffect(() => {
+    if (screen !== 'studio') return;
+    getStudioCharacters()
+      .then(setStudioCharacters)
+      .catch(() => { /* backend offline — show what we have */ });
+  }, [screen]);
 
   // settings
   const [settings, setSettings] = useState({
@@ -599,16 +629,18 @@ export default function App() {
           <S29_Recap go={go} companion={currentCompanion} />
         </View>
       );
-      case 'studio': return <S15_StudioHome go={go} tier={t.tier} characters={characters} activeConvos={STUDIO_ACTIVE_CONVOS}
-        setupScenario={(s) => { setScenario(s); setScreen('scenario-setup'); }}
-        resumeConvo={(c) => {
-          const sc = SCENARIOS.find(x => x.id === (c as any).scenarioId) || ({ id: 'custom', icon: c.icon, name: c.name, desc: '', accent: c.accent } as Scenario);
-          setScenario(sc); setScreen('studio-session');
-        }}
+      case 'studio': return <S15_StudioHome go={go} tier={t.tier} characters={studioCharacters}
+        setupScenario={(s) => { setScenario(s); setStudioCharacter(null); setStudioCharacterId(null); setStudioRemember(true); setScreen('scenario-setup'); }}
+        resumeConvo={(c) => { setScenario(studioScenarioFor(c)); setStudioCharacter(c); setStudioCharacterId(c._id); setStudioRemember(true); setScreen('studio-session'); }}
         openCreator={() => setScreen('character-creator')} />;
-      case 'scenario-setup': return <S16_ScenarioSetup go={go} scenario={scenario || SCENARIOS[0]} onStart={() => setScreen('studio-session')} />;
-      case 'studio-session': return <S17_StudioSession go={go} scenario={scenario || SCENARIOS[0]} />;
-      case 'character-creator': return <S18_CharacterCreator go={go} onSave={(c) => setCharacters(cs => [...cs, c])} />;
+      case 'scenario-setup': return <S16_ScenarioSetup go={go} scenario={scenario || SCENARIOS[0]}
+        def={backendScenarios.find(s => s.id === (scenario || SCENARIOS[0]).id)}
+        apiVoices={backendVoices}
+        onStart={(id, remember) => { setStudioCharacter(null); setStudioCharacterId(id); setStudioRemember(remember); setScreen('studio-session'); }} />;
+      case 'studio-session': return <S17_StudioSession go={go} scenario={scenario || SCENARIOS[0]}
+        characterId={studioCharacterId ?? undefined} totalSessions={studioCharacter?.total_sessions ?? 0}
+        remember={studioRemember} />;
+      case 'character-creator': return <S18_CharacterCreator go={go} apiVoices={backendVoices} />;
       case 'sandbox': return <S19_SandboxHome go={go} comingSoon={t.sandboxComingSoon} isMinor={isMinor} openMode={(m) => { setSandboxMode(m); setScreen('sandbox-session'); }} />;
       case 'sandbox-session': return <S20_SandboxSession go={go} mode={sandboxMode || SANDBOX_MODES[0]} />;
       // Settings' only route to 'login' is its Sign out row — intercept it so it

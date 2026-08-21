@@ -105,31 +105,6 @@ export const PLUS_COMPANIONS: Companion[] = [
 
 export const FREE_COMPANIONS: Companion[] = [PLUS_COMPANIONS[0]];
 
-export interface ActiveConvo {
-  id: string;
-  kind: 'scenario' | 'character';
-  scenarioId?: string;
-  icon: string;
-  name: string;
-  accent: string;
-  preview: string;
-  timeAgo: string;
-  memoryCount: number;
-}
-
-export const STUDIO_ACTIVE_CONVOS: ActiveConvo[] = [
-  {
-    id: 'c1', kind: 'scenario', scenarioId: 'interview', icon: 'briefcase', name: 'Interview Coach', accent: '#60A5FA',
-    preview: 'You nailed the behavioral question about leadership — last time you struggled with it.',
-    timeAgo: 'Yesterday', memoryCount: 12,
-  },
-  {
-    id: 'c2', kind: 'character', icon: 'sparkle', name: 'Coach Maya', accent: '#A78BFA',
-    preview: 'Pick it up where we left off — week 3 of your writing accountability check-in.',
-    timeAgo: '3 days ago', memoryCount: 28,
-  },
-];
-
 export const ARCHETYPE_COLORS: Record<string, string> = {
   mentor: W.mentor,
   friend: W.friend,

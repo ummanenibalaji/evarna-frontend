@@ -96,7 +96,8 @@ function CheckInCard({ onMood }: { onMood: (mood: string) => void }) {
   );
 }
 
-function formatLastInteraction(iso?: string): string {
+// Exported so Studio's Continue row can stamp last_interaction_at the same way.
+export function formatLastInteraction(iso?: string): string {
   if (!iso) return '';
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return '';

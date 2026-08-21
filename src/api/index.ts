@@ -117,6 +117,67 @@ export const updateCharacter = (characterId: string, p: UpdateCharacterPayload):
 export const deleteCharacter = (characterId: string): Promise<unknown> =>
   apiDelete(`/characters/${characterId}`);
 
+// ── Studio ─────────────────────────────────────────────────────────────────
+
+// Backend gender enum. The Studio UI offers male/female/neutral and maps
+// neutral → nonbinary at this boundary.
+export type ApiGender = 'male' | 'female' | 'nonbinary';
+
+// Param definitions come from the server so the setup form and the persona
+// that consumes it never drift apart.
+export interface ApiScenarioParam {
+  key: string;
+  label: string;
+  type: 'text' | 'choice';
+  options?: string[];
+  placeholder?: string;
+  required: boolean;
+}
+
+export interface ApiScenario {
+  id: string;
+  name: string;
+  description: string;
+  params: ApiScenarioParam[];
+}
+
+export const getScenarios = (): Promise<ApiScenario[]> =>
+  apiGet<ApiScenario[]>('/studio/scenarios');
+
+// Discriminated on `kind` — the backend accepts exactly these two shapes.
+// `personality_sliders` are 0–100 integers (the creator UI stores 0–1 floats).
+export type CreateStudioCharacterPayload =
+  | { kind: 'scenario'; scenario_id: string; params: Record<string, string>; voice_id: string; gender: ApiGender }
+  | { kind: 'custom'; name: string; backstory?: string; voice_id: string; gender: ApiGender; personality_sliders?: Record<string, number> };
+
+export interface CreateStudioCharacterResponse {
+  character_id: string;
+  name: string;
+  mode: string;
+  kind: 'scenario' | 'custom';
+}
+
+// 400 → ApiError with code 'VALIDATION_ERROR', 403 → 'STUDIO_LIMIT_REACHED'.
+export const createStudioCharacter = (p: CreateStudioCharacterPayload): Promise<CreateStudioCharacterResponse> =>
+  apiPost<CreateStudioCharacterResponse>('/studio/characters', p);
+
+export interface ApiStudioCharacter {
+  _id: string;
+  name: string;
+  gender: ApiGender;
+  voice_id: string;
+  kind: 'scenario' | 'custom';
+  scenario_id?: string;
+  last_interaction_at?: string;
+  total_sessions?: number;
+}
+
+// Same { characters: [...] } wrapper as GET /characters — unwrap here.
+export const getStudioCharacters = async (): Promise<ApiStudioCharacter[]> => {
+  const res = await apiGet<{ characters: ApiStudioCharacter[] }>('/studio/characters');
+  return res.characters;
+};
+
 // ── User stats ─────────────────────────────────────────────────────────────
 
 export interface ApiUserStats {
@@ -151,11 +212,22 @@ export const exportMyData = (): Promise<unknown> =>
 
 // ── Sessions ───────────────────────────────────────────────────────────────
 
+// `remember` is optional and omitted unless given — the backend defaults it to
+// true, so the companion chat call sites keep their two-argument form. Passing
+// false stores Session.memory_enabled = false and skips memory extraction on end.
 export const startSession = (
   characterId: string,
-  sessionType: 'text' | 'voice' = 'text',
+  // Mirrors the backend enum exactly. It used to say 'voice', which no route
+  // accepts — nothing ever passed it, so it was a 400 waiting for the first
+  // caller who trusted the type.
+  sessionType: 'text' | 'voice_call' | 'voice_note' = 'text',
+  remember?: boolean,
 ): Promise<{ session_id: string }> =>
-  apiPost('/sessions/start', { character_id: characterId, session_type: sessionType });
+  apiPost('/sessions/start', {
+    character_id: characterId,
+    session_type: sessionType,
+    ...(remember === undefined ? {} : { remember }),
+  });
 
 export const endSession = (sessionId: string): Promise<unknown> =>
   apiPost(`/sessions/${sessionId}/end`, {});

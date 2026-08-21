@@ -15,10 +15,32 @@ import { Pill, PrimaryButton, Toggle } from '../components/Atoms';
 import { Avatar, Waveform } from '../components/Avatar';
 import { BubbleMem, ChatInput } from '../components/ChatBits';
 import { W, alpha } from '../theme/theme';
-import { SCENARIOS, VOICES, Scenario, ActiveConvo, Tier } from '../data/config';
+import { SCENARIOS, Scenario, Tier } from '../data/config';
+import {
+  ApiGender, ApiMemory, ApiScenario, ApiStudioCharacter, ApiVoice,
+  createStudioCharacter, deleteMemory, endSession, getCharacterSessions,
+  getConversationTurns, getMemories, startSession,
+} from '../api';
+import { ApiError, streamConversation } from '../api/client';
+import { formatLastInteraction } from './Home';
 import { Go } from '../navigation/types';
 
-export interface Character { id: number; name: string; trait: string; }
+// The UI keeps male/female/neutral; the backend enum only knows nonbinary.
+type StudioGender = 'male' | 'female' | 'neutral';
+const API_GENDER: Record<StudioGender, ApiGender> = { male: 'male', female: 'female', neutral: 'nonbinary' };
+
+// The backend voice catalog is tagged male/female only, so 'neutral' offers all of them.
+const voicesFor = (voices: ApiVoice[], g: StudioGender) =>
+  g === 'neutral' ? voices : voices.filter(v => v.gender === g);
+
+// ponytail: ApiError keeps the backend's `code` but drops the 400 body's `field`,
+// so validation errors read generically. Widen ApiError if per-field highlighting matters.
+function createErrorMessage(e: unknown): string {
+  const code = e instanceof ApiError ? e.code : undefined;
+  if (code === 'STUDIO_LIMIT_REACHED') return "You've hit your Studio character limit. Delete one to make room.";
+  if (code === 'VALIDATION_ERROR') return 'The server rejected one of these fields. Check them and try again.';
+  return "Couldn't reach the server. Check your connection and try again.";
+}
 
 // ─── Section header ──────────────────────────────────────────────────────
 function SectionHeader({ children, marginTop = 8 }: { children: React.ReactNode; marginTop?: number }) {
@@ -39,20 +61,49 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
+function ErrorNote({ children }: { children: React.ReactNode }) {
+  return <Txt font="user" style={{ fontSize: 12, color: W.danger, lineHeight: 17 }}>{children}</Txt>;
+}
+
+// Voice grid shared by S16 and S18. Ids are backend voice UUIDs, exactly like S07_Voice.
+function VoicePicker({ voices, voiceId, onPick }: { voices: ApiVoice[]; voiceId: string | null; onPick: (id: string) => void }) {
+  if (voices.length === 0) return <ErrorNote>Voices unavailable — check your connection.</ErrorNote>;
+  return (
+    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+      {voices.map(v => (
+        <Pressable
+          key={v.id}
+          onPress={() => onPick(v.id)}
+          style={{ width: '31.5%', backgroundColor: W.surface1, borderRadius: 12, padding: 10, alignItems: 'center', gap: 4, borderWidth: voiceId === v.id ? 2 : 0, borderColor: W.accent }}
+        >
+          <Waveform color={W.primary} size={24} />
+          <Txt font="user" weight={500} style={{ fontSize: 12, color: W.text }} numberOfLines={1}>{v.name}</Txt>
+        </Pressable>
+      ))}
+    </View>
+  );
+}
+
 // ─── S15 STUDIO HOME ─────────────────────────────────────────────────────
 interface StudioHomeProps {
   go: Go;
   tier: Tier;
-  characters: Character[];
-  activeConvos?: ActiveConvo[];
+  characters: ApiStudioCharacter[];
   setupScenario: (s: Scenario) => void;
   openCreator: () => void;
-  resumeConvo: (c: ActiveConvo) => void;
+  resumeConvo: (c: ApiStudioCharacter) => void;
 }
 
-export function S15_StudioHome({ go, tier, characters, activeConvos = [], setupScenario, openCreator, resumeConvo }: StudioHomeProps) {
+// Icon + accent are local styling — the backend only names the scenario.
+const studioLook = (c: ApiStudioCharacter) =>
+  SCENARIOS.find(s => s.id === c.scenario_id) ?? { icon: 'sparkle', accent: W.secondary };
+
+export function S15_StudioHome({ go, tier, characters, setupScenario, openCreator, resumeConvo }: StudioHomeProps) {
   const locked = tier === 'free';
-  const startedScenarios = new Set(activeConvos.filter(c => c.kind === 'scenario').map(c => c.scenarioId));
+  // "Continue" is every studio character that has actually been talked to.
+  const activeConvos = characters.filter(c => !!c.last_interaction_at);
+  const startedScenarios = new Set(characters.map(c => c.scenario_id).filter(Boolean));
+  const customs = characters.filter(c => c.kind === 'custom');
 
   return (
     <Screen>
@@ -66,7 +117,8 @@ export function S15_StudioHome({ go, tier, characters, activeConvos = [], setupS
         }
       />
       <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 16 }}>
-        {/* CONTINUE — active conversations */}
+        {/* CONTINUE — active conversations. The list endpoint has no message
+            preview, so that line is dropped rather than filled with filler. */}
         {!locked && activeConvos.length > 0 && (
           <>
             <SectionHeader>Continue</SectionHeader>
@@ -75,32 +127,38 @@ export function S15_StudioHome({ go, tier, characters, activeConvos = [], setupS
               showsHorizontalScrollIndicator={false}
               contentContainerStyle={{ gap: 12, paddingHorizontal: 20 }}
             >
-              {activeConvos.map(c => (
-                <Pressable
-                  key={c.id}
-                  onPress={() => resumeConvo(c)}
-                  style={{
-                    width: 220, borderRadius: 16, padding: 14, gap: 8, overflow: 'hidden',
-                    borderWidth: 1, borderColor: alpha(c.accent, '26'), backgroundColor: 'rgba(32,22,26,0.55)',
-                  }}
-                >
-                  <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                    <View style={{ width: 36, height: 36, borderRadius: 10, backgroundColor: alpha(c.accent, '1f'), borderWidth: 1, borderColor: alpha(c.accent, '40'), alignItems: 'center', justifyContent: 'center' }}>
-                      <NavIcon name={c.icon as IconName} color={c.accent} />
+              {activeConvos.map(c => {
+                const look = studioLook(c);
+                return (
+                  <Pressable
+                    key={c._id}
+                    onPress={() => resumeConvo(c)}
+                    style={{
+                      width: 220, borderRadius: 16, padding: 14, gap: 8, overflow: 'hidden',
+                      borderWidth: 1, borderColor: alpha(look.accent, '26'), backgroundColor: 'rgba(32,22,26,0.55)',
+                    }}
+                  >
+                    <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                      <View style={{ width: 36, height: 36, borderRadius: 10, backgroundColor: alpha(look.accent, '1f'), borderWidth: 1, borderColor: alpha(look.accent, '40'), alignItems: 'center', justifyContent: 'center' }}>
+                        <NavIcon name={look.icon as IconName} color={look.accent} />
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Txt font="user" weight={600} style={{ fontSize: 14, color: W.text }} numberOfLines={1}>{c.name}</Txt>
+                        <Txt font="user" style={{ fontSize: 11, color: W.text2 }}>{formatLastInteraction(c.last_interaction_at)}</Txt>
+                      </View>
                     </View>
-                    <View style={{ flex: 1 }}>
-                      <Txt font="user" weight={600} style={{ fontSize: 14, color: W.text }} numberOfLines={1}>{c.name}</Txt>
-                      <Txt font="user" style={{ fontSize: 11, color: W.text2 }}>{c.timeAgo}</Txt>
-                    </View>
-                  </View>
-                  <Txt font="user" style={{ fontSize: 12, color: W.text2, lineHeight: 17 }} numberOfLines={2}>{c.preview}</Txt>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                    <NavIcon name="sparkle" color={W.accent} size={14} />
-                    <Txt font="user" style={{ fontSize: 11, color: W.accent }}>{c.memoryCount} memories</Txt>
-                  </View>
-                </Pressable>
-              ))}
+                    {!!c.total_sessions && (
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                        <NavIcon name="sparkle" color={W.accent} size={14} />
+                        <Txt font="user" style={{ fontSize: 11, color: W.accent }}>
+                          {c.total_sessions} {c.total_sessions === 1 ? 'session' : 'sessions'}
+                        </Txt>
+                      </View>
+                    )}
+                  </Pressable>
+                );
+              })}
             </ScrollView>
           </>
         )}
@@ -116,7 +174,7 @@ export function S15_StudioHome({ go, tier, characters, activeConvos = [], setupS
                 onPress={() => {
                   if (locked) return go('paywall');
                   if (isStarted) {
-                    const existing = activeConvos.find(c => c.scenarioId === s.id);
+                    const existing = characters.find(c => c.scenario_id === s.id);
                     if (existing) return resumeConvo(existing);
                   }
                   setupScenario(s);
@@ -150,7 +208,9 @@ export function S15_StudioHome({ go, tier, characters, activeConvos = [], setupS
           })}
         </ScrollView>
 
-        {/* Your characters */}
+        {/* Your characters — custom ones only; the scenario characters live in
+            the row above. The list endpoint returns no backstory, so the old
+            one-line trait is dropped. */}
         <SectionHeader marginTop={24}>Your characters</SectionHeader>
         <View style={{ paddingHorizontal: 20 }}>
           {locked ? (
@@ -161,7 +221,7 @@ export function S15_StudioHome({ go, tier, characters, activeConvos = [], setupS
                 <NavIcon name="right" color={W.secondary} size={18} />
               </Pressable>
             </View>
-          ) : characters.length === 0 ? (
+          ) : customs.length === 0 ? (
             <Pressable
               onPress={openCreator}
               style={{ borderWidth: 1.5, borderColor: W.surface2, borderStyle: 'dashed', borderRadius: 16, paddingVertical: 24, paddingHorizontal: 16, alignItems: 'center', gap: 8 }}
@@ -171,12 +231,11 @@ export function S15_StudioHome({ go, tier, characters, activeConvos = [], setupS
             </Pressable>
           ) : (
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
-              {characters.map(c => (
-                <View key={c.id} style={{ width: '48%', backgroundColor: W.surface1, borderRadius: 16, padding: 14 }}>
-                  <Avatar color={W.secondary} size={40} />
-                  <Txt font="user" weight={500} style={{ marginTop: 10, fontSize: 14, color: W.text }}>{c.name}</Txt>
-                  <Txt font="user" style={{ marginTop: 2, fontSize: 11, color: W.text2 }} numberOfLines={1}>{c.trait}</Txt>
-                </View>
+              {customs.map(c => (
+                <Pressable key={c._id} onPress={() => resumeConvo(c)} style={{ width: '48%', backgroundColor: W.surface1, borderRadius: 16, padding: 14 }}>
+                  <Avatar name={c.name} color={W.secondary} size={40} />
+                  <Txt font="user" weight={500} style={{ marginTop: 10, fontSize: 14, color: W.text }} numberOfLines={1}>{c.name}</Txt>
+                </Pressable>
               ))}
               <Pressable
                 onPress={openCreator}
@@ -194,29 +253,48 @@ export function S15_StudioHome({ go, tier, characters, activeConvos = [], setupS
 }
 
 // ─── S16 SCENARIO SETUP ──────────────────────────────────────────────────
-interface FieldDef { f1: string | null; ph: string; f2: string[] | null; f3: string[] | null; }
-const FIELD_MAP: Record<string, FieldDef> = {
-  interview: { f1: 'Role', ph: 'Software Engineer', f2: ['Startup', 'Corporate', 'Agency'], f3: ['Behavioral', 'Technical', 'Case'] },
-  difficult: { f1: 'Who are you talking to?', ph: 'My manager', f2: ['Aggressive', 'Passive', 'Dismissive', 'Emotional'], f3: null },
-  debate: { f1: 'Topic', ph: 'Remote work', f2: null, f3: null },
-  story: { f1: 'Your role', ph: 'A reluctant hero', f2: ['Fantasy', 'Sci-fi', 'Thriller', 'Romance', 'Horror'], f3: null },
-  language: { f1: null, ph: '', f2: ['Spanish', 'French', 'German', 'Japanese'], f3: ['Beginner', 'Intermediate', 'Advanced'] },
-};
-
-export function S16_ScenarioSetup({ go, scenario, onStart }: { go: Go; scenario: Scenario; onStart: () => void }) {
-  const [gender, setGender] = useState<'male' | 'female' | 'neutral'>('female');
-  const [voice, setVoice] = useState('Sage');
-  const [field1, setField1] = useState('');
-  const [field2, setField2] = useState<string | null>(null);
-  const [field3, setField3] = useState<string | null>(null);
+// The form is rendered from GET /studio/scenarios: the server owns the param
+// definitions and the persona that consumes them, so there is nothing to drift.
+export function S16_ScenarioSetup({ go, scenario, def, apiVoices = [], onStart }: {
+  go: Go;
+  scenario: Scenario;
+  def?: ApiScenario;
+  apiVoices?: ApiVoice[];
+  onStart: (characterId: string, remember: boolean) => void;
+}) {
+  const [gender, setGender] = useState<StudioGender>('female');
+  const [voiceId, setVoiceId] = useState<string | null>(null);
+  const [params, setParams] = useState<Record<string, string>>({});
+  // Handed up with the character id; S17 owns the session, so it passes this
+  // to startSession rather than S16 starting one just to carry the flag.
   const [remember, setRemember] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
-  const fields = FIELD_MAP[scenario.id];
+  const voiceList = voicesFor(apiVoices, gender);
+  const pickedVoice = voiceList.some(v => v.id === voiceId) ? voiceId : voiceList[0]?.id ?? null;
+  const missingRequired = (def?.params ?? []).some(p => p.required && !(params[p.key] ?? '').trim());
 
-  const f2Label = scenario.id === 'difficult' ? 'Their personality'
-    : scenario.id === 'interview' ? 'Company type'
-    : scenario.id === 'story' ? 'Genre' : 'Language';
-  const f3Label = scenario.id === 'interview' ? 'Style' : 'Level';
+  const start = async () => {
+    if (!def || !pickedVoice) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await createStudioCharacter({
+        kind: 'scenario',
+        scenario_id: def.id,
+        params,
+        voice_id: pickedVoice,
+        gender: API_GENDER[gender],
+      });
+      onStart(res.character_id, remember);
+    } catch (e) {
+      console.warn('[Studio] scenario character create failed:', e);
+      setErr(createErrorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <Screen>
@@ -227,7 +305,7 @@ export function S16_ScenarioSetup({ go, scenario, onStart }: { go: Go; scenario:
             <View style={{ width: 24, height: 24, borderRadius: 6, backgroundColor: alpha(scenario.accent, '26'), alignItems: 'center', justifyContent: 'center' }}>
               <NavIcon name={scenario.icon as IconName} color={scenario.accent} size={14} />
             </View>
-            <Txt font="comp" weight={600} style={{ fontSize: 16, color: W.text }}>{scenario.name}</Txt>
+            <Txt font="comp" weight={600} style={{ fontSize: 16, color: W.text }}>{def?.name ?? scenario.name}</Txt>
           </View>
         }
       />
@@ -242,52 +320,38 @@ export function S16_ScenarioSetup({ go, scenario, onStart }: { go: Go; scenario:
         </View>
         <View>
           <FieldLabel>Voice</FieldLabel>
-          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-            {VOICES[gender].map(v => (
-              <Pressable
-                key={v.n}
-                onPress={() => setVoice(v.n)}
-                style={{ width: '31.5%', backgroundColor: W.surface1, borderRadius: 12, padding: 10, alignItems: 'center', gap: 4, borderWidth: voice === v.n ? 2 : 0, borderColor: W.accent }}
-              >
-                <Waveform color={W.primary} size={24} />
-                <Txt font="user" weight={500} style={{ fontSize: 12, color: W.text }}>{v.n}</Txt>
-              </Pressable>
-            ))}
-          </View>
+          <VoicePicker voices={voiceList} voiceId={pickedVoice} onPick={setVoiceId} />
         </View>
-        {fields.f1 && (
-          <View>
-            <FieldLabel>{fields.f1}</FieldLabel>
-            <TextInput
-              value={field1}
-              onChangeText={setField1}
-              placeholder={fields.ph}
-              placeholderTextColor={W.text2}
-              style={{ backgroundColor: W.surface1, color: W.text, borderWidth: 1, borderColor: W.surface2, height: 44, borderRadius: 12, paddingHorizontal: 14, fontFamily: 'Outfit_400Regular', fontSize: 14 }}
-            />
+        {def ? def.params.map(p => (
+          <View key={p.key}>
+            <FieldLabel>{p.label}</FieldLabel>
+            {p.type === 'choice' ? (
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                {(p.options ?? []).map(opt => (
+                  <Pill
+                    key={opt}
+                    active={params[p.key] === opt}
+                    onPress={() => setParams(v => ({ ...v, [p.key]: opt }))}
+                    style={{ height: 36 }}
+                    textStyle={{ fontSize: 13 }}
+                  >{opt}</Pill>
+                ))}
+              </View>
+            ) : (
+              <TextInput
+                value={params[p.key] ?? ''}
+                onChangeText={(v) => setParams(s => ({ ...s, [p.key]: v }))}
+                placeholder={p.placeholder}
+                placeholderTextColor={W.text2}
+                style={{ backgroundColor: W.surface1, color: W.text, borderWidth: 1, borderColor: W.surface2, height: 44, borderRadius: 12, paddingHorizontal: 14, fontFamily: 'Outfit_400Regular', fontSize: 14 }}
+              />
+            )}
           </View>
+        )) : (
+          <Txt font="user" style={{ fontSize: 13, color: W.text2 }}>Loading setup…</Txt>
         )}
-        {fields.f2 && (
-          <View>
-            <FieldLabel>{f2Label}</FieldLabel>
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-              {fields.f2.map(opt => (
-                <Pill key={opt} active={field2 === opt} onPress={() => setField2(opt)} style={{ height: 36 }} textStyle={{ fontSize: 13 }}>{opt}</Pill>
-              ))}
-            </View>
-          </View>
-        )}
-        {fields.f3 && (
-          <View>
-            <FieldLabel>{f3Label}</FieldLabel>
-            <View style={{ flexDirection: 'row', gap: 8 }}>
-              {fields.f3.map(opt => (
-                <Pill key={opt} active={field3 === opt} onPress={() => setField3(opt)} style={{ flex: 1, height: 36 }} textStyle={{ fontSize: 13 }}>{opt}</Pill>
-              ))}
-            </View>
-          </View>
-        )}
-        {/* Memory toggle */}
+        {/* Memory toggle — sent as `remember` on POST /sessions/start. Off means
+            the backend skips memory extraction when the session ends. */}
         <View style={{ marginTop: 4, borderRadius: 14, padding: 14, paddingLeft: 16, flexDirection: 'row', alignItems: 'center', gap: 12, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,138,118,0.10)', backgroundColor: 'rgba(32,22,26,0.55)' }}>
           <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
           <View style={{ width: 32, height: 32, borderRadius: 10, backgroundColor: remember ? alpha(W.accent, '1f') : 'rgba(139,143,163,0.10)', alignItems: 'center', justifyContent: 'center' }}>
@@ -296,38 +360,152 @@ export function S16_ScenarioSetup({ go, scenario, onStart }: { go: Go; scenario:
           <View style={{ flex: 1 }}>
             <Txt font="user" weight={500} style={{ fontSize: 14, color: W.text }}>Remember this session</Txt>
             <Txt font="user" style={{ fontSize: 11, color: W.text2, lineHeight: 15, marginTop: 2 }}>
-              {remember ? `Your ${scenario.name} will remember everything across sessions.` : 'One-time session. Nothing will be saved.'}
+              {remember
+                ? `Your ${def?.name ?? scenario.name} will remember this across sessions.`
+                : 'One-time session. Nothing from it is saved to memory.'}
             </Txt>
           </View>
           <Toggle value={remember} onChange={setRemember} />
         </View>
       </ScrollView>
-      <View style={{ paddingHorizontal: 24, paddingTop: 12, paddingBottom: 16 }}>
-        <PrimaryButton onPress={onStart} style={{ backgroundColor: scenario.accent }}>Start session</PrimaryButton>
+      <View style={{ paddingHorizontal: 24, paddingTop: 12, paddingBottom: 16, gap: 10 }}>
+        {err && <ErrorNote>{err}</ErrorNote>}
+        <PrimaryButton
+          disabled={!def || !pickedVoice || missingRequired || busy}
+          onPress={start}
+          style={{ backgroundColor: scenario.accent }}
+        >
+          {busy ? 'Starting…' : 'Start session'}
+        </PrimaryButton>
       </View>
     </Screen>
   );
 }
 
 // ─── S17 ACTIVE STUDIO SESSION ───────────────────────────────────────────
-type SMsg = { from: string; text: string; memoryRefs?: string[] };
+// Same wiring as S14_Chat: one backend text session, SSE replies, session ended
+// on unmount. A studio character is just a character, so the endpoints match.
+type SMsg = { from: string; text: string; streaming?: boolean };
 
-export function S17_StudioSession({ go, scenario, onEnd, sessionN = 4, memoryCount = 12 }: { go: Go; scenario: Scenario; onEnd?: () => void; sessionN?: number; memoryCount?: number }) {
-  const [msgs, setMsgs] = useState<SMsg[]>([
-    { from: 'comp', text: `Welcome back. Last time you struggled with the "tell me about a time you failed" question. Let's try that one again — I think you'll do better this time.`, memoryRefs: ['"tell me about a time you failed" question'] },
-    { from: 'user', text: "Okay, let's do it." },
-    { from: 'comp', text: 'Great. So — tell me about a time you failed and what you learned from it.' },
-  ]);
+export function S17_StudioSession({ go, scenario, characterId, totalSessions = 0, remember }: {
+  go: Go; scenario: Scenario; characterId?: string; totalSessions?: number; remember?: boolean;
+}) {
+  const [msgs, setMsgs] = useState<SMsg[]>([]);
   const [draft, setDraft] = useState('');
   const [showSummary, setShowSummary] = useState(false);
+  const [memoryCount, setMemoryCount] = useState<number | null>(null);
   const scrollRef = useRef<ScrollView>(null);
+
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const sessionRef = useRef<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  // Typed before the session id landed — streamed the moment it does.
+  const pendingRef = useRef<string | null>(null);
+
+  const finishStreaming = (patch: Partial<SMsg>) => {
+    setMsgs(m => {
+      const updated = [...m];
+      const last = updated[updated.length - 1];
+      if (last?.streaming) updated[updated.length - 1] = { ...last, ...patch, streaming: false };
+      return updated;
+    });
+  };
+
+  const runTurn = (sid: string, text: string) => {
+    abortRef.current?.abort();
+    abortRef.current = streamConversation(
+      { session_id: sid, message: text },
+      {
+        onChunk: (content) => {
+          setMsgs(m => {
+            const updated = [...m];
+            const last = updated[updated.length - 1];
+            if (last?.streaming) updated[updated.length - 1] = { ...last, text: last.text + content };
+            return updated;
+          });
+        },
+        onDone: () => finishStreaming({}),
+        onCrisis: () => { finishStreaming({}); go('crisis'); },
+        onError: (e) => {
+          console.warn('[Studio] stream error:', e);
+          finishStreaming({ text: "(Couldn't reach the server — please try again.)" });
+        },
+      },
+    );
+  };
+
+  useEffect(() => {
+    if (sessionId && pendingRef.current) {
+      const text = pendingRef.current;
+      pendingRef.current = null;
+      runTurn(sessionId, text);
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (!characterId) return;
+    let mounted = true;
+    startSession(characterId, 'text', remember)
+      .then(res => {
+        if (!mounted) return;
+        setSessionId(res.session_id);
+        sessionRef.current = res.session_id;
+      })
+      .catch(e => {
+        console.warn('[Studio] session start failed:', e);
+        if (!mounted) return;
+        if (pendingRef.current) {
+          pendingRef.current = null;
+          finishStreaming({ text: "(Couldn't reach the server — please try again.)" });
+        }
+      });
+    return () => {
+      mounted = false;
+      abortRef.current?.abort();
+      if (sessionRef.current) {
+        endSession(sessionRef.current).catch(() => {});
+        sessionRef.current = null;
+      }
+    };
+  }, [characterId, remember]);
+
+  // Resume where the user left off: newest session that actually has turns.
+  useEffect(() => {
+    if (!characterId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { sessions } = await getCharacterSessions(characterId);
+        for (const s of sessions) {
+          const { turns } = await getConversationTurns(s._id);
+          if (cancelled) return;
+          if (turns.length === 0) continue;
+          setMsgs(turns.map(t => ({ from: t.role === 'user' ? 'user' : 'comp', text: t.content_text })));
+          return;
+        }
+      } catch { /* no history — start clean */ }
+    })();
+    return () => { cancelled = true; };
+  }, [characterId]);
+
+  useEffect(() => {
+    if (!characterId) return;
+    let cancelled = false;
+    getMemories(characterId)
+      .then(ms => { if (!cancelled) setMemoryCount(ms.length); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [characterId]);
+
   useEffect(() => { scrollRef.current?.scrollToEnd({ animated: true }); }, [msgs]);
 
   const send = () => {
-    if (!draft.trim()) return;
-    setMsgs(m => [...m, { from: 'user', text: draft.trim() }]);
+    if (!draft.trim() || !characterId) return;
+    const text = draft.trim();
+    setMsgs(m => [...m, { from: 'user', text }, { from: 'comp', text: '', streaming: true }]);
     setDraft('');
-    setTimeout(() => setMsgs(m => [...m, { from: 'comp', text: "That's a solid answer. Notice how you used the STAR format this time — situation, task, action, result. You weren't doing that two sessions ago.", memoryRefs: ["You weren't doing that two sessions ago"] }]), 1400);
+    if (sessionRef.current) runTurn(sessionRef.current, text);
+    else pendingRef.current = text;
   };
 
   return (
@@ -339,83 +517,85 @@ export function S17_StudioSession({ go, scenario, onEnd, sessionN = 4, memoryCou
         bg="rgba(24,16,20,0.55)"
         border
       />
-      {/* context banner */}
-      <View style={{ marginHorizontal: 16, marginTop: 10, marginBottom: 6, borderRadius: 10, padding: 8, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, overflow: 'hidden', borderWidth: 1, borderColor: alpha(scenario.accent, '1f'), borderLeftWidth: 2, borderLeftColor: scenario.accent, backgroundColor: 'rgba(32,22,26,0.55)' }}>
+      {/* context banner — the old "Playing: …" line had no backend source, so it's gone */}
+      <View style={{ marginHorizontal: 16, marginTop: 10, marginBottom: 6, borderRadius: 10, padding: 8, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 8, overflow: 'hidden', borderWidth: 1, borderColor: alpha(scenario.accent, '1f'), borderLeftWidth: 2, borderLeftColor: scenario.accent, backgroundColor: 'rgba(32,22,26,0.55)' }}>
         <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-        <Txt font="user" style={{ flex: 1, fontSize: 12, color: W.text2 }} numberOfLines={1}>Playing: Interviewer at a tech startup</Txt>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-          <NavIcon name="sparkle" color={W.accent} size={14} />
-          <Txt font="user" style={{ fontSize: 11, color: W.accent }}>Session {sessionN} · {memoryCount} memories</Txt>
-        </View>
+        <NavIcon name="sparkle" color={W.accent} size={14} />
+        <Txt font="user" style={{ fontSize: 11, color: W.accent }}>
+          Session {totalSessions + 1}{memoryCount != null ? ` · ${memoryCount} ${memoryCount === 1 ? 'memory' : 'memories'}` : ''}
+        </Txt>
       </View>
       <ScrollView ref={scrollRef} style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 16, paddingVertical: 8, gap: 8 }}>
         {msgs.map((m, i) => (
-          <BubbleMem key={i} from={m.from} text={m.text} memoryRefs={m.memoryRefs || []} accent={scenario.accent} />
+          <BubbleMem key={i} from={m.from} text={m.text} accent={scenario.accent} />
         ))}
       </ScrollView>
       <ChatInput draft={draft} setDraft={setDraft} onSend={send} companionName={scenario.name} />
       {showSummary && (
-        <StudioSummary scenario={scenario} sessionN={sessionN} memoryCount={memoryCount} onClose={() => { setShowSummary(false); go('studio'); }} />
+        <StudioSummary
+          scenario={scenario}
+          sessionN={totalSessions + 1}
+          characterId={characterId}
+          onContinue={() => setShowSummary(false)}
+          onClose={() => { setShowSummary(false); go('studio'); }}
+        />
       )}
     </Screen>
   );
 }
 
-function StudioSummary({ scenario, sessionN, memoryCount, onClose }: { scenario: Scenario; sessionN: number; memoryCount: number; onClose: () => void }) {
-  const [newMemories, setNewMemories] = useState([
-    { id: 1, text: 'User uses STAR format consistently in behavioral questions now.' },
-    { id: 2, text: 'User tends to rush answers when nervous about technical specifics.' },
-    { id: 3, text: 'User prefers practicing with startup-style behavioral over technical.' },
-  ]);
+// The prototype's bullet recap and coaching block had no backend source and are
+// gone. What is real is the character's memory set — shown here, deletable.
+function StudioSummary({ scenario, sessionN, characterId, onContinue, onClose }: {
+  scenario: Scenario; sessionN: number; characterId?: string; onContinue: () => void; onClose: () => void;
+}) {
+  const [memories, setMemories] = useState<ApiMemory[] | null>(null);
+  useEffect(() => {
+    if (!characterId) { setMemories([]); return; }
+    let cancelled = false;
+    getMemories(characterId)
+      .then(ms => { if (!cancelled) setMemories(ms); })
+      .catch(() => { if (!cancelled) setMemories([]); });
+    return () => { cancelled = true; };
+  }, [characterId]);
+
+  const forget = (id: string) => {
+    setMemories(ms => (ms ?? []).filter(m => m._id !== id));
+    deleteMemory(id).catch(e => console.warn('[Studio] memory delete failed:', e));
+  };
+
   return (
     <SheetOverlay onClose={onClose}>
       <View style={{ width: 36, height: 4, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 2, alignSelf: 'center', marginBottom: 16 }} />
       <Txt font="comp" weight={600} style={{ fontSize: 18, color: W.text }}>Session summary</Txt>
       <Txt font="user" style={{ marginTop: 4, fontSize: 12, color: W.text2 }}>Session {sessionN} · {scenario.name}</Txt>
 
-      <View style={{ marginTop: 14, gap: 2 }}>
-        <Txt font="user" style={{ fontSize: 13, color: W.text, lineHeight: 20 }}>• Walked through 2 behavioral scenarios with confidence</Txt>
-        <Txt font="user" style={{ fontSize: 13, color: W.text, lineHeight: 20 }}>• First clean STAR-format answer on "tell me about a failure"</Txt>
-        <Txt font="user" style={{ fontSize: 13, color: W.text, lineHeight: 20 }}>• Lighter on quantified impact — try adding numbers next time</Txt>
-      </View>
-
-      {/* Coaching feedback */}
-      <View style={{ marginTop: 16, padding: 14, borderRadius: 12, backgroundColor: 'rgba(48,32,40,0.6)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.04)', gap: 10 }}>
-        <View>
-          <Txt font="user" weight={600} style={{ fontSize: 11, color: W.accent, textTransform: 'uppercase', letterSpacing: 0.9 }}>What went well</Txt>
-          <Txt font="user" style={{ marginTop: 4, fontSize: 13, color: W.text, lineHeight: 19 }}>Clean STAR format. Specific projects mentioned with timelines.</Txt>
-        </View>
-        <View>
-          <Txt font="user" weight={600} style={{ fontSize: 11, color: W.challenger, textTransform: 'uppercase', letterSpacing: 0.9 }}>What to improve</Txt>
-          <Txt font="user" style={{ marginTop: 4, fontSize: 13, color: W.text, lineHeight: 19 }}>Quantify impact with numbers. Practice salary-negotiation prompts.</Txt>
-        </View>
-      </View>
-
-      {/* Memories from this session */}
       <View style={{ marginTop: 16 }}>
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8 }}>
           <NavIcon name="sparkle" color={W.accent} size={14} />
-          <Txt font="user" weight={600} style={{ fontSize: 11, color: W.accent, textTransform: 'uppercase', letterSpacing: 0.9 }}>Memories from this session</Txt>
+          <Txt font="user" weight={600} style={{ fontSize: 11, color: W.accent, textTransform: 'uppercase', letterSpacing: 0.9 }}>What they remember</Txt>
         </View>
         <View style={{ gap: 6 }}>
-          {newMemories.map(m => (
-            <View key={m.id} style={{ backgroundColor: 'rgba(255,201,96,0.06)', borderWidth: 1, borderColor: 'rgba(255,201,96,0.15)', borderRadius: 10, padding: 10, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}>
-              <Txt font="user" style={{ flex: 1, fontSize: 13, color: W.text, lineHeight: 18 }}>{m.text}</Txt>
-              <Pressable onPress={() => setNewMemories(ms => ms.filter(x => x.id !== m.id))} style={{ padding: 2, opacity: 0.6 }}>
+          {(memories ?? []).map(m => (
+            <View key={m._id} style={{ backgroundColor: 'rgba(255,201,96,0.06)', borderWidth: 1, borderColor: 'rgba(255,201,96,0.15)', borderRadius: 10, padding: 10, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}>
+              <Txt font="user" style={{ flex: 1, fontSize: 13, color: W.text, lineHeight: 18 }}>{m.content}</Txt>
+              <Pressable onPress={() => forget(m._id)} style={{ padding: 2, opacity: 0.6 }}>
                 <NavIcon name="close" color={W.text2} size={18} />
               </Pressable>
             </View>
           ))}
         </View>
-        <Txt font="user" style={{ marginTop: 8, fontSize: 11, color: W.text2 }}>Total memories with {scenario.name}: {memoryCount + newMemories.length}</Txt>
+        {memories?.length === 0 && (
+          <Txt font="user" style={{ fontSize: 12, color: W.text2 }}>Nothing saved from this character yet.</Txt>
+        )}
       </View>
 
       <View style={{ marginTop: 18, flexDirection: 'row', gap: 10 }}>
         <Pressable onPress={onClose} style={{ flex: 1, height: 44, backgroundColor: W.accentDim, borderWidth: 1, borderColor: 'rgba(255,201,96,0.20)', borderRadius: 12, alignItems: 'center', justifyContent: 'center' }}>
           <Txt font="user" weight={500} style={{ fontSize: 14, color: W.accent }}>Save & close</Txt>
         </Pressable>
-        <Pressable onPress={onClose} style={{ flex: 1, height: 44, borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', borderRadius: 12, alignItems: 'center', justifyContent: 'center' }}>
-          <Txt font="user" weight={500} style={{ fontSize: 14, color: W.text }}>Practice again</Txt>
+        <Pressable onPress={onContinue} style={{ flex: 1, height: 44, borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', borderRadius: 12, alignItems: 'center', justifyContent: 'center' }}>
+          <Txt font="user" weight={500} style={{ fontSize: 14, color: W.text }}>Keep going</Txt>
         </Pressable>
       </View>
     </SheetOverlay>
@@ -432,13 +612,43 @@ const SLIDERS = [
 ] as const;
 const STEP_TITLES = ['', 'The Basics', 'Their Personality', 'Who Are They?', 'Test Them Out'];
 
-export function S18_CharacterCreator({ go, onSave }: { go: Go; onSave: (c: Character) => void }) {
+export function S18_CharacterCreator({ go, apiVoices = [] }: { go: Go; apiVoices?: ApiVoice[] }) {
   const [step, setStep] = useState(1);
   const [name, setName] = useState('');
-  const [gender, setGender] = useState<'male' | 'female' | 'neutral'>('female');
-  const [voice, setVoice] = useState('Sage');
+  const [gender, setGender] = useState<StudioGender>('female');
+  const [voiceId, setVoiceId] = useState<string | null>(null);
   const [traits, setTraits] = useState<Record<string, number>>({ warmth: 0.6, humor: 0.5, directness: 0.5, energy: 0.4, formality: 0.3 });
   const [backstory, setBackstory] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const voiceList = voicesFor(apiVoices, gender);
+  const pickedVoice = voiceList.some(v => v.id === voiceId) ? voiceId : voiceList[0]?.id ?? null;
+
+  const create = async () => {
+    if (!pickedVoice) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await createStudioCharacter({
+        kind: 'custom',
+        name: name.trim(),
+        ...(backstory.trim() ? { backstory: backstory.trim() } : {}),
+        voice_id: pickedVoice,
+        gender: API_GENDER[gender],
+        // Sliders are 0–1 floats here, 0–100 integers on the backend.
+        personality_sliders: Object.fromEntries(
+          Object.entries(traits).map(([k, v]) => [k, Math.round(v * 100)]),
+        ),
+      });
+      go('studio');
+    } catch (e) {
+      console.warn('[Studio] custom character create failed:', e);
+      setErr(createErrorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <Screen>
@@ -469,14 +679,7 @@ export function S18_CharacterCreator({ go, onSave }: { go: Go; onSave: (c: Chara
             </View>
             <View>
               <FieldLabel>Voice</FieldLabel>
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-                {VOICES[gender].map(v => (
-                  <Pressable key={v.n} onPress={() => setVoice(v.n)} style={{ width: '31.5%', backgroundColor: W.surface1, borderRadius: 12, padding: 10, alignItems: 'center', gap: 4, borderWidth: voice === v.n ? 2 : 0, borderColor: W.accent }}>
-                    <Waveform color={W.primary} size={24} />
-                    <Txt font="user" weight={500} style={{ fontSize: 12, color: W.text }}>{v.n}</Txt>
-                  </Pressable>
-                ))}
-              </View>
+              <VoicePicker voices={voiceList} voiceId={pickedVoice} onPick={setVoiceId} />
             </View>
           </>
         )}
@@ -515,6 +718,10 @@ export function S18_CharacterCreator({ go, onSave }: { go: Go; onSave: (c: Chara
         )}
         {step === 4 && (
           <>
+            {/* ponytail: canned preview. A live one needs the character created first,
+                i.e. a create → session → stream round trip before the user commits —
+                not a small diff. Wire it to POST /studio/characters + /sessions/start
+                if the preview needs to be real. */}
             <Txt font="user" style={{ fontSize: 13, color: W.text2, lineHeight: 20 }}>Test {name || 'them'} out. Type something and hear how they respond.</Txt>
             <View style={{ backgroundColor: W.surface1, borderRadius: 12, padding: 12, gap: 8 }}>
               <BubbleMem from="user" text="Hey, can you give me a quick pep talk?" />
@@ -523,12 +730,13 @@ export function S18_CharacterCreator({ go, onSave }: { go: Go; onSave: (c: Chara
           </>
         )}
       </ScrollView>
-      <View style={{ paddingHorizontal: 24, paddingTop: 12, paddingBottom: 16 }}>
+      <View style={{ paddingHorizontal: 24, paddingTop: 12, paddingBottom: 16, gap: 10 }}>
+        {err && <ErrorNote>{err}</ErrorNote>}
         {step < 4 ? (
-          <PrimaryButton disabled={step === 1 && !name.trim()} onPress={() => setStep(s => s + 1)}>Next</PrimaryButton>
+          <PrimaryButton disabled={step === 1 && (!name.trim() || !pickedVoice)} onPress={() => setStep(s => s + 1)}>Next</PrimaryButton>
         ) : (
-          <PrimaryButton onPress={() => { onSave({ id: Date.now(), name, trait: backstory.slice(0, 40) || 'Custom character' }); go('studio'); }}>
-            Create {name || 'character'}
+          <PrimaryButton disabled={busy || !pickedVoice} onPress={create}>
+            {busy ? 'Creating…' : `Create ${name || 'character'}`}
           </PrimaryButton>
         )}
       </View>
