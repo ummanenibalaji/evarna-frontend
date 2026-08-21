@@ -17,6 +17,7 @@ import {
   getScenarios, getStudioCharacters, ApiScenario, ApiStudioCharacter,
 } from '../api';
 import { loadAuthToken, setAuthToken, ApiError } from '../api/client';
+import { getGoogleIdToken, googleSignOut, GoogleSignInUnavailable } from '../lib/googleSignIn';
 
 const SESSION_KEY = 'whisper_session';
 import { BottomNav, TabId } from '../components/BottomNav';
@@ -219,31 +220,34 @@ export default function App() {
     }
   };
 
-  // TODO(auth): this is where the native sign-in SDKs plug in. Both should
-  // return the provider's id_token (or null if the user cancelled):
-  //   google → @react-native-google-signin/google-signin
-  //     GoogleSignin.configure({ webClientId: '...' });
-  //     const { data } = await GoogleSignin.signIn(); return data?.idToken ?? null;
-  //   apple  → expo-apple-authentication
-  //     const c = await AppleAuthentication.signInAsync({ requestedScopes: [FULL_NAME, EMAIL] });
-  //     return c.identityToken;
-  // Until then Google/Apple show an "unavailable" message and email is the
-  // working path. Nothing else needs to change when they land.
-  const nativeIdToken = async (_provider: 'google' | 'apple'): Promise<string | null> => null;
+  // Apple is still a stub: it needs Sign in with Apple enabled on the App ID,
+  // which needs Developer Program enrolment, which needs the D-U-N-S number.
+  // See backend/docs/auth-setup.md. Google is live below.
+  const appleIdToken = async (): Promise<string | null> => null;
 
   const handleOAuth = async (provider: 'google' | 'apple') => {
     setAuthBusy(true);
     setAuthError(null);
     try {
-      const idToken = await nativeIdToken(provider);
+      const idToken = provider === 'google' ? await getGoogleIdToken() : await appleIdToken();
       if (!idToken) {
-        setAuthError(`${provider === 'google' ? 'Google' : 'Apple'} sign-in isn't wired up yet — continue with email.`);
+        // Google returns null when the user backs out of the picker. That is
+        // not an error and must not be reported as one.
+        if (provider === 'apple') {
+          setAuthError("Apple sign-in isn't available yet — continue with email.");
+        }
         return;
       }
       applySession(provider === 'google' ? await signInWithGoogle(idToken) : await signInWithApple(idToken));
     } catch (e) {
-      console.warn('[Auth] oauth failed:', e);
-      setAuthError("Couldn't sign you in. Please try again.");
+      // A configuration or build problem is a different failure from a rejected
+      // token, and saying so saves whoever hits it a long afternoon.
+      if (e instanceof GoogleSignInUnavailable) {
+        setAuthError(e.message);
+      } else {
+        console.warn('[Auth] oauth failed:', e);
+        setAuthError("Couldn't sign you in. Please try again.");
+      }
     } finally {
       setAuthBusy(false);
     }
@@ -281,6 +285,10 @@ export default function App() {
   // Signs out every device (backend-side), then wipes local identity.
   const signOut = async () => {
     try { await logout(); } catch { /* offline — sign out locally anyway */ }
+    // Clear the native Google session too, so the next sign-in shows the
+    // account picker instead of silently resuming the same account — which
+    // looks exactly like sign-out having failed.
+    await googleSignOut();
     setAuthToken(null);
     await AsyncStorage.removeItem(SESSION_KEY).catch(() => {});
     setUserId(null);
