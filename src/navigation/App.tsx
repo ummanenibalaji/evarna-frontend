@@ -16,11 +16,12 @@ import {
   updateCharacter, deleteCharacter, updateMe, deleteMe,
   getScenarios, getStudioCharacters, ApiScenario, ApiStudioCharacter, setPushToken,
 } from '../api';
-import { loadAuthToken, setAuthToken, ApiError } from '../api/client';
+import { loadAuthToken, setAuthToken, ApiError, streamConversation } from '../api/client';
 import { getGoogleIdToken, googleSignOut, GoogleSignInUnavailable } from '../lib/googleSignIn';
 import {
   requestPushPermission, getPushTokenIfGranted, getDeviceTimezone,
-  addPushTapListener, getInitialPushTap, PushTapData,
+  addPushTapListener, addPushReplyListener, notifyReplyFailed,
+  getInitialPushTap, PushTapData,
 } from '../lib/notifications';
 
 const SESSION_KEY = 'whisper_session';
@@ -184,6 +185,30 @@ export default function App() {
     setScreen('chat');
   };
 
+  // A reply typed straight into the notification shade. This can run with no UI
+  // mounted (app backgrounded or killed), so everything it needs comes from the
+  // payload and the persisted token — never from React state.
+  const sendPushReply = async (text: string, data: PushTapData) => {
+    const message = text.trim();
+    if (!message) return;
+    // No session, or no token to send it with: the user typed something and
+    // believes it went. Say otherwise rather than dropping it silently.
+    if (!data.session_id || !(await loadAuthToken())) { notifyReplyFailed(); return; }
+    // ponytail: fired and never awaited or aborted on purpose — the backend
+    // persists the turn and finishes the reply even if we disconnect, and it
+    // pushes the response itself. Consuming the stream here would only keep a
+    // backgrounded app alive for output nobody is looking at.
+    let opened = false;
+    streamConversation({ session_id: data.session_id, message }, {
+      onChunk: () => { opened = true; },
+      onDone: () => {},
+      onCrisis: () => { opened = true; },
+      // Only a failure *before* the first byte means it never got sent; a drop
+      // mid-stream means the server already has the turn.
+      onError: () => { if (!opened) notifyReplyFailed(); },
+    });
+  };
+
   // Prevent double-write on first restore
   const restoredRef = useRef(false);
 
@@ -247,6 +272,12 @@ export default function App() {
   // Backgrounded case. Registered once; the app is already authenticated by the
   // time a notification can arrive for it.
   useEffect(() => addPushTapListener(d => { openFromPush(d).catch(() => {}); }), []);
+
+  // Inline reply. Its own listener so the tap path stays purely navigational —
+  // replying from the shade must not drag the user into a screen.
+  useEffect(() => addPushReplyListener((text, d) => {
+    sendPushReply(text, d).catch(() => notifyReplyFailed());
+  }), []);
 
   // ── Auth handlers ────────────────────────────────────────────────────────
 

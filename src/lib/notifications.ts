@@ -15,8 +15,12 @@ export interface PushTapData {
   session_id?: string;
 }
 
+/** The action identifier the "message" category's Reply box reports back with. */
+const REPLY_ACTION = 'reply';
+
 let mod: typeof NotificationsModule | null = null;
 let handlerSet = false;
+let categorySet = false;
 
 // Returns null instead of throwing: every caller here is fire-and-forget and a
 // missing native module must never be louder than "notifications are off".
@@ -40,8 +44,45 @@ function load(): typeof NotificationsModule | null {
       }),
     });
     handlerSet = true;
+    registerMessageCategory();
   }
   return mod;
+}
+
+/**
+ * Registers the "message" category the backend tags its pushes with — that is
+ * what puts a Reply box in the notification shade. Called from load(), so it is
+ * in place before the first notification can arrive; the flag makes repeat
+ * calls free.
+ */
+export function registerMessageCategory(): void {
+  const N = load();
+  if (!N || categorySet) return;
+  categorySet = true;
+  N.setNotificationCategoryAsync('message', [
+    {
+      identifier: REPLY_ACTION,
+      buttonTitle: 'Reply',
+      textInput: { submitButtonTitle: 'Send', placeholder: 'Message' },
+      // Without this the reply button foregrounds the app, which defeats the
+      // entire point — the value of replying from the shade is not opening the
+      // app. The send happens in the background handler either way.
+      options: { opensAppToForeground: false },
+    },
+  ]).catch(() => { categorySet = false; });
+}
+
+/**
+ * Immediate local notification telling the user a reply they typed never left
+ * the device. Deliberately plain — they typed into a shade, not into the app.
+ */
+export function notifyReplyFailed(): void {
+  const N = load();
+  if (!N) return;
+  N.scheduleNotificationAsync({
+    content: { title: 'Message not sent', body: "Couldn't send that — open Evarna to try again" },
+    trigger: null,
+  }).catch(() => {});
 }
 
 /** The device's IANA zone. The backend needs it for quiet hours (22:00–08:00 local). */
@@ -114,7 +155,29 @@ export function addPushTapListener(cb: (data: PushTapData) => void): () => void 
   const N = load();
   if (!N) return () => {};
   const sub = N.addNotificationResponseReceivedListener(r => {
+    // Everything that isn't the Reply box — the plain tap and any future
+    // action — still means "open the chat".
+    if (r.actionIdentifier === REPLY_ACTION) return;
     cb((r.notification.request.content.data ?? {}) as PushTapData);
+  });
+  return () => sub.remove();
+}
+
+/**
+ * Text typed into the notification's Reply box. Separate from the tap listener
+ * so the navigation path never has to know this exists. Returns an unsubscribe.
+ */
+export function addPushReplyListener(cb: (text: string, data: PushTapData) => void): () => void {
+  const N = load();
+  if (!N) return () => {};
+  const sub = N.addNotificationResponseReceivedListener(r => {
+    if (r.actionIdentifier !== REPLY_ACTION) return;
+    // This runs outside the app's lifecycle — a throw here has no owner.
+    try {
+      cb(r.userText ?? '', (r.notification.request.content.data ?? {}) as PushTapData);
+    } catch (e) {
+      console.warn('[Push] reply handler threw:', e);
+    }
   });
   return () => sub.remove();
 }
@@ -132,6 +195,9 @@ export async function getInitialPushTap(): Promise<PushTapData | null> {
     // The OS keeps the last response until it's cleared, so without this a plain
     // launch days later would re-open that same chat out of nowhere.
     await N.clearLastNotificationResponseAsync().catch(() => {});
+    // A cold start caused by an inline reply must not open the chat as well —
+    // addPushReplyListener already got the same response and sent the text.
+    if (r.actionIdentifier === REPLY_ACTION) return null;
     return (r.notification.request.content.data ?? {}) as PushTapData;
   } catch {
     return null;
