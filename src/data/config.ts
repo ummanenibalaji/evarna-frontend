@@ -95,6 +95,10 @@ export interface Companion {
   lastInteractionAt?: string;       // ISO date — used for sort + timestamp
   lastMessagePreview?: string | null;
   memoryHighlight?: string | null;
+  // 0-100, straight from the backend. Undefined for the static prototype
+  // companions below, which is why the edit screen has to handle its absence
+  // rather than substituting defaults.
+  personalitySliders?: Record<string, number>;
 }
 
 export const PLUS_COMPANIONS: Companion[] = [

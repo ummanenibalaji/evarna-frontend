@@ -81,6 +81,9 @@ export interface ApiCharacter {
   last_message_preview?: string | null;
   memory_highlight?: string | null;
   created_at?: string;
+  // 0-100 integers. Absent only from older backends; the edit screen must not
+  // invent values when it is missing (it used to, and then saved them back).
+  personality_sliders?: Record<string, number>;
 }
 
 // Backend returns { characters: [...] } inside ApiResponse.data; unwrap here so
@@ -112,6 +115,38 @@ export interface UpdateCharacterPayload {
 
 export const updateCharacter = (characterId: string, p: UpdateCharacterPayload): Promise<unknown> =>
   apiPatch(`/characters/${characterId}`, p);
+
+// ── Adaptation (Phase C) ───────────────────────────────────────────────────
+
+// An offer to retune the companion, derived from something the user actually
+// said. `quote` is the extracted memory it came from — shown so the user can
+// see why they are being asked.
+export interface ApiSuggestion {
+  memory_id: string;
+  trait: 'warmth' | 'humor' | 'directness' | 'energy' | 'formality';
+  direction: 'up' | 'down';
+  quote: string;
+  from: number;
+  to: number;
+  /** "more direct" — render as "Be more direct". */
+  phrase: string;
+}
+
+// Fetching is what starts the backend's one-a-week cooldown, so call it when
+// the user opens the profile — never on a timer.
+export const getSuggestion = async (characterId: string): Promise<ApiSuggestion | null> => {
+  const res = await apiGet<{ suggestion: ApiSuggestion | null }>(`/characters/${characterId}/suggestion`);
+  return res.suggestion;
+};
+
+// 409 (ApiError code 'SUGGESTION_STALE') means the offer was already answered —
+// treat it as "refetch", not as a failure worth showing.
+export const resolveSuggestion = (
+  characterId: string,
+  memoryId: string,
+  action: 'apply' | 'dismiss',
+): Promise<{ personality_sliders: Record<string, number> }> =>
+  apiPost(`/characters/${characterId}/suggestion`, { memory_id: memoryId, action });
 
 // Soft delete — the companion disappears from GET /characters.
 export const deleteCharacter = (characterId: string): Promise<unknown> =>

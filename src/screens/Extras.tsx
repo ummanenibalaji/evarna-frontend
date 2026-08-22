@@ -17,7 +17,7 @@ import { NavIcon, IconName } from '../components/NavIcon';
 import { Avatar } from '../components/Avatar';
 import { AmbientBg } from '../components/AmbientBg';
 import { Pill, PrimaryButton } from '../components/Atoms';
-import { getMemories } from '../api';
+import { getMemories, getSuggestion, resolveSuggestion, ApiSuggestion } from '../api';
 import { BubbleMem, ChatInput } from '../components/ChatBits';
 import { useEntrance } from '../theme/animations';
 import { W, alpha } from '../theme/theme';
@@ -73,43 +73,116 @@ export function S25_NotifPermission({ go, companion, onAllow, onSkip }: {
 // ─── S26 — COMPANION PROFILE / EDIT ─────────────────────────────────────────
 type TraitKey = 'warmth' | 'humor' | 'directness' | 'energy' | 'formality';
 
+// The backend stores 0-100 integers; these sliders work in 0-1 floats. The two
+// were never converted, in either direction.
+function traitsFromApi(v?: Record<string, number>): Record<TraitKey, number> | null {
+  if (!v) return null;
+  const keys: TraitKey[] = ['warmth', 'humor', 'directness', 'energy', 'formality'];
+  if (keys.some(k => typeof v[k] !== 'number')) return null;
+  return keys.reduce((acc, k) => { acc[k] = Math.max(0, Math.min(1, v[k] / 100)); return acc; },
+    {} as Record<TraitKey, number>);
+}
+
+function traitsToApi(t: Record<TraitKey, number>): Record<string, number> {
+  return Object.fromEntries(Object.entries(t).map(([k, v]) => [k, Math.round(v * 100)]));
+}
+
 export function S26_CompanionEdit({
-  go, companion, onSave, onDelete, backTo = 'chat',
+  go, companion, onSave, onDelete, onRefresh, backTo = 'chat',
 }: {
   go: Go; companion: Companion; onChange?: (c: Companion) => void;
   // Fired once, on leaving the screen, with whatever actually changed.
   onSave?: (p: { name?: string; personality_sliders?: Record<string, number> }) => void;
+  // Accepting a suggestion changes the companion server-side without going
+  // through onSave, so the list this screen was opened from needs re-reading.
+  onRefresh?: () => void;
   onDelete?: () => void; backTo?: ScreenName;
 }) {
   const [name, setName] = useState(companion.name);
   // null until known. Rendering 0 while the request is in flight would flash
   // "0 memories stored" at someone whose companion remembers plenty.
   const [memoryCount, setMemoryCount] = useState<number | null>(null);
+  const characterId = String(companion.id);
+  const isRealCompanion = characterId.length === 24; // prototype companions have short ids
 
   useEffect(() => {
-    const id = String(companion.id);
-    if (!id || id.length !== 24) return; // prototype companions have numeric ids
-    getMemories(id)
+    if (!isRealCompanion) return;
+    getMemories(characterId)
       .then(ms => setMemoryCount(ms.length))
       .catch(() => { /* leave it unlabelled rather than showing a wrong number */ });
-  }, [companion.id]);
+  }, [characterId, isRealCompanion]);
   const [editName, setEditName] = useState(false);
   const [archetype] = useState(companion.archetype || 'mentor');
   const [gender] = useState((companion as any).gender || 'female');
   const [voice] = useState((companion as any).voice || 'Sage');
   const [commStyle, setCommStyle] = useState('Warm & gentle');
-  const [traits, setTraits] = useState<Record<TraitKey, number>>({ warmth: 0.7, humor: 0.5, directness: 0.5, energy: 0.45, formality: 0.3 });
+
+  // The companion's ACTUAL personality, or null while it is unknown.
+  //
+  // This used to be seeded with hardcoded values (0.7/0.5/0.5/0.45/0.3) that
+  // had nothing to do with the companion being edited, so every profile showed
+  // the same invented personality — and touching any one slider then saved all
+  // five of those invented values over the real ones. The sliders are not
+  // rendered at all until the real values are in hand.
+  const [traits, setTraits] = useState<Record<TraitKey, number> | null>(
+    () => traitsFromApi(companion.personalitySliders),
+  );
+  const baseline = useRef<Record<TraitKey, number> | null>(traits);
+  useEffect(() => {
+    // Sliders can arrive after mount when the companion list refreshes.
+    if (traits) return;
+    const seeded = traitsFromApi(companion.personalitySliders);
+    if (seeded) { setTraits(seeded); baseline.current = seeded; }
+  }, [companion.personalitySliders, traits]);
+
+  const [suggestion, setSuggestion] = useState<ApiSuggestion | null>(null);
+  const [suggestionBusy, setSuggestionBusy] = useState(false);
+
+  // Fetched here, on open, and nowhere else: the backend starts its one-a-week
+  // cooldown when this is read, so polling it would burn suggestions the user
+  // never saw.
+  useEffect(() => {
+    if (!isRealCompanion) return;
+    getSuggestion(characterId)
+      .then(setSuggestion)
+      .catch(() => { /* an offer is a nicety; never surface its absence */ });
+  }, [characterId, isRealCompanion]);
+
+  const answerSuggestion = (action: 'apply' | 'dismiss') => {
+    if (!suggestion || suggestionBusy) return;
+    const answered = suggestion;
+    setSuggestionBusy(true);
+    setSuggestion(null); // it is gone either way; don't leave it tappable
+    resolveSuggestion(characterId, answered.memory_id, action)
+      .then(res => {
+        // Reflect the backend's own numbers rather than recomputing the step
+        // locally — it is the one that decided how far the slider moves.
+        const next = traitsFromApi(res.personality_sliders);
+        if (next && action === 'apply') { setTraits(next); baseline.current = next; onRefresh?.(); }
+      })
+      .catch(() => {
+        // Put it back so the user can try again. A silently vanished offer
+        // looks like the tap worked.
+        if (action === 'apply') setSuggestion(answered);
+      })
+      .finally(() => setSuggestionBusy(false));
+  };
+
   const [showAvatarSheet, setShowAvatarSheet] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
   const accent = ARCHETYPE_COLORS[archetype] || W.primary;
-  const initialTraits = useRef(traits).current;
 
   // ponytail: saves on back-nav rather than per-edit — no save button to add and
   // no PATCH per slider drag. Failures only log; add an inline error if it matters.
   const saveAndLeave = () => {
     const patch: { name?: string; personality_sliders?: Record<string, number> } = {};
     if (name.trim() && name.trim() !== companion.name) patch.name = name.trim();
-    if (JSON.stringify(traits) !== JSON.stringify(initialTraits)) patch.personality_sliders = traits;
+    // Only when they are real AND actually moved. The 0-1 → 0-100 conversion is
+    // not cosmetic: sending 0.7 to a field validated as 0-100 stored 0.7, which
+    // set every trait to its floor.
+    if (traits && baseline.current && JSON.stringify(traits) !== JSON.stringify(baseline.current)) {
+      patch.personality_sliders = traitsToApi(traits);
+    }
     if (onSave && Object.keys(patch).length > 0) onSave(patch);
     go(backTo);
   };
@@ -168,23 +241,41 @@ export function S26_CompanionEdit({
         {/* Personality */}
         <ProfileSection title="Personality">
           <View style={{ padding: 14, gap: 14 }}>
-            {sliders.map(s => (
-              <View key={s.k}>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                  <Txt font="user" weight={500} style={{ fontSize: 13, color: W.text }}>{s.l}</Txt>
-                </View>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                  <Txt style={{ fontSize: 16 }}>{s.left}</Txt>
-                  <TraitSlider value={traits[s.k]} onChange={v => setTraits(t => ({ ...t, [s.k]: v }))} />
-                  <Txt style={{ fontSize: 16 }}>{s.right}</Txt>
-                </View>
-              </View>
-            ))}
-            <View style={{ marginTop: 4, paddingVertical: 8, paddingHorizontal: 12, backgroundColor: 'rgba(255,138,118,0.08)', borderRadius: 8 }}>
-              <Txt font="user" style={{ fontSize: 12, color: W.secondary, fontStyle: 'italic' }}>
-                {sliders.map(s => traitWord(s.k, traits[s.k])).join(', ')}
+            {traits === null ? (
+              <Txt font="user" style={{ fontSize: 13, color: W.text2 }}>
+                Loading {name}'s personality…
               </Txt>
-            </View>
+            ) : (
+              <>
+                {sliders.map(s => (
+                  <View key={s.k}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
+                      <Txt font="user" weight={500} style={{ fontSize: 13, color: W.text }}>{s.l}</Txt>
+                    </View>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <Txt style={{ fontSize: 16 }}>{s.left}</Txt>
+                      <TraitSlider value={traits[s.k]} onChange={v => setTraits(t => (t ? { ...t, [s.k]: v } : t))} />
+                      <Txt style={{ fontSize: 16 }}>{s.right}</Txt>
+                    </View>
+                  </View>
+                ))}
+                <View style={{ marginTop: 4, paddingVertical: 8, paddingHorizontal: 12, backgroundColor: 'rgba(255,138,118,0.08)', borderRadius: 8 }}>
+                  <Txt font="user" style={{ fontSize: 12, color: W.secondary, fontStyle: 'italic' }}>
+                    {sliders.map(s => traitWord(s.k, traits[s.k])).join(', ')}
+                  </Txt>
+                </View>
+              </>
+            )}
+            {suggestion && traits ? (
+              <SuggestionCard
+                suggestion={suggestion}
+                companionName={name}
+                accent={accent}
+                busy={suggestionBusy}
+                onApply={() => answerSuggestion('apply')}
+                onDismiss={() => answerSuggestion('dismiss')}
+              />
+            ) : null}
           </View>
         </ProfileSection>
 
@@ -225,6 +316,50 @@ export function S26_CompanionEdit({
       {showAvatarSheet ? <AvatarSheet onClose={() => setShowAvatarSheet(false)} /> : null}
       {showDelete ? <DeleteConfirm name={name} onCancel={() => setShowDelete(false)} onConfirm={() => { setShowDelete(false); onDelete && onDelete(); go('home'); }} /> : null}
     </Screen>
+  );
+}
+
+/**
+ * Phase C — the companion noticing what it was told.
+ *
+ * The quote is the whole point. An app that says "want me to be more direct?"
+ * out of nowhere is guessing at you; one that shows the sentence it is working
+ * from is answering something you actually said. It also makes the offer
+ * refusable on the merits — if the memory is wrong, "not quite" is the right
+ * answer and the memory screen is where you go to delete it.
+ */
+function SuggestionCard({ suggestion, companionName, accent, busy, onApply, onDismiss }: {
+  suggestion: ApiSuggestion; companionName: string; accent: string; busy: boolean;
+  onApply: () => void; onDismiss: () => void;
+}) {
+  return (
+    <View style={{ marginTop: 6, borderRadius: 12, borderWidth: 1, borderColor: alpha(accent, '33'), backgroundColor: alpha(accent, '12'), padding: 14, gap: 10 }}>
+      <Txt font="user" weight={600} style={{ fontSize: 11, color: accent, textTransform: 'uppercase', letterSpacing: 0.9 }}>
+        From something you said
+      </Txt>
+      <Txt font="user" style={{ fontSize: 13, color: W.text2, fontStyle: 'italic' }}>
+        “{suggestion.quote}”
+      </Txt>
+      <Txt font="user" style={{ fontSize: 14, color: W.text }}>
+        Want {companionName} to be {suggestion.phrase}?
+      </Txt>
+      <View style={{ flexDirection: 'row', gap: 8 }}>
+        <Pressable
+          onPress={onApply}
+          disabled={busy}
+          style={{ flex: 1, height: 38, borderRadius: 10, alignItems: 'center', justifyContent: 'center', backgroundColor: alpha(accent, '33'), borderWidth: 1, borderColor: alpha(accent, '55'), opacity: busy ? 0.5 : 1 }}
+        >
+          <Txt font="user" weight={600} style={{ fontSize: 13, color: W.text }}>Yes, do that</Txt>
+        </Pressable>
+        <Pressable
+          onPress={onDismiss}
+          disabled={busy}
+          style={{ flex: 1, height: 38, borderRadius: 10, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: 'rgba(255,255,255,0.10)', opacity: busy ? 0.5 : 1 }}
+        >
+          <Txt font="user" style={{ fontSize: 13, color: W.text2 }}>Not quite</Txt>
+        </Pressable>
+      </View>
+    </View>
   );
 }
 

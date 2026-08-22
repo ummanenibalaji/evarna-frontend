@@ -72,6 +72,7 @@ function apiCharacterToCompanion(c: ApiCharacter): Companion {
     lastMessagePreview: c.last_message_preview ?? undefined,
     memoryHighlight: c.memory_highlight ?? undefined,
     memory: c.memory_highlight ?? undefined,
+    personalitySliders: c.personality_sliders,
   };
 }
 
@@ -699,6 +700,7 @@ export default function App() {
         go={(s) => go(s)}
         companion={currentCompanion}
         onSave={activeCharacterId ? (p) => { updateCharacter(activeCharacterId, p).then(refreshUserCharacters).catch(e => console.warn('[Companion] save failed:', e)); } : undefined}
+        onRefresh={refreshUserCharacters}
         onDelete={activeCharacterId ? () => handleDeleteCompanion(activeCharacterId) : () => {}}
         backTo={profileBack}
       />;
