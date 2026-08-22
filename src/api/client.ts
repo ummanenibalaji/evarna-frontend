@@ -88,6 +88,17 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   return json.data;
 }
 
+export async function apiPut<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...TUNNEL_HEADERS, ...authHeaders() },
+    body: JSON.stringify(body),
+  });
+  await assertOk(res, `PUT ${path}`);
+  const json = (await res.json()) as ApiResponse<T>;
+  return json.data;
+}
+
 export async function apiPatch<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     method: 'PATCH',

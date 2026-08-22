@@ -1,4 +1,4 @@
-import { apiGet, apiPost, apiPatch, apiDelete } from './client';
+import { apiGet, apiPost, apiPut, apiPatch, apiDelete } from './client';
 
 // ── Auth ───────────────────────────────────────────────────────────────────
 
@@ -209,6 +209,14 @@ export const deleteMe = (): Promise<unknown> =>
 // The user's full data as JSON (App Store data-portability requirement).
 export const exportMyData = (): Promise<unknown> =>
   apiGet('/users/me/export');
+
+// ── Push notifications ─────────────────────────────────────────────────────
+
+// `push_token: null` clears the device's token (sign-out). `timezone` is an IANA
+// zone the backend uses for quiet hours, so it is re-sent on every launch —
+// people travel, and a stale zone means a notification at 3am.
+export const setPushToken = (pushToken: string | null, timezone?: string): Promise<unknown> =>
+  apiPut('/users/me/push-token', { push_token: pushToken, ...(timezone ? { timezone } : {}) });
 
 // ── Sessions ───────────────────────────────────────────────────────────────
 

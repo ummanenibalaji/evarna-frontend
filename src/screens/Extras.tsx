@@ -24,7 +24,12 @@ import { Go, ScreenName } from '../navigation/types';
 import { Companion, ARCHETYPE_COLORS, ARCHETYPE_LABEL, MEM_TYPES } from '../data/config';
 
 // ─── S25 — NOTIFICATION PERMISSION (companion-led ask) ──────────────────────
-export function S25_NotifPermission({ go, companion }: { go: Go; companion: Companion }) {
+export function S25_NotifPermission({ go, companion, onAllow, onSkip }: {
+  go: Go; companion: Companion;
+  // The screen only navigates; App.tsx owns the permission prompt and the
+  // token upload, exactly like S30_Login's auth handlers.
+  onAllow?: () => void; onSkip?: () => void;
+}) {
   return (
     <Screen label="25 Notification Permission">
       <View style={{ flex: 1, paddingTop: '18%', paddingHorizontal: 24, paddingBottom: 24, alignItems: 'center' }}>
@@ -57,8 +62,8 @@ export function S25_NotifPermission({ go, companion }: { go: Go; companion: Comp
         </Txt>
       </View>
       <View style={{ paddingHorizontal: 24, paddingTop: 12, paddingBottom: 24, gap: 8 }}>
-        <PrimaryButton onPress={() => setTimeout(() => go('first-chat'), 300)}>Yes, let them check in</PrimaryButton>
-        <PrimaryButton variant="text" onPress={() => go('first-chat')}>Not now</PrimaryButton>
+        <PrimaryButton onPress={() => { onAllow?.(); setTimeout(() => go('first-chat'), 300); }}>Yes, let them check in</PrimaryButton>
+        <PrimaryButton variant="text" onPress={() => { onSkip?.(); go('first-chat'); }}>Not now</PrimaryButton>
       </View>
     </Screen>
   );

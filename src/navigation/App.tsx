@@ -14,10 +14,14 @@ import {
   onboardUser, getVoices, ApiVoice, getUserCharacters, ApiCharacter, createCharacter,
   signInWithGoogle, signInWithApple, requestEmailCode, verifyEmailCode, getMe, logout, AuthSession,
   updateCharacter, deleteCharacter, updateMe, deleteMe,
-  getScenarios, getStudioCharacters, ApiScenario, ApiStudioCharacter,
+  getScenarios, getStudioCharacters, ApiScenario, ApiStudioCharacter, setPushToken,
 } from '../api';
 import { loadAuthToken, setAuthToken, ApiError } from '../api/client';
 import { getGoogleIdToken, googleSignOut, GoogleSignInUnavailable } from '../lib/googleSignIn';
+import {
+  requestPushPermission, getPushTokenIfGranted, getDeviceTimezone,
+  addPushTapListener, getInitialPushTap, PushTapData,
+} from '../lib/notifications';
 
 const SESSION_KEY = 'whisper_session';
 import { BottomNav, TabId } from '../components/BottomNav';
@@ -146,9 +150,39 @@ export default function App() {
           const tb = b.last_interaction_at ? new Date(b.last_interaction_at).getTime() : 0;
           return tb - ta;
         });
-        setUserCharacters(sorted.map(apiCharacterToCompanion));
+        const mapped = sorted.map(apiCharacterToCompanion);
+        setUserCharacters(mapped);
+        return mapped;
       })
-      .catch(() => { /* backend offline — fall back to userCompanion */ });
+      .catch((): Companion[] | null => null /* backend offline — fall back to userCompanion */);
+
+  // ── Push ──────────────────────────────────────────────────────────────────
+  // Every one of these is fire-and-forget with a caught error: a user whose
+  // notification permission is broken must still be able to use the app.
+
+  // Timezone rides along with the token and is re-sent on every launch —
+  // people travel, and a stale zone means a check-in at 3am.
+  const uploadPushToken = (token: string | null) => {
+    if (!token) return;
+    setPushToken(token, getDeviceTimezone()).catch(e => console.warn('[Push] upload failed:', e));
+  };
+
+  // Launch / post-sign-in refresh. Does NOT prompt — the ask belongs to S25.
+  const refreshPushToken = () => {
+    getPushTokenIfGranted().then(uploadPushToken).catch(() => {});
+  };
+
+  // A tapped check-in opens that companion's chat. The message itself is already
+  // in the backend's history, so S14_Chat's own load is what surfaces it.
+  // ponytail: always refetches the character list rather than reading state,
+  // which keeps the listener closure-free at the cost of one request per tap.
+  const openFromPush = async (data: PushTapData) => {
+    if (!data.character_id) return;
+    const c = (await refreshUserCharacters())?.find(x => x.id === data.character_id);
+    if (!c) return;
+    setActiveCompanion(c);
+    setScreen('chat');
+  };
 
   // Prevent double-write on first restore
   const restoredRef = useRef(false);
@@ -190,9 +224,13 @@ export default function App() {
         if (me.display_name) setUserName(me.display_name);
         setUserEmail(me.email ?? '');
         setIsMinor(!!me.is_minor);
+        refreshPushToken();
         if (me.onboarding_completed) {
           refreshUserCharacters();
           setScreen('home');
+          // Killed-app case: the tap that launched us. Read after the session is
+          // confirmed, or the character fetch it makes would 401.
+          getInitialPushTap().then(d => d && openFromPush(d)).catch(() => {});
         } else {
           setIsNewUser(true);
           setScreen('age');
@@ -206,11 +244,16 @@ export default function App() {
     })();
   }, []);
 
+  // Backgrounded case. Registered once; the app is already authenticated by the
+  // time a notification can arrive for it.
+  useEffect(() => addPushTapListener(d => { openFromPush(d).catch(() => {}); }), []);
+
   // ── Auth handlers ────────────────────────────────────────────────────────
 
   const applySession = (s: AuthSession) => {
     setAuthToken(s.token);
     setUserId(s.user_id);
+    refreshPushToken();
     if (s.onboarding_completed) {
       refreshUserCharacters();
       go('home');
@@ -284,6 +327,10 @@ export default function App() {
 
   // Signs out every device (backend-side), then wipes local identity.
   const signOut = async () => {
+    // First, while the token is still valid: a signed-out device must stop
+    // receiving someone else's companion messages. After setAuthToken(null)
+    // this would 401, and after logout() the token may already be revoked.
+    try { await setPushToken(null); } catch { /* offline — best effort */ }
     try { await logout(); } catch { /* offline — sign out locally anyway */ }
     // Clear the native Google session too, so the next sign-in shows the
     // account picker instead of silently resuming the same account — which
@@ -609,7 +656,8 @@ export default function App() {
         companion={{ name: companionName, archetype: archetypePick }}
         accent={ARCHETYPE_COLORS[archetypePick] || W.primary}
       />;
-      case 'notif': return <S25_NotifPermission go={go} companion={{ id: 'new', name: companionName, archetype: archetypePick }} />;
+      case 'notif': return <S25_NotifPermission go={go} companion={{ id: 'new', name: companionName, archetype: archetypePick }}
+        onAllow={() => { requestPushPermission().then(uploadPushToken).catch(() => {}); }} />;
       case 'first-chat': return <S09_FirstChat go={(s) => go(s)} companion={{ id: characterId ?? 'new', name: companionName, archetype: archetypePick }} userId={userId ?? undefined} characterId={characterId ?? undefined} />;
       case 'home': return renderHome(true);
       case 'callDepleted': return <S27_StartCallDepleted companion={currentCompanion} onClose={() => setScreen('home')} onTopUp={() => setScreen('topup')} onUpgrade={() => setScreen('paywall')} onText={() => setScreen('chat')} />;
