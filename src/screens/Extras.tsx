@@ -17,6 +17,7 @@ import { NavIcon, IconName } from '../components/NavIcon';
 import { Avatar } from '../components/Avatar';
 import { AmbientBg } from '../components/AmbientBg';
 import { Pill, PrimaryButton } from '../components/Atoms';
+import { getMemories } from '../api';
 import { BubbleMem, ChatInput } from '../components/ChatBits';
 import { useEntrance } from '../theme/animations';
 import { W, alpha } from '../theme/theme';
@@ -81,6 +82,17 @@ export function S26_CompanionEdit({
   onDelete?: () => void; backTo?: ScreenName;
 }) {
   const [name, setName] = useState(companion.name);
+  // null until known. Rendering 0 while the request is in flight would flash
+  // "0 memories stored" at someone whose companion remembers plenty.
+  const [memoryCount, setMemoryCount] = useState<number | null>(null);
+
+  useEffect(() => {
+    const id = String(companion.id);
+    if (!id || id.length !== 24) return; // prototype companions have numeric ids
+    getMemories(id)
+      .then(ms => setMemoryCount(ms.length))
+      .catch(() => { /* leave it unlabelled rather than showing a wrong number */ });
+  }, [companion.id]);
   const [editName, setEditName] = useState(false);
   const [archetype] = useState(companion.archetype || 'mentor');
   const [gender] = useState((companion as any).gender || 'female');
@@ -189,8 +201,18 @@ export function S26_CompanionEdit({
 
         {/* Memory */}
         <ProfileSection title="Memory">
-          <ProfileRow label="47 memories stored" value="View all" onPress={() => go('memories')} />
-          <ProfileRow label={<Txt font="user" style={{ fontSize: 14, color: W.danger }}>Clear all memories for {name}</Txt>} />
+          {/* The count was hardcoded to 47 for every companion. A real number
+              or none — an invented one undermines the whole feature, since the
+              point of this screen is that the memory is real and inspectable. */}
+          <ProfileRow
+            label={
+              memoryCount === null
+                ? 'Memories'
+                : `${memoryCount} ${memoryCount === 1 ? 'memory' : 'memories'} stored`
+            }
+            value="View all"
+            onPress={() => go('memories')}
+          />
         </ProfileSection>
 
         {/* Danger zone */}

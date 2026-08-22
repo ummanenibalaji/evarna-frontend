@@ -17,7 +17,7 @@ import { Txt } from '../components/Txt';
 import { Card, Toggle, PrimaryButton, MeterBar } from '../components/Atoms';
 import { useEntrance, usePressScale, useCountUp } from '../theme/animations';
 import { W, GRAD, alpha, rgba } from '../theme/theme';
-import { ARCHETYPE_COLORS, ARCHETYPE_LABEL, MEM_TYPES, SAMPLE_MEMORIES, Companion, Tier, Memory, RITUAL } from '../data/config';
+import { ARCHETYPE_COLORS, ARCHETYPE_LABEL, MEM_TYPES, Companion, Tier, Memory, RITUAL } from '../data/config';
 import { Go, ScreenName } from '../navigation/types';
 import { getMemories, deleteMemory, deleteAllMemories, ApiMemory, getUserStats, ApiUserStats, exportMyData } from '../api';
 
@@ -719,7 +719,7 @@ function Row({ label, right, onPress, icon, iconColor }: {
 // ─── S22 MEMORIES LIST ───────────────────────────────────────────────────
 
 // Extended display type carries MongoDB _id for delete calls
-type DisplayMemory = Memory & { _mongoId?: string };
+type DisplayMemory = Memory & { _mongoId?: string; _recalled?: number };
 
 function toDisplayMemory(m: ApiMemory, idx: number, via: string): DisplayMemory {
   return {
@@ -729,32 +729,45 @@ function toDisplayMemory(m: ApiMemory, idx: number, via: string): DisplayMemory 
     via,
     date: new Date(m.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
     _mongoId: m._id,
+    _recalled: m.access_count ?? 0,
   };
 }
 
 export function S22_Memories({ go, characterId, companionName }: { go: Go; characterId?: string; companionName?: string }) {
   const [filter, setFilter] = useState('all');
-  const [memories, setMemories] = useState<DisplayMemory[]>(SAMPLE_MEMORIES);
+  // No seeded sample data. This screen used to open on seven invented
+  // memories — including a bereavement — which a new user would read as things
+  // their companion believed about them. An empty list is the honest state.
+  const [memories, setMemories] = useState<DisplayMemory[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [confirmClearAll, setConfirmClearAll] = useState(false);
   const tabs: [string, string][] = [['all', 'All'], ['fact', 'Facts'], ['emotion', 'Emotions'], ['event', 'Events'], ['preference', 'Preferences']];
   const via = companionName ?? 'Your companion';
 
-  // Fetch real memories when characterId is available; re-fetch on filter change
   useEffect(() => {
-    if (!characterId) return;
+    if (!characterId) { setLoading(false); return; }
+    setLoading(true);
+    setLoadFailed(false);
     getMemories(characterId, filter !== 'all' ? filter : undefined)
-      .then(data => setMemories(data.map((m, i) => toDisplayMemory(m, i, via))))
-      .catch(() => { /* keep existing memories on error */ });
+      .then(data => { setMemories(data.map((m, i) => toDisplayMemory(m, i, via))); })
+      // "We could not load these" and "there are none" are different facts and
+      // must not look the same — silently showing an empty list on a network
+      // error tells the user their companion has forgotten them.
+      .catch(() => setLoadFailed(true))
+      .finally(() => setLoading(false));
   }, [characterId, filter]);
 
-  const filtered = characterId
-    ? memories
-    : memories.filter(m => filter === 'all' || m.type === filter);
+  const filtered = memories;
 
   const handleDelete = (mem: DisplayMemory) => {
+    if (!characterId || !mem._mongoId) return;
+    const previous = memories;
     setMemories(prev => prev.filter(m => m.id !== mem.id));
-    if (characterId && mem._mongoId) {
-      deleteMemory(mem._mongoId).catch(() => {});
-    }
+    // Put it back if the delete did not land. Leaving it gone locally while it
+    // still exists server-side means it reappears on the next visit, which
+    // reads as the app ignoring the request.
+    deleteMemory(mem._mongoId).catch(() => setMemories(previous));
   };
 
   return (
@@ -762,7 +775,6 @@ export function S22_Memories({ go, characterId, companionName }: { go: Go; chara
       <TopBar
         left={<Pressable onPress={() => go('settings')}><NavIcon name="back" color={W.text2} /></Pressable>}
         center={<Txt font="comp" weight={600} style={{ fontSize: 16, color: W.text }}>Memories</Txt>}
-        right={<Pressable><NavIcon name="search" color={W.text2} /></Pressable>}
         bg="rgba(24,16,20,0.55)"
         border
       />
@@ -774,6 +786,25 @@ export function S22_Memories({ go, characterId, companionName }: { go: Go; chara
         ))}
       </ScrollView>
       <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingTop: 8, paddingHorizontal: 16, paddingBottom: 16, gap: 8 }}>
+        {loading ? (
+          <Txt font="user" style={{ marginTop: 32, fontSize: 13, color: W.text2, textAlign: 'center' }}>Loading…</Txt>
+        ) : loadFailed ? (
+          <View style={{ marginTop: 32, alignItems: 'center', gap: 6 }}>
+            <Txt font="user" weight={500} style={{ fontSize: 14, color: W.text }}>Couldn't load memories</Txt>
+            <Txt font="user" style={{ fontSize: 13, color: W.text2, textAlign: 'center' }}>Check your connection and try again.</Txt>
+          </View>
+        ) : filtered.length === 0 ? (
+          <View style={{ marginTop: 32, alignItems: 'center', gap: 6, paddingHorizontal: 24 }}>
+            <Txt font="user" weight={500} style={{ fontSize: 14, color: W.text }}>
+              {filter === 'all' ? 'Nothing remembered yet' : 'None of these yet'}
+            </Txt>
+            <Txt font="user" style={{ fontSize: 13, color: W.text2, textAlign: 'center', lineHeight: 19 }}>
+              {filter === 'all'
+                ? `${via} builds these from your conversations. Talk for a while and they'll appear here.`
+                : 'Try another filter.'}
+            </Txt>
+          </View>
+        ) : null}
         {filtered.map(m => {
           const mt = MEM_TYPES[m.type];
           return (
@@ -784,7 +815,12 @@ export function S22_Memories({ go, characterId, companionName }: { go: Go; chara
               </View>
               <View style={{ flex: 1 }}>
                 <Txt font="user" style={{ fontSize: 14, color: W.text, lineHeight: 20 }}>{m.text}</Txt>
-                <Txt font="user" style={{ marginTop: 4, fontSize: 11, color: W.text2 }}>Learned {m.date} via {m.via}</Txt>
+                <Txt font="user" style={{ marginTop: 4, fontSize: 11, color: W.text2 }}>
+                  Learned {m.date} via {m.via}
+                  {/* Retrieval is otherwise invisible: this is the difference
+                      between claiming to remember and showing the receipts. */}
+                  {(m as DisplayMemory)._recalled ? ` · brought up ${(m as DisplayMemory)._recalled} time${(m as DisplayMemory)._recalled === 1 ? '' : 's'}` : ''}
+                </Txt>
               </View>
               <Pressable onPress={() => handleDelete(m as DisplayMemory)} style={{ padding: 2, opacity: 0.5 }}>
                 <NavIcon name="trash" color={W.text2} size={18} />
@@ -793,18 +829,33 @@ export function S22_Memories({ go, characterId, companionName }: { go: Go; chara
           );
         })}
       </ScrollView>
-      <View style={{ paddingTop: 8, paddingHorizontal: 16, paddingBottom: 16, borderTopWidth: 1, borderTopColor: W.surface2 }}>
-        <Pressable
-          onPress={() => {
-            if (!characterId) return;
-            setMemories([]);
-            deleteAllMemories(characterId).catch(() => {});
+      {memories.length > 0 && (
+        <View style={{ paddingTop: 8, paddingHorizontal: 16, paddingBottom: 16, borderTopWidth: 1, borderTopColor: W.surface2 }}>
+          <Pressable
+            onPress={() => setConfirmClearAll(true)}
+            style={{ width: '100%', height: 40, alignItems: 'center', justifyContent: 'center' }}
+          >
+            <Txt font="user" weight={500} style={{ fontSize: 13, color: W.danger }}>Delete all memories</Txt>
+          </Pressable>
+        </View>
+      )}
+      {confirmClearAll && (
+        <InfoSheet
+          title={`Forget everything ${via} knows?`}
+          body={`This erases all ${memories.length} ${memories.length === 1 ? 'memory' : 'memories'} ${via} has built from your conversations. Your messages stay; what they learned from them does not. This cannot be undone.`}
+          danger={{
+            label: 'Delete all memories',
+            onPress: () => {
+              setConfirmClearAll(false);
+              if (!characterId) return;
+              const previous = memories;
+              setMemories([]);
+              deleteAllMemories(characterId).catch(() => setMemories(previous));
+            },
           }}
-          style={{ width: '100%', height: 40, alignItems: 'center', justifyContent: 'center' }}
-        >
-          <Txt font="user" weight={500} style={{ fontSize: 13, color: W.danger }}>Delete all memories</Txt>
-        </Pressable>
-      </View>
+          onClose={() => setConfirmClearAll(false)}
+        />
+      )}
     </Screen>
   );
 }

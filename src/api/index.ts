@@ -270,6 +270,10 @@ export interface ApiMemory {
   content: string;
   character_id: string;
   created_at: string;
+  // How often this memory has actually been pulled into a conversation. The
+  // retrieval is invisible otherwise — showing it is the difference between
+  // claiming to remember and demonstrating it.
+  access_count?: number;
 }
 
 export const getMemories = (characterId: string, type?: string): Promise<ApiMemory[]> => {

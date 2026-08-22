@@ -160,12 +160,3 @@ export const MEM_TYPES: Record<string, { l: string; color: string }> = {
 };
 
 export interface Memory { id: number; type: string; text: string; via: string; date: string; }
-export const SAMPLE_MEMORIES: Memory[] = [
-  { id: 1, type: 'event', text: 'Has a sister named Priya who is getting married in October', via: 'Sage', date: 'May 15' },
-  { id: 2, type: 'event', text: 'Has a software engineer interview at a tech startup tomorrow', via: 'Sage', date: 'May 14' },
-  { id: 3, type: 'fact', text: 'Lives in Brooklyn, originally from Mumbai', via: 'Sage', date: 'May 12' },
-  { id: 4, type: 'emotion', text: "Feels guilty when canceling plans, even when it's the right call", via: 'Atlas', date: 'May 10' },
-  { id: 5, type: 'preference', text: 'Prefers being asked questions rather than given advice', via: 'Sage', date: 'May 8' },
-  { id: 6, type: 'fact', text: 'Started running again after a 2-year break', via: 'Atlas', date: 'May 5' },
-  { id: 7, type: 'emotion', text: "Misses their dad — he passed last year. Doesn't bring it up often.", via: 'Sage', date: 'May 3' },
-];
