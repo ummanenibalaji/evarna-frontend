@@ -489,15 +489,6 @@ function S13_VoiceNote({ onClose, onSend }: { onClose: () => void; onSend: (t: n
 // ─── S14 CHAT ────────────────────────────────────────────────────────────
 
 // Shown only when no backend connection (pure prototype mode)
-const demoMsgs = (userName: string): Msg[] => [
-  { from: 'comp', text: `Hey ${userName}, how are you doing today?`, t: 'today' },
-  { from: 'user', text: "honestly, kinda nervous about tomorrow's interview" },
-  { from: 'comp', text: 'I remember you mentioning your interview is tomorrow. What part is making you most nervous?', memoryRefs: ['I remember you mentioning your interview is tomorrow'] },
-  { from: 'user', text: "the technical round. I haven't done one in years" },
-  { from: 'voiceUser', duration: 14 },
-  { from: 'comp', text: "That's totally understandable. Want to do a quick mock round right now? We can keep it light." },
-];
-
 interface ChatProps {
   go: Go;
   companion: Companion;
@@ -510,14 +501,19 @@ interface ChatProps {
   characterId?: string;
 }
 
-export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, capHit = false, userName = 'Aria', firstRun = false, userId, characterId }: ChatProps) {
-  // firstRun → fresh onboarding greeting
-  // characterId available → start empty, load real history from backend
-  // no characterId → show static demo (prototype mode)
+export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, capHit = false, userName = '', firstRun = false, userId, characterId }: ChatProps) {
+  // firstRun → the opening line, which is the companion's own and true.
+  // Otherwise empty, and real history loads from the backend.
+  //
+  // There used to be a third branch: with no characterId this rendered a
+  // scripted demo conversation — including two messages attributed to the USER
+  // ("honestly, kinda nervous about tomorrow's interview"), a fake voice note,
+  // and a fake memory citation. Words in the user's own mouth is the worst
+  // version of this, so the branch is gone rather than gated.
   const [msgs, setMsgs] = useState<Msg[]>(
     firstRun
       ? [{ from: 'comp', text: `So — what's been on your mind lately?`, t: 'today' }]
-      : characterId ? [] : demoMsgs(userName),
+      : [],
   );
   const [loadingHistory, setLoadingHistory] = useState(!firstRun && !!characterId);
   const [draft, setDraft] = useState('');

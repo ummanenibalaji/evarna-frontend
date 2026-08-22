@@ -7,7 +7,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { W } from '../theme/theme';
 import { ScreenName } from './types';
 import {
-  CONFIG, PLUS_COMPANIONS, FREE_COMPANIONS,
+  CONFIG, CURRENT_TIER,
   SCENARIOS, SANDBOX_MODES, ARCHETYPE_COLORS, Companion, Scenario, SandboxMode,
 } from '../data/config';
 import {
@@ -113,7 +113,9 @@ export default function App() {
   // Onboarding-collected
   const [voicePick, setVoicePick] = useState<string | null>(null);
   const [archetypePick, setArchetypePick] = useState<Companion['archetype']>('mentor');
-  const [companionName, setCompanionName] = useState(t.companionName || 'Sage');
+  // Empty until the user names them on S08. It used to default to "Sage",
+  // which is a real name for a companion nobody had named yet.
+  const [companionName, setCompanionName] = useState('');
 
   // Mode for the companion-selection flow (archetype → voice → name):
   //   'onboarding' — initial flow, hits POST /users/onboard
@@ -466,30 +468,32 @@ export default function App() {
     dailyCheckin: true, weeklyReflection: true, autoPlay: true, liveCaptions: true,
   });
 
-  // What the UI shows for the user's name. `userName` is the real, onboarded
-  // value; the CONFIG constant is only a last resort for the pre-onboarding
-  // prototype screens so nothing renders blank.
-  const displayName = userName.trim() || t.userName;
+  // The real, onboarded name — or empty. It used to fall back to "Aria", so
+  // anyone whose profile had not loaded yet was greeted by someone else's name.
+  const displayName = userName.trim();
   // Comes from GET /auth/me on boot; empty until then (better than a fabricated address).
   const displayEmail = userEmail;
 
-  // Prefer the live backend list when present; fall back to the locally onboarded
-  // companion (so the screen still renders if the API is unreachable), and finally
-  // a static placeholder so a brand-new app launch isn't blank.
+  // The live backend list, or the companion just created locally while the
+  // refresh is in flight. Nothing else: this used to fall through to three
+  // invented companions ("Sage", "Atlas", "Nova") carrying invented memories
+  // like "your interview is tomorrow", which a user with an unreachable
+  // backend would read as their own.
   const companions: Companion[] =
     (userCharacters && userCharacters.length > 0)
       ? userCharacters
       : userCompanion
         ? [userCompanion]
-        : (t.tier === 'free' ? FREE_COMPANIONS : PLUS_COMPANIONS.slice(0, 1));
-  const currentCompanion: Companion = activeCompanion || companions[0];
+        : [];
+  // Nullable, now that there is no invented companion to fall back on. An
+  // empty list is a real state: a fresh account before onboarding finishes, or
+  // an unreachable backend.
+  const currentCompanion: Companion | null = activeCompanion ?? companions[0] ?? null;
 
-  // Real backend characters from GET /characters have UUIDs as ids. The
-  // static placeholder companions use string slugs ("sage", "atlas", ...). Treat
-  // anything from `userCharacters` as a real backend character so each list-row
-  // tap routes through the real chat session.
-  const isBackendCompanion = !!userCharacters?.some(c => c.id === currentCompanion.id)
-    || currentCompanion.id === characterId;
+  // Everything in `companions` is now backed by a real record, but the id is
+  // still what decides whether a tap opens a real session.
+  const isBackendCompanion = !!currentCompanion
+    && (!!userCharacters?.some(c => c.id === currentCompanion.id) || currentCompanion.id === characterId);
   const activeCharacterId = isBackendCompanion ? String(currentCompanion.id) : null;
 
   // Navigation helper — mirrors prototype go() and remembers origin for modal-like screens.
@@ -646,7 +650,7 @@ export default function App() {
   const renderHome = (interactive: boolean) => (
     <S10_Home
       go={interactive ? go : () => {}}
-      tier={t.tier}
+      tier={CURRENT_TIER}
       companions={companions}
       userName={displayName}
       maxCompanions={MAX_COMPANIONS}
@@ -666,7 +670,19 @@ export default function App() {
     />
   );
 
+  // These screens are all about one companion. Reaching them without one used
+  // to be impossible because the list always had a static placeholder in it;
+  // now it can genuinely be empty, and home is the honest landing rather than
+  // a crash on a companion that is not there.
+  //
+  // The compiler will not catch a miss here: without noUncheckedIndexedAccess,
+  // `companions[0]` types as Companion even when the array is empty, so
+  // currentCompanion reads as non-null at every use. This guard is the only
+  // thing standing between an empty list and a crash.
+  const COMPANION_SCREENS: ScreenName[] = ['callDepleted', 'call', 'chat', 'crisis', 'profile', 'recap'];
+
   const renderScreen = () => {
+    if (!currentCompanion && COMPANION_SCREENS.includes(screen)) return renderHome(true);
     switch (screen) {
       case 'splash': return <S01_Splash go={go} goNew={() => { setIsNewUser(true); go('login'); }} />;
       case 'age': return <S02_Age go={go} onDob={setDateOfBirth} />;
@@ -715,10 +731,10 @@ export default function App() {
       case 'recap': return (
         <View style={{ flex: 1 }}>
           {renderHome(false)}
-          <S29_Recap go={go} companion={currentCompanion} />
+          <S29_Recap go={go} companion={currentCompanion} characterId={activeCharacterId ?? undefined} />
         </View>
       );
-      case 'studio': return <S15_StudioHome go={go} tier={t.tier} characters={studioCharacters}
+      case 'studio': return <S15_StudioHome go={go} tier={CURRENT_TIER} characters={studioCharacters}
         setupScenario={(s) => { setScenario(s); setStudioCharacter(null); setStudioCharacterId(null); setStudioRemember(true); setScreen('scenario-setup'); }}
         resumeConvo={(c) => { setScenario(studioScenarioFor(c)); setStudioCharacter(c); setStudioCharacterId(c._id); setStudioRemember(true); setScreen('studio-session'); }}
         openCreator={() => setScreen('character-creator')} />;
@@ -734,9 +750,9 @@ export default function App() {
       case 'sandbox-session': return <S20_SandboxSession go={go} mode={sandboxMode || SANDBOX_MODES[0]} />;
       // Settings' only route to 'login' is its Sign out row — intercept it so it
       // actually ends the session instead of just showing the login screen.
-      case 'settings': return <S21_Settings go={(sc) => { if (sc === 'login') signOut(); else go(sc); }} tier={t.tier} companions={companions} userName={displayName} userEmail={displayEmail} settings={settings} setSettings={setSettings} openCompanionProfile={openCompanionProfile} userId={userId ?? undefined} onDeleteAccount={deleteAccount} />;
+      case 'settings': return <S21_Settings go={(sc) => { if (sc === 'login') signOut(); else go(sc); }} tier={CURRENT_TIER} companions={companions} userName={displayName} userEmail={displayEmail} settings={settings} setSettings={setSettings} openCompanionProfile={openCompanionProfile} userId={userId ?? undefined} onDeleteAccount={deleteAccount} />;
       case 'memories': return <S22_Memories go={go} characterId={activeCharacterId ?? undefined} companionName={currentCompanion.name} />;
-      case 'paywall': return <S23_Paywall go={go} trigger={paywallTrigger} currentTier={t.tier} backTo={paywallBack} />;
+      case 'paywall': return <S23_Paywall go={go} trigger={paywallTrigger} currentTier={CURRENT_TIER} backTo={paywallBack} />;
       case 'topup': return <S24_TopUp go={go} backTo={topupBack} />;
       case 'login': return <S30_Login
         isNew={isNewUser}
@@ -758,7 +774,7 @@ export default function App() {
   const renderUnderlay = () => {
     const origin = screen === 'paywall' ? paywallBack : screen === 'topup' ? topupBack : 'home';
     if (origin === 'settings') {
-      return <S21_Settings go={() => {}} tier={t.tier} companions={companions} userName={displayName} userEmail={displayEmail} settings={settings} setSettings={setSettings} openCompanionProfile={() => {}} userId={userId ?? undefined} />;
+      return <S21_Settings go={() => {}} tier={CURRENT_TIER} companions={companions} userName={displayName} userEmail={displayEmail} settings={settings} setSettings={setSettings} openCompanionProfile={() => {}} userId={userId ?? undefined} />;
     }
     return renderHome(false);
   };

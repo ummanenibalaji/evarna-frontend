@@ -2,7 +2,7 @@
 // "Ember Dusk": the header carries the streak, a nightly check-in card sits
 // above the companion list, and a weekly momentum strip closes the screen.
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { View, Pressable, ScrollView, Animated, TextInput } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
@@ -15,7 +15,8 @@ import { RadialGlow } from '../components/RadialGlow';
 import { usePulse } from '../theme/animations';
 import { W, GRAD, rgba } from '../theme/theme';
 import { Go } from '../navigation/types';
-import { Companion, Tier, ARCHETYPE_COLORS, ARCHETYPE_LABEL, VOICES, RITUAL } from '../data/config';
+import { Companion, Tier, ARCHETYPE_COLORS, ARCHETYPE_LABEL, CHECK_IN } from '../data/config';
+import { getActivity, ApiActivity } from '../api';
 
 // ─── AuroraAvatarButton ──────────────────────────────────────────────────
 // The account button in the header: an aurora ring around the user's initial.
@@ -39,7 +40,7 @@ function AuroraAvatarButton({ initial, onPress }: { initial: string; onPress: ()
 // ─── CheckInCard ─────────────────────────────────────────────────────────
 // The nightly ritual. Gold eyebrow (it feeds the streak), aurora hairline on
 // the top edge, one-tap mood answers.
-function CheckInCard({ onMood }: { onMood: (mood: string) => void }) {
+function CheckInCard({ onMood, streak }: { onMood: (mood: string) => void; streak: number | null }) {
   return (
     <View style={{
       marginHorizontal: 16, marginBottom: 18,
@@ -63,15 +64,15 @@ function CheckInCard({ onMood }: { onMood: (mood: string) => void }) {
         <Txt font="user" weight={600} style={{ fontSize: 10, color: W.gold, letterSpacing: 1.8, textTransform: 'uppercase' }}>
           Tonight’s check-in
         </Txt>
-        <Txt font="user" weight={500} style={{ fontSize: 10.5, color: W.textMuted }}>{RITUAL.checkInDuration}</Txt>
+        <Txt font="user" weight={500} style={{ fontSize: 10.5, color: W.textMuted }}>{CHECK_IN.duration}</Txt>
       </View>
 
       <Txt font="comp" weight={600} style={{ marginTop: 8, fontSize: 17, color: W.cream, letterSpacing: -0.2 }}>
-        {RITUAL.checkInPrompt}
+        {CHECK_IN.prompt}
       </Txt>
 
       <View style={{ marginTop: 12, flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-        {RITUAL.moods.map(m => (
+        {CHECK_IN.moods.map(m => (
           <Pressable
             key={m}
             onPress={() => onMood(m)}
@@ -86,12 +87,16 @@ function CheckInCard({ onMood }: { onMood: (mood: string) => void }) {
         ))}
       </View>
 
-      <View style={{ marginTop: 12, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-        <NavIcon name="flame-solid" color={W.gold} size={12} />
-        <Txt font="user" style={{ fontSize: 11, color: W.text3 }}>
-          Keeps your {RITUAL.streakDays}-day streak alive
-        </Txt>
-      </View>
+      {/* Only claim a streak that exists. This read "Keeps your 12-day streak
+          alive" for every user on every launch, including their first. */}
+      {streak && streak > 0 ? (
+        <View style={{ marginTop: 12, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <NavIcon name="flame-solid" color={W.gold} size={12} />
+          <Txt font="user" style={{ fontSize: 11, color: W.text3 }}>
+            Keeps your {streak}-day streak alive
+          </Txt>
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -202,9 +207,13 @@ function CompanionCard({ companion, onChat, onCall }: { companion: Companion; on
 // ─── WeekStrip ───────────────────────────────────────────────────────────
 // Seven bars, Monday first. Today's bar is the only one that gets the aurora
 // — everything else stays neutral so the eye lands on "today".
-function WeekStrip() {
-  const bars = RITUAL.weekMinutes;
+function WeekStrip({ activity }: { activity: ApiActivity }) {
+  const bars = activity.week_minutes;
   const peak = Math.max(...bars, 1);
+  const total = activity.week_total_minutes;
+  const prev = activity.prev_week_total_minutes;
+  // No delta on a first week — "+100%" against zero is arithmetic, not insight.
+  const delta = prev > 0 ? Math.round(((total - prev) / prev) * 100) : null;
   const days = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
   // JS weeks start on Sunday; this strip starts on Monday.
   const todayIdx = (new Date().getDay() + 6) % 7;
@@ -221,7 +230,7 @@ function WeekStrip() {
           Your week
         </Txt>
         <Txt font="user" weight={600} style={{ fontSize: 11, color: W.gold }}>
-          {RITUAL.weekTotalLabel} · {RITUAL.weekDeltaLabel}
+          {total} min{delta === null ? '' : ` · ${delta >= 0 ? '+' : ''}${delta}%`}
         </Txt>
       </View>
 
@@ -260,18 +269,31 @@ export function S10_Home({ go, tier, companions, onSelectCompanion, onCallCompan
   onSelectCompanion: (c: Companion) => void; onCallCompanion: (c: Companion) => void;
   onAddCompanion?: () => void; maxCompanions?: number;
 }) {
+  // Fetched here rather than threaded through App: the streak and the week
+  // strip are the only things that need it, and both live on this screen.
+  const [activity, setActivity] = useState<ApiActivity | null>(null);
+  useEffect(() => {
+    getActivity().then(setActivity).catch(() => { /* no numbers is better than invented ones */ });
+  }, []);
+
+  // The name is genuinely empty until the profile loads, and it used to fall
+  // back to "Aria" app-wide. Greet without a name rather than with a stranger's.
   const greeting = (() => {
     const h = new Date().getHours();
-    if (h < 5) return `Can’t sleep, ${userName}?`;
-    if (h < 12) return `Good morning, ${userName}`;
-    if (h < 18) return `Good afternoon, ${userName}`;
-    return `Good evening, ${userName}`;
+    const who = userName.trim();
+    const suffix = who ? `, ${who}` : '';
+    if (h < 5) return who ? `Can’t sleep, ${who}?` : 'Can’t sleep?';
+    if (h < 12) return `Good morning${suffix}`;
+    if (h < 18) return `Good afternoon${suffix}`;
+    return `Good evening${suffix}`;
   })();
   const dateStr = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
   // Phase 1 cap: 5 companions per user (overrides tier-based caps from prototype).
   const maxCompanions = maxCompanionsProp ?? 5;
   const canAdd = companions.length < maxCompanions;
-  const handleAdd = onAddCompanion ?? (() => go('add-companion'));
+  // App always supplies this; the fallback used to open a dead prototype
+  // screen whose voice picker offered names the backend has never heard of.
+  const handleAdd = onAddCompanion ?? (() => go('archetype'));
   const lead = companions[0];
   const slotsLeft = maxCompanions - companions.length;
 
@@ -290,8 +312,10 @@ export function S10_Home({ go, tier, companions, onSelectCompanion, onCallCompan
         }
         right={
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-            <StreakPill days={RITUAL.streakDays} onPress={() => go('settings')} />
-            <AuroraAvatarButton initial={userName?.[0] ?? 'A'} onPress={() => go('settings')} />
+            {activity && activity.streak_days > 0
+              ? <StreakPill days={activity.streak_days} onPress={() => go('settings')} />
+              : null}
+            <AuroraAvatarButton initial={userName.trim()[0] ?? '·'} onPress={() => go('settings')} />
           </View>
         }
       />
@@ -312,7 +336,7 @@ export function S10_Home({ go, tier, companions, onSelectCompanion, onCallCompan
           ) : null}
         </View>
 
-        {lead ? <CheckInCard onMood={() => onSelectCompanion(lead)} /> : null}
+        {lead ? <CheckInCard onMood={() => onSelectCompanion(lead)} streak={activity?.streak_days ?? null} /> : null}
 
         {/* Companions */}
         <View style={{ paddingHorizontal: 24, paddingBottom: 10, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -363,94 +387,10 @@ export function S10_Home({ go, tier, companions, onSelectCompanion, onCallCompan
           </Pressable>
         </View>
 
-        <WeekStrip />
+        {activity && activity.active_days > 0 ? <WeekStrip activity={activity} /> : null}
       </ScrollView>
     </Screen>
   );
 }
 
 // ─── S11 ADD COMPANION ──────────────────────────────────────────────────────
-export function S11_AddCompanion({ go, tier, onCreate }: { go: Go; tier: Tier; onCreate: (c: { name: string; archetype: string; voice: string | null }) => void }) {
-  const [step, setStep] = useState(1);
-  const [archetype, setArchetype] = useState<string | null>(null);
-  const [gender, setGender] = useState<string | null>(null);
-  const [voice, setVoice] = useState<string | null>(null);
-  const [name, setName] = useState('');
-
-  return (
-    <Screen>
-      <TopBar
-        left={<Pressable onPress={() => (step === 1 ? go('home') : setStep(s => s - 1))}><NavIcon name="back" color={W.text2} /></Pressable>}
-        center={<Txt font="user" style={{ fontSize: 13, color: W.text2 }}>Step {step} of 4</Txt>}
-      />
-      <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 24, paddingVertical: 16 }}>
-        {step === 1 && (
-          <>
-            <Txt font="display" weight={700} style={{ fontSize: 24, color: W.cream, letterSpacing: -0.5 }}>Choose a new companion</Txt>
-            <Txt font="user" style={{ marginTop: 8, fontSize: 13, color: W.text2 }}>What kind of presence?</Txt>
-            <View style={{ marginTop: 24, gap: 10 }}>
-              {[
-                { k: 'mentor', icon: 'compass', l: 'Mentor', d: 'Help thinking things through' },
-                { k: 'friend', icon: 'two', l: 'Best Friend', d: "A friend who's always there" },
-                { k: 'partner', icon: 'heart', l: 'Partner', d: 'Connection and affection' },
-                { k: 'challenger', icon: 'target', l: 'Challenger', d: 'Someone to keep you honest' },
-              ].map((c: any) => (
-                <Pressable key={c.k} onPress={() => { setArchetype(c.k); setStep(2); }} style={{ backgroundColor: W.glass, borderRadius: 18, padding: 14, flexDirection: 'row', alignItems: 'center', gap: 12, overflow: 'hidden', borderWidth: 1, borderColor: W.hairline }}>
-                  <View style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 3, backgroundColor: ARCHETYPE_COLORS[c.k] }} />
-                  <View style={{ width: 36, height: 36, borderRadius: 11, backgroundColor: rgba(ARCHETYPE_COLORS[c.k], 0.14), alignItems: 'center', justifyContent: 'center', marginLeft: 6 }}>
-                    <NavIcon name={c.icon} color={ARCHETYPE_COLORS[c.k]} size={20} />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Txt font="user" weight={500} style={{ fontSize: 15, color: W.text }}>{c.l}</Txt>
-                    <Txt font="user" style={{ fontSize: 12, color: W.text2 }}>{c.d}</Txt>
-                  </View>
-                </Pressable>
-              ))}
-            </View>
-          </>
-        )}
-        {step === 2 && (
-          <>
-            <Txt font="display" weight={700} style={{ fontSize: 24, color: W.cream, letterSpacing: -0.5 }}>Voice gender</Txt>
-            <View style={{ marginTop: 24, flexDirection: 'row', gap: 8 }}>
-              {['male', 'female', 'neutral'].map(g => (
-                <Pill key={g} active={gender === g} onPress={() => { setGender(g); setTimeout(() => setStep(3), 300); }} style={{ flex: 1 }} textStyle={{ textTransform: 'capitalize' }}>{g}</Pill>
-              ))}
-            </View>
-          </>
-        )}
-        {step === 3 && gender && (
-          <>
-            <Txt font="display" weight={700} style={{ fontSize: 24, color: W.cream, letterSpacing: -0.5 }}>Pick a voice</Txt>
-            <View style={{ marginTop: 20, flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
-              {VOICES[gender].map(v => (
-                <Pressable key={v.n} onPress={() => { setVoice(v.n); setName(v.n); setTimeout(() => setStep(4), 300); }} style={{ width: '31.5%', minHeight: 110, backgroundColor: W.glass, borderRadius: 16, padding: 12, alignItems: 'center', justifyContent: 'center', gap: 6, borderWidth: voice === v.n ? 2 : 1, borderColor: voice === v.n ? W.primary : W.hairline }}>
-                  <Waveform color={voice === v.n ? W.primary : W.text2} animate={voice === v.n} size={32} />
-                  <Txt font="user" weight={500} style={{ fontSize: 13, color: W.text }}>{v.n}</Txt>
-                  <Txt font="user" style={{ fontSize: 10, color: W.text2 }}>{v.d}</Txt>
-                </Pressable>
-              ))}
-            </View>
-          </>
-        )}
-        {step === 4 && (
-          <>
-            <Txt font="display" weight={700} style={{ fontSize: 24, color: W.cream, letterSpacing: -0.5 }}>Name your companion</Txt>
-            <View style={{ marginTop: 40, alignItems: 'center' }}>
-              <TextInput value={name} onChangeText={setName} style={{ backgroundColor: W.glass, color: W.text, borderWidth: 1, borderColor: W.hairlineStrong, height: 60, borderRadius: 16, fontFamily: 'Manrope_500Medium', fontSize: 22, textAlign: 'center', width: '100%', maxWidth: 280 }} />
-            </View>
-          </>
-        )}
-      </ScrollView>
-      {step === 4 && (
-        <View style={{ paddingHorizontal: 24, paddingTop: 12, paddingBottom: 24 }}>
-          <PrimaryButton disabled={!name.trim()} onPress={() => {
-            if (tier === 'free') return go('paywall');
-            onCreate({ name: name.trim(), archetype: archetype!, voice });
-            go('home');
-          }}>Create companion</PrimaryButton>
-        </View>
-      )}
-    </Screen>
-  );
-}

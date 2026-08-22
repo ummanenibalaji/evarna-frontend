@@ -16,7 +16,7 @@ import { Avatar, Waveform } from '../components/Avatar';
 import { useEntrance, useBreathe, useMeetIn } from '../theme/animations';
 import { W, alpha, hexWithOpacity } from '../theme/theme';
 import { Go, Archetype } from '../navigation/types';
-import { NAME_SUGGESTIONS, VOICES, ARCHETYPE_COLORS } from '../data/config';
+import { NAME_SUGGESTIONS, ARCHETYPE_COLORS } from '../data/config';
 import type { ApiVoice } from '../api';
 
 const BackBtn = ({ onPress }: { onPress: () => void }) => (
@@ -810,8 +810,10 @@ export function S04_Archetype({ go, onPick, backTo = 'handoff' }: { go: Go; onPi
 }
 
 // ─── S07 VOICE ───────────────────────────────────────────────────────────
-// Displays backend voices when apiVoices is provided; falls back to config VOICES.
-// onPickVoice receives the voice UUID when using backend voices, or name otherwise.
+// Voices come from GET /voice/voices and nowhere else. There used to be a
+// static fallback list (Atlas, Luna, Onyx…) whose "ids" were display names the
+// backend has never heard of, so picking one produced a companion the API
+// rejected — or worse, a voice_id that silently did not resolve.
 export function S07_Voice({
   go,
   onPickVoice,
@@ -826,18 +828,11 @@ export function S07_Voice({
   const [playing, setPlaying] = useState<string | null>(null);
   const playPreview = (v: string) => { setPlaying(v); setTimeout(() => setPlaying(null), 1800); };
 
-  const usingApi = (apiVoices?.length ?? 0) > 0;
+  const displayVoices = (apiVoices ?? [])
+    .filter(v => v.gender === gender)
+    .map(v => ({ id: v.id, name: v.name, desc: v.personality ?? '' }));
 
-  // Unified display item: id = UUID (backend) or name (config fallback)
-  const displayVoices = usingApi
-    ? (apiVoices ?? [])
-        .filter(v => v.gender === gender)
-        .map(v => ({ id: v.id, name: v.name, desc: v.personality ?? '' }))
-    : (VOICES[gender] ?? []).map(v => ({ id: v.n, name: v.n, desc: v.d }));
-
-  const genderTabs = usingApi
-    ? [{ k: 'male', l: 'Male' }, { k: 'female', l: 'Female' }]
-    : [{ k: 'male', l: 'Male' }, { k: 'female', l: 'Female' }, { k: 'neutral', l: 'Neutral' }];
+  const genderTabs = [{ k: 'male', l: 'Male' }, { k: 'female', l: 'Female' }];
 
   // Calculate exact card width so 3 columns always fill the row evenly
   const PADDING = 24;
@@ -863,6 +858,11 @@ export function S07_Voice({
 
         {/* Voice cards — 3-column grid, cards always equal-width */}
         <ScrollView style={{ marginTop: 20 }} showsVerticalScrollIndicator={false}>
+          {displayVoices.length === 0 ? (
+            <Txt font="user" style={{ marginTop: 24, fontSize: 13, color: W.text2, textAlign: 'center' }}>
+              Couldn't load voices. Check your connection and go back a step to retry.
+            </Txt>
+          ) : null}
           {/* Chunk voices into rows of COLS */}
           {Array.from({ length: Math.ceil(displayVoices.length / COLS) }, (_, rowIdx) => (
             <View key={rowIdx} style={{ flexDirection: 'row', gap: GAP, marginBottom: GAP }}>

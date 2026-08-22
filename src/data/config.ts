@@ -8,9 +8,6 @@ export type Tier = 'free' | 'plus' | 'premium';
 export type MinutesRemaining = 'normal' | 'low' | 'zero';
 
 export interface AppConfig {
-  tier: Tier;
-  userName: string;
-  companionName: string;
   callState: string;
   sandboxComingSoon: boolean;
   orbHue: string;
@@ -20,9 +17,6 @@ export interface AppConfig {
 }
 
 export const CONFIG: AppConfig = {
-  tier: 'plus',
-  userName: 'Aria',
-  companionName: 'Sage',
   callState: 'auto',
   sandboxComingSoon: false,
   orbHue: W.primary,   // Ember Dusk: the orb and chat accent are coral, not violet
@@ -31,45 +25,25 @@ export const CONFIG: AppConfig = {
   minutesRemaining: 'normal',
 };
 
-// ── Ritual / habit loop ────────────────────────────────────────────────
-// The "Ember Dusk" design adds a nightly check-in, a streak, and a weekly
-// momentum strip. The backend has no endpoint for any of these yet
-// (/users/:id/stats returns totals only), so the numbers below are local
-// placeholders — wire them to the API when those fields land.
-export interface RitualConfig {
-  streakDays: number;
-  bestStreak: number;
-  /** Prompt shown on the nightly check-in card. */
-  checkInPrompt: string;
-  /** Rough time-to-complete, shown next to the card title. */
-  checkInDuration: string;
-  /** One-tap mood answers. */
-  moods: string[];
-  /** Minutes talked per weekday, Monday first. Last entry is "today". */
-  weekMinutes: number[];
-  weekTotalLabel: string;
-  weekDeltaLabel: string;
-  /** Voice minutes used / included this cycle. */
-  voiceMinutesUsed: number;
-  voiceMinutesTotal: number;
-  /** Total talk time this cycle, in minutes. */
-  talkMinutes: number;
-  talkDeltaLabel: string;
-}
+// There is no billing yet: no IAP, no entitlement on the user record, nobody
+// has paid for anything. `tier` used to be hardcoded to 'plus', which put a
+// PLUS badge on every account and a plan nobody was sold; flipping it to 'free'
+// instead would lock Studio behind a paywall that cannot be paid.
+//
+// So the flag is explicit. Sanjeev's IAP lane replaces both of these with the
+// real entitlement from the backend, and every `BILLING_LIVE &&` guard below
+// becomes live at once.
+export const BILLING_LIVE = false;
+export const CURRENT_TIER: Tier = 'free';
 
-export const RITUAL: RitualConfig = {
-  streakDays: 12,
-  bestStreak: 21,
-  checkInPrompt: 'How are you arriving tonight?',
-  checkInDuration: '30 sec',
+// The nightly check-in card's copy. Prompts and mood words, not data about
+// anyone — the streak and the week strip that used to live here alongside them
+// were invented numbers shown to every user, and now come from
+// GET /users/me/activity.
+export const CHECK_IN = {
+  prompt: 'How are you arriving tonight?',
+  duration: '30 sec',
   moods: ['Calm', 'Heavy', 'Buzzing', 'Tired'],
-  weekMinutes: [18, 24, 12, 28, 20, 30, 36],
-  weekTotalLabel: '142 min',
-  weekDeltaLabel: '+18%',
-  voiceMinutesUsed: 87,
-  voiceMinutesTotal: 120,
-  talkMinutes: 342,
-  talkDeltaLabel: '+38m this week',
 };
 
 // Suggestion chips shown above the chat composer. Static for now — the
@@ -90,24 +64,15 @@ export interface Companion {
   image?: string;
   gender?: string;
   voice?: string;
-  // Backend-sourced fields used by the home conversation-list (S11). Optional so
-  // existing static prototype companions still type-check.
+  // Backend-sourced fields used by the home conversation-list.
   lastInteractionAt?: string;       // ISO date — used for sort + timestamp
   lastMessagePreview?: string | null;
   memoryHighlight?: string | null;
-  // 0-100, straight from the backend. Undefined for the static prototype
-  // companions below, which is why the edit screen has to handle its absence
-  // rather than substituting defaults.
+  // 0-100, straight from the backend. Undefined until GET /characters answers,
+  // which is why the edit screen renders nothing rather than substituting
+  // defaults.
   personalitySliders?: Record<string, number>;
 }
-
-export const PLUS_COMPANIONS: Companion[] = [
-  { id: 'sage', name: 'Sage', archetype: 'mentor', memory: 'your interview is tomorrow', lastTalked: 'Last talked: 2 hours ago' },
-  { id: 'atlas', name: 'Atlas', archetype: 'friend', memory: "you've been running again", lastTalked: 'Last talked: yesterday', pending: true },
-  { id: 'nova', name: 'Nova', archetype: 'challenger', memory: 'your 30-day writing streak', lastTalked: 'Last talked: 3 days ago' },
-];
-
-export const FREE_COMPANIONS: Companion[] = [PLUS_COMPANIONS[0]];
 
 export const ARCHETYPE_COLORS: Record<string, string> = {
   mentor: W.mentor,
@@ -126,14 +91,6 @@ export const NAME_SUGGESTIONS: Record<string, string[]> = {
   friend: ['Atlas', 'Juno', 'Wren', 'Cleo'],
   partner: ['Luna', 'River', 'Nova', 'Kai'],
   challenger: ['Ember', 'Knox', 'Rae', 'Vance'],
-};
-
-// Voices (onboarding.jsx)
-export interface Voice { n: string; d: string; }
-export const VOICES: Record<string, Voice[]> = {
-  male: [{ n: 'Atlas', d: 'deep, steady' }, { n: 'River', d: 'warm, gentle' }, { n: 'Ember', d: 'energetic' }],
-  female: [{ n: 'Luna', d: 'soft, soothing' }, { n: 'Nova', d: 'bright, warm' }, { n: 'Sage', d: 'calm, wise' }],
-  neutral: [{ n: 'Onyx', d: 'balanced' }, { n: 'Haze', d: 'ethereal' }],
 };
 
 // Scenarios (studio.jsx)
@@ -155,7 +112,7 @@ export const SANDBOX_MODES: SandboxMode[] = [
   { id: 'intimate', icon: 'lock', name: 'Intimate', sub: '18+ only', accent: '#FB7185', desc: 'Romantic and intimate conversations. Your main companion modes stay separate.' },
 ];
 
-// Memory types + samples (settings.jsx)
+// Memory type badges.
 export const MEM_TYPES: Record<string, { l: string; color: string }> = {
   fact: { l: 'Fact', color: W.primary },
   emotion: { l: 'Emotion', color: W.accent },
@@ -163,4 +120,4 @@ export const MEM_TYPES: Record<string, { l: string; color: string }> = {
   preference: { l: 'Preference', color: W.challenger },
 };
 
-export interface Memory { id: number; type: string; text: string; via: string; date: string; }
+export interface Memory { id: string; type: string; text: string; via: string; date: string; }

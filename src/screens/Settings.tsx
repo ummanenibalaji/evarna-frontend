@@ -14,12 +14,12 @@ import Svg, { Path, Circle, Defs, LinearGradient as SvgLinearGradient, Stop } fr
 import { Screen, TopBar } from '../components/Chrome';
 import { NavIcon, IconName } from '../components/NavIcon';
 import { Txt } from '../components/Txt';
-import { Card, Toggle, PrimaryButton, MeterBar } from '../components/Atoms';
+import { Card, Toggle, PrimaryButton } from '../components/Atoms';
 import { useEntrance, usePressScale, useCountUp } from '../theme/animations';
 import { W, GRAD, alpha, rgba } from '../theme/theme';
-import { ARCHETYPE_COLORS, ARCHETYPE_LABEL, MEM_TYPES, Companion, Tier, Memory, RITUAL } from '../data/config';
+import { ARCHETYPE_COLORS, ARCHETYPE_LABEL, MEM_TYPES, Companion, Tier, Memory, BILLING_LIVE } from '../data/config';
 import { Go, ScreenName } from '../navigation/types';
-import { getMemories, deleteMemory, deleteAllMemories, ApiMemory, getUserStats, ApiUserStats, exportMyData } from '../api';
+import { getMemories, deleteMemory, deleteAllMemories, ApiMemory, getUserStats, ApiUserStats, getActivity, ApiActivity, exportMyData } from '../api';
 
 export interface AppSettings {
   dailyCheckin: boolean;
@@ -46,10 +46,12 @@ interface SettingsProps {
 export function S21_Settings({ go, tier, companions, userName, userEmail, settings, setSettings, openCompanionProfile, userId, onDeleteAccount }: SettingsProps) {
   const [voiceSpeed, setVoiceSpeed] = useState(1.0);
   const [userStats, setUserStats] = useState<ApiUserStats | null>(null);
+  const [activity, setActivity] = useState<ApiActivity | null>(null);
 
   useEffect(() => {
     if (!userId) return;
     getUserStats().then(setUserStats).catch(() => {});
+    getActivity().then(setActivity).catch(() => {});
   }, [userId]);
   const [bgSoundIdx, setBgSoundIdx] = useState(0);
   // Notification time as an exact moment of day.
@@ -95,13 +97,13 @@ export function S21_Settings({ go, tier, companions, userName, userEmail, settin
           <View style={{ width: 48, height: 48, borderRadius: 24, padding: 2, overflow: 'hidden' }}>
             <LinearGradient colors={[W.coral, W.rose, W.violet, W.coral]} start={{ x: 0.1, y: 0 }} end={{ x: 0.9, y: 1 }} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
             <View style={{ flex: 1, borderRadius: 22, backgroundColor: '#1C1216', alignItems: 'center', justifyContent: 'center' }}>
-              <Txt font="user" weight={600} style={{ fontSize: 17, color: W.cream }}>{userName[0]}</Txt>
+              <Txt font="user" weight={600} style={{ fontSize: 17, color: W.cream }}>{userName.trim()[0] ?? '·'}</Txt>
             </View>
           </View>
           <View style={{ flex: 1 }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-              <Txt font="user" weight={600} style={{ fontSize: 15, color: W.cream }}>{userName}</Txt>
-              {tier !== 'free' ? (
+              <Txt font="user" weight={600} style={{ fontSize: 15, color: W.cream }}>{userName.trim() || 'Your profile'}</Txt>
+              {BILLING_LIVE && tier !== 'free' ? (
                 <View style={{ borderRadius: 9, overflow: 'hidden', paddingVertical: 2, paddingHorizontal: 9 }}>
                   <LinearGradient colors={[...GRAD.auroraShort]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
                   <Txt font="user" weight={700} style={{ fontSize: 9.5, color: '#fff', letterSpacing: 1 }}>{tier.toUpperCase()}</Txt>
@@ -123,13 +125,18 @@ export function S21_Settings({ go, tier, companions, userName, userEmail, settin
         </Card>
 
         {/* Premium stats hero — streak, minutes left, total talk time */}
+        {/* Every number here used to be a constant: a 12-day streak, a best of
+            21, "87 / 120 min" of a voice allowance nobody had been sold, and
+            342 minutes of talk time. The quota panel is gone until billing
+            exists; the rest is the user's own history. */}
         <StatsHero
-          streak={RITUAL.streakDays}
-          bestStreak={RITUAL.bestStreak}
-          minutesLeft={RITUAL.voiceMinutesUsed}
-          minutesTotal={RITUAL.voiceMinutesTotal}
-          talkTimeMinutes={userStats?.total_voice_minutes ?? RITUAL.talkMinutes}
-          onMinutesPress={() => go('topup')}
+          streak={activity?.streak_days ?? 0}
+          bestStreak={activity?.best_streak ?? 0}
+          talkTimeMinutes={Math.round(userStats?.total_voice_minutes ?? 0)}
+          weekMinutes={activity?.week_minutes ?? null}
+          deltaMinutes={
+            activity ? activity.week_total_minutes - activity.prev_week_total_minutes : null
+          }
         />
 
         <Section title="My companions">
@@ -208,7 +215,11 @@ export function S21_Settings({ go, tier, companions, userName, userEmail, settin
             label="View all memories"
             right={
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                <Txt font="user" weight={600} style={{ fontSize: 12, color: W.gold }}>47</Txt>
+                {/* Hardcoded to 47 for every account, like the companion
+                    profile was. Absent until the real count arrives. */}
+                {userStats ? (
+                  <Txt font="user" weight={600} style={{ fontSize: 12, color: W.gold }}>{userStats.total_memories}</Txt>
+                ) : null}
                 <NavIcon name="right" color={W.text3} size={14} />
               </View>
             }
@@ -221,8 +232,10 @@ export function S21_Settings({ go, tier, companions, userName, userEmail, settin
             label={
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                 <Txt font="user" style={{ fontSize: 14, color: W.text }}>Current plan</Txt>
-                <View style={{ paddingVertical: 2, paddingHorizontal: 10, borderRadius: 8, backgroundColor: tier === 'free' ? W.surface2 : tier === 'plus' ? W.primary : W.accent }}>
-                  <Txt font="user" weight={600} style={{ fontSize: 11, color: tier === 'plus' ? '#fff' : tier === 'premium' ? W.bg : W.text2, textTransform: 'capitalize' }}>{tier}</Txt>
+                <View style={{ paddingVertical: 2, paddingHorizontal: 10, borderRadius: 8, backgroundColor: !BILLING_LIVE || tier === 'free' ? W.surface2 : tier === 'plus' ? W.primary : W.accent }}>
+                  {/* "Early access" rather than a plan name, because nobody has
+                      been sold one yet. */}
+                  <Txt font="user" weight={600} style={{ fontSize: 11, color: BILLING_LIVE && tier === 'plus' ? '#fff' : BILLING_LIVE && tier === 'premium' ? W.bg : W.text2, textTransform: 'capitalize' }}>{BILLING_LIVE ? tier : 'Early access'}</Txt>
                 </View>
               </View>
             }
@@ -510,17 +523,17 @@ function InfoSheet({ title, body, onClose, danger }: { title: string; body: stri
 // conic-style arc in the app: an aurora sweep whose length *is* the progress
 // toward the personal best.
 function StatsHero({
-  streak, bestStreak, minutesLeft, minutesTotal, talkTimeMinutes, onMinutesPress,
+  streak, bestStreak, talkTimeMinutes, weekMinutes, deltaMinutes,
 }: {
-  streak: number; bestStreak: number; minutesLeft: number; minutesTotal: number;
-  talkTimeMinutes: number; onMinutesPress?: () => void;
+  streak: number; bestStreak: number; talkTimeMinutes: number;
+  /** Seven real daily totals, or null while unknown. */
+  weekMinutes: number[] | null;
+  deltaMinutes: number | null;
 }) {
   const streakN = useCountUp(streak, 1100, 200);
-  const minutesN = useCountUp(minutesLeft, 1300, 250);
   const talkN = useCountUp(talkTimeMinutes, 1500, 300);
   const talkHrsAnim = Math.floor(talkN / 60);
   const talkMinAnim = talkN % 60;
-  const pct = Math.max(0, Math.min(1, minutesLeft / minutesTotal));
 
   return (
     <View style={{
@@ -555,27 +568,10 @@ function StatsHero({
 
         <View style={{ height: 1, backgroundColor: 'rgba(255,255,255,0.06)' }} />
 
+        {/* The "87 / 120 min" voice allowance that sat here was fiction: there
+            is no entitlement on the account and no way to buy one. It comes
+            back with the IAP lane, reading a real remaining balance. */}
         <View style={{ flexDirection: 'row', gap: 14 }}>
-          <Pressable onPress={onMinutesPress} style={{ flex: 1.25 }}>
-            <View style={{ gap: 7 }}>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: pct > 0.3 ? W.primary : W.danger, shadowColor: pct > 0.3 ? W.primary : W.danger, shadowOpacity: 0.9, shadowRadius: 6, shadowOffset: { width: 0, height: 0 } }} />
-                <Txt font="user" weight={600} style={{ fontSize: 10, color: W.text2, letterSpacing: 1.2, textTransform: 'uppercase' }}>Voice minutes</Txt>
-              </View>
-              <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}>
-                <Txt font="display" weight={700} style={{ fontSize: 26, color: W.cream, letterSpacing: -0.8 }}>{minutesN}</Txt>
-                <Txt font="user" weight={500} style={{ fontSize: 12, color: W.text2 }}>/ {minutesTotal} min</Txt>
-              </View>
-              <MeterBar pct={pct} />
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                <Txt font="user" weight={500} style={{ fontSize: 11, color: W.gold }}>Top up</Txt>
-                <NavIcon name="right" color={W.gold} size={11} />
-              </View>
-            </View>
-          </Pressable>
-
-          <View style={{ width: 1, backgroundColor: 'rgba(255,255,255,0.06)' }} />
-
           <View style={{ flex: 1, gap: 7 }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
               <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: W.violet, shadowColor: W.violet, shadowOpacity: 0.9, shadowRadius: 6, shadowOffset: { width: 0, height: 0 } }} />
@@ -587,8 +583,15 @@ function StatsHero({
               <Txt font="display" weight={700} style={{ fontSize: 21, color: W.cream, marginLeft: 3 }}>{talkMinAnim}</Txt>
               <Txt font="user" weight={500} style={{ fontSize: 12, color: W.text2 }}>m</Txt>
             </View>
-            <Sparkline data={[3, 5, 4, 7, 6, 9, 12]} color={W.gold} />
-            <Txt font="user" weight={500} style={{ fontSize: 11, color: W.gold }}>{RITUAL.talkDeltaLabel}</Txt>
+            {/* The sparkline was seven fixed numbers and the label read
+                "+38m this week" for everyone. Both are the real week now, and
+                neither renders before it is known. */}
+            {weekMinutes ? <Sparkline data={weekMinutes} color={W.gold} /> : null}
+            {deltaMinutes === null ? null : (
+              <Txt font="user" weight={500} style={{ fontSize: 11, color: W.gold }}>
+                {deltaMinutes >= 0 ? '+' : ''}{deltaMinutes}m this week
+              </Txt>
+            )}
           </View>
         </View>
       </View>
@@ -721,9 +724,9 @@ function Row({ label, right, onPress, icon, iconColor }: {
 // Extended display type carries MongoDB _id for delete calls
 type DisplayMemory = Memory & { _mongoId?: string; _recalled?: number };
 
-function toDisplayMemory(m: ApiMemory, idx: number, via: string): DisplayMemory {
+function toDisplayMemory(m: ApiMemory, _idx: number, via: string): DisplayMemory {
   return {
-    id: idx,
+    id: m._id,
     type: m.type,
     text: m.content,
     via,

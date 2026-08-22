@@ -17,7 +17,10 @@ import { NavIcon, IconName } from '../components/NavIcon';
 import { Avatar } from '../components/Avatar';
 import { AmbientBg } from '../components/AmbientBg';
 import { Pill, PrimaryButton } from '../components/Atoms';
-import { getMemories, getSuggestion, resolveSuggestion, ApiSuggestion } from '../api';
+import {
+  getMemories, getSuggestion, resolveSuggestion, deleteMemory,
+  getCharacterSessions, ApiSuggestion, ApiMemory, ApiSession,
+} from '../api';
 import { BubbleMem, ChatInput } from '../components/ChatBits';
 import { useEntrance } from '../theme/animations';
 import { W, alpha } from '../theme/theme';
@@ -649,19 +652,85 @@ export function S28_CrisisChat({ go, companion }: { go: Go; companion: Companion
 }
 
 // ─── S29 — SESSION RECAP ────────────────────────────────────────────────────
-export function S29_Recap({
-  go, companion, kind = 'voice', duration = '12 minutes', topics, memories: initialMem, mood,
-}: {
-  go: Go; companion: Companion; kind?: string; duration?: string;
-  topics?: string[]; memories?: { id: number; type: string; text: string }[]; mood?: string[];
+//
+// This sheet opens the moment a real conversation ends, and it used to be
+// entirely fabricated: "12 minutes", topics of "Work stress / Interview prep /
+// Mom's birthday", and two memories about a job interview at Amazon. Every
+// user saw the same invented summary of the conversation they had just had.
+//
+// The real summary is written by the memory-extraction job, which runs after
+// the session ends — so for the first half-minute there genuinely is nothing
+// to show, and this says that instead of filling it in.
+function formatDuration(session: ApiSession | null): string | null {
+  if (!session) return null;
+  let seconds = session.duration_seconds ?? 0;
+  if (!seconds && session.ended_at) {
+    seconds = (new Date(session.ended_at).getTime() - new Date(session.started_at).getTime()) / 1000;
+  }
+  if (!seconds || seconds < 0) return null;
+  const mins = Math.round(seconds / 60);
+  if (mins < 1) return 'Under a minute';
+  return `${mins} minute${mins === 1 ? '' : 's'}`;
+}
+
+export function S29_Recap({ go, companion, characterId }: {
+  go: Go; companion: Companion; characterId?: string;
 }) {
-  const [memories, setMemories] = useState(initialMem || [
-    { id: 1, type: 'event', text: 'Has a job interview at Amazon next Thursday.' },
-    { id: 2, type: 'emotion', text: 'Feels more confident about the technical round now.' },
-  ]);
-  const _topics = topics || ['Work stress', 'Interview prep', "Mom's birthday"];
-  const _mood = mood || ['anxious', 'hopeful'];
+  const [session, setSession] = useState<ApiSession | null>(null);
+  const [memories, setMemories] = useState<ApiMemory[]>([]);
+  const [loading, setLoading] = useState(true);
   const a = useEntrance({ fromTranslateY: 40, durationMs: 500 });
+
+  // Extraction is a background job, so one fetch on mount usually lands before
+  // it has finished. A handful of retries, then it stops — the sheet is
+  // dismissible and a permanent poll behind a closed screen is just waste.
+  useEffect(() => {
+    if (!characterId) { setLoading(false); return; }
+    let cancelled = false;
+    let attempts = 0;
+
+    const load = async (): Promise<void> => {
+      attempts++;
+      try {
+        const { sessions } = await getCharacterSessions(characterId);
+        const latest = sessions?.[0] ?? null;
+        if (cancelled) return;
+        setSession(latest);
+
+        if (latest) {
+          const all = await getMemories(characterId);
+          if (cancelled) return;
+          // Memories carry no session id, so "from this session" is anything
+          // written since it started. Close enough, and never wrong in a way
+          // that invents something the user did not say.
+          const since = new Date(latest.started_at).getTime();
+          setMemories(all.filter(m => new Date(m.created_at).getTime() >= since));
+        }
+
+        const ready = (latest?.summary?.topics?.length ?? 0) > 0;
+        if (!cancelled && !ready && attempts < 5) { setTimeout(load, 5000); return; }
+      } catch {
+        // Leave it empty; the copy below already covers "nothing to show".
+      }
+      if (!cancelled) setLoading(false);
+    };
+
+    void load();
+    return () => { cancelled = true; };
+  }, [characterId]);
+
+  const duration = formatDuration(session);
+  const kind = session?.session_type === 'voice_call' ? 'voice' : 'text';
+  const _topics = session?.summary?.topics ?? [];
+  const moodLine = session?.summary?.mood_arc?.end?.trim() || null;
+
+  const forget = (m: ApiMemory) => {
+    const previous = memories;
+    setMemories(ms => ms.filter(x => x._id !== m._id));
+    // This used to only drop it from local state, so a memory dismissed here
+    // was still there next time you looked.
+    deleteMemory(m._id).catch(() => setMemories(previous));
+  };
 
   return (
     <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(24,16,20,0.55)', zIndex: 30, justifyContent: 'flex-end' }}>
@@ -675,13 +744,22 @@ export function S29_Recap({
             <Avatar color={W.primary} size={32} />
             <View style={{ flex: 1, minWidth: 0 }}>
               <Txt font="comp" weight={600} style={{ fontSize: 16, color: W.text }}>Your conversation with {companion.name}</Txt>
-              <Txt font="user" style={{ fontSize: 11, color: W.text2 }}>{duration} · {kind === 'voice' ? 'Voice call' : 'Text'}</Txt>
+              <Txt font="user" style={{ fontSize: 11, color: W.text2 }}>
+                {duration ? `${duration} · ` : ''}{kind === 'voice' ? 'Voice call' : 'Text'}
+              </Txt>
             </View>
           </View>
 
           <View style={{ height: 1, backgroundColor: 'rgba(255,255,255,0.06)', marginVertical: 16 }} />
 
           <RecapSection title="What you talked about">
+            {_topics.length === 0 ? (
+              <Txt font="user" style={{ fontSize: 13, color: W.text2 }}>
+                {loading
+                  ? `${companion.name} is still writing this up…`
+                  : 'Nothing was pulled out of this one.'}
+              </Txt>
+            ) : null}
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
               {_topics.map(t => (
                 <View key={t} style={{ backgroundColor: 'rgba(255,255,255,0.06)', paddingVertical: 5, paddingHorizontal: 12, borderRadius: 999, borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)' }}>
@@ -693,19 +771,21 @@ export function S29_Recap({
 
           <RecapSection title="Memories created">
             {memories.length === 0 ? (
-              <Txt font="user" style={{ fontSize: 13, color: W.text2 }}>No new memories from this session</Txt>
+              <Txt font="user" style={{ fontSize: 13, color: W.text2 }}>
+                {loading ? 'Still looking…' : 'No new memories from this session'}
+              </Txt>
             ) : (
               <View style={{ gap: 6 }}>
                 {memories.map(m => {
                   const mt = MEM_TYPES[m.type];
                   const c = mt?.color || W.accent;
                   return (
-                    <View key={m.id} style={{ backgroundColor: 'rgba(255,201,96,0.06)', borderWidth: 1, borderColor: 'rgba(255,201,96,0.15)', borderRadius: 10, paddingVertical: 10, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}>
+                    <View key={m._id} style={{ backgroundColor: 'rgba(255,201,96,0.06)', borderWidth: 1, borderColor: 'rgba(255,201,96,0.15)', borderRadius: 10, paddingVertical: 10, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}>
                       <View style={{ backgroundColor: alpha(c, '26'), paddingVertical: 3, paddingHorizontal: 7, borderRadius: 6 }}>
                         <Txt font="user" weight={600} style={{ fontSize: 9, color: c, textTransform: 'uppercase', letterSpacing: 0.4 }}>{mt?.l || m.type}</Txt>
                       </View>
-                      <Txt font="user" style={{ flex: 1, fontSize: 13, color: W.text, lineHeight: 18 }}>{m.text}</Txt>
-                      <Pressable onPress={() => setMemories(ms => ms.filter(x => x.id !== m.id))} style={{ padding: 2, opacity: 0.6 }}>
+                      <Txt font="user" style={{ flex: 1, fontSize: 13, color: W.text, lineHeight: 18 }}>{m.content}</Txt>
+                      <Pressable onPress={() => forget(m)} style={{ padding: 2, opacity: 0.6 }}>
                         <NavIcon name="close" color={W.text2} />
                       </Pressable>
                     </View>
@@ -715,22 +795,16 @@ export function S29_Recap({
             )}
           </RecapSection>
 
-          {_mood ? (
+          {/* One real sentence from the extraction, not two invented tags with
+              an arrow between them — nothing records a start-to-end mood arc. */}
+          {moodLine ? (
             <RecapSection title="Mood">
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                <Txt font="user" style={{ fontSize: 13, color: W.text }}>You seemed:</Txt>
-                <Txt font="user" weight={500} style={{ fontSize: 13, color: W.secondary }}>{_mood[0]}</Txt>
-                <Txt font="user" style={{ fontSize: 13, color: W.text2 }}>→</Txt>
-                <Txt font="user" weight={500} style={{ fontSize: 13, color: W.accent }}>{_mood[1]}</Txt>
-              </View>
+              <Txt font="user" style={{ fontSize: 13, color: W.text, lineHeight: 19 }}>{moodLine}</Txt>
             </RecapSection>
           ) : null}
 
           <Pressable onPress={() => go('home')} style={{ marginTop: 22, width: '100%', height: 44, backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', borderRadius: 12, alignItems: 'center', justifyContent: 'center' }}>
             <Txt font="user" weight={500} style={{ fontSize: 14, color: W.text }}>Done</Txt>
-          </Pressable>
-          <Pressable style={{ marginTop: 6, width: '100%', height: 32, alignItems: 'center', justifyContent: 'center' }}>
-            <Txt font="user" style={{ fontSize: 11, color: W.text3 }}>Don't show recaps</Txt>
           </Pressable>
         </ScrollView>
       </Animated.View>

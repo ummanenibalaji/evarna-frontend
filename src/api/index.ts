@@ -226,6 +226,24 @@ export interface ApiUserStats {
 export const getUserStats = (): Promise<ApiUserStats> =>
   apiGet<ApiUserStats>('/users/me/stats');
 
+// The streak and the week strip, bucketed in the user's own timezone by the
+// backend. Every one of these was a constant in data/config.ts — a 12-day
+// streak, a best of 21, seven invented bars — rendered identically for
+// everyone who opened the app.
+export interface ApiActivity {
+  streak_days: number;
+  best_streak: number;
+  /** Minutes talked, Monday first. Always length 7. */
+  week_minutes: number[];
+  week_total_minutes: number;
+  prev_week_total_minutes: number;
+  /** Days with at least one session, ever. 0 means there is nothing to chart. */
+  active_days: number;
+}
+
+export const getActivity = (): Promise<ApiActivity> =>
+  apiGet<ApiActivity>('/users/me/activity');
+
 // ── Account ────────────────────────────────────────────────────────────────
 
 export interface UpdateMePayload {
@@ -280,6 +298,17 @@ export interface ApiSession {
   character_id: string;
   session_type: string;
   started_at: string;
+  ended_at?: string | null;
+  duration_seconds?: number;
+  status?: 'active' | 'completed' | 'interrupted';
+  // Written by the memory-extraction job, which runs AFTER the session ends —
+  // so this is legitimately absent for the first ~30 seconds and the recap has
+  // to say so rather than fill the gap.
+  summary?: {
+    topics?: string[];
+    mood_arc?: { start?: string; end?: string };
+    memory_count?: number;
+  } | null;
 }
 
 export interface ApiTurn {

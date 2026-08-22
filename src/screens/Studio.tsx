@@ -15,7 +15,7 @@ import { Pill, PrimaryButton, Toggle } from '../components/Atoms';
 import { Avatar, Waveform } from '../components/Avatar';
 import { BubbleMem, ChatInput } from '../components/ChatBits';
 import { W, alpha } from '../theme/theme';
-import { SCENARIOS, Scenario, Tier } from '../data/config';
+import { SCENARIOS, Scenario, Tier, BILLING_LIVE } from '../data/config';
 import {
   ApiGender, ApiMemory, ApiScenario, ApiStudioCharacter, ApiVoice,
   createStudioCharacter, deleteMemory, endSession, getCharacterSessions,
@@ -99,7 +99,11 @@ const studioLook = (c: ApiStudioCharacter) =>
   SCENARIOS.find(s => s.id === c.scenario_id) ?? { icon: 'sparkle', accent: W.secondary };
 
 export function S15_StudioHome({ go, tier, characters, setupScenario, openCreator, resumeConvo }: StudioHomeProps) {
-  const locked = tier === 'free';
+  // Studio is not behind a paywall while there is no paywall. `tier` was
+  // hardcoded to 'plus' app-wide, so this read as unlocked by accident;
+  // making the tier honest would have locked a shipped feature nobody can pay
+  // to unlock. BILLING_LIVE flips both at once when IAP lands.
+  const locked = BILLING_LIVE && tier === 'free';
   // "Continue" is every studio character that has actually been talked to.
   const activeConvos = characters.filter(c => !!c.last_interaction_at);
   const startedScenarios = new Set(characters.map(c => c.scenario_id).filter(Boolean));
