@@ -17,8 +17,15 @@ export const signInWithGoogle = (idToken: string): Promise<AuthSession> =>
 export const signInWithApple = (idToken: string): Promise<AuthSession> =>
   apiPost<AuthSession>('/auth/apple', { id_token: idToken });
 
-export const requestEmailCode = (email: string): Promise<{ sent: boolean }> =>
-  apiPost<{ sent: boolean }>('/auth/email/request', { email });
+export interface EmailCodeRequest {
+  /** False when the backend has no mail provider configured. */
+  sent: boolean;
+  /** Development only — the backend refuses to produce this in production. */
+  dev_code?: string;
+}
+
+export const requestEmailCode = (email: string): Promise<EmailCodeRequest> =>
+  apiPost<EmailCodeRequest>('/auth/email/request', { email });
 
 // `code` is exactly 6 digits.
 export const verifyEmailCode = (email: string, code: string): Promise<AuthSession> =>

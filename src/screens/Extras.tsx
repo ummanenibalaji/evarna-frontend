@@ -823,22 +823,30 @@ function RecapSection({ title, children }: { title: string; children: React.Reac
 
 // ─── S30 — LOGIN / RETURNING USER ───────────────────────────────────────────
 export function S30_Login({
-  isNew = false, onGoogle, onApple, onEmailRequest, onEmailVerify, busy = false, error,
+  isNew = false, onGoogle, onApple, onEmailRequest, onEmailVerify, busy = false, error, devCode,
 }: {
   isNew?: boolean;
   onGoogle: () => void;
   onApple: () => void;
-  // Resolves true when the code was actually sent — that's what flips this
+  // Resolves true when the request was accepted — that's what flips this
   // screen to its "enter the code" step.
   onEmailRequest: (email: string) => Promise<boolean>;
   onEmailVerify: (code: string) => void;
   busy?: boolean;
   error?: string | null;
+  // Development only: set when the backend has no mail provider configured and
+  // returned the code instead of sending it. Without this the screen said
+  // "check your email" for a mail that was never sent, and sign-in dead-ended.
+  devCode?: string | null;
 }) {
   const [showEmail, setShowEmail] = useState(false);
   const [email, setEmail] = useState('');
   const [sent, setSent] = useState(false);
   const [code, setCode] = useState('');
+
+  // Prefill rather than just display it: retyping a code the machine already
+  // knows is pure friction in the one flow every developer runs daily.
+  useEffect(() => { if (devCode) setCode(devCode); }, [devCode]);
   const welcome = useEntrance({ durationMs: 600, fromTranslateY: 0 });
   const codeReady = /^\d{6}$/.test(code);
 
@@ -901,8 +909,14 @@ export function S30_Login({
                       <NavIcon name="check" color={W.accent} />
                     </View>
                     <View style={{ flex: 1 }}>
-                      <Txt font="user" weight={500} style={{ fontSize: 14, color: W.text }}>Check your email</Txt>
-                      <Txt font="user" style={{ fontSize: 12, color: W.text2 }}>We sent a 6-digit code to {email}</Txt>
+                      <Txt font="user" weight={500} style={{ fontSize: 14, color: W.text }}>
+                        {devCode ? 'Development mode' : 'Check your email'}
+                      </Txt>
+                      <Txt font="user" style={{ fontSize: 12, color: W.text2 }}>
+                        {devCode
+                          ? 'No mail provider configured — code filled in below.'
+                          : `We sent a 6-digit code to ${email}`}
+                      </Txt>
                     </View>
                   </View>
                   <TextInput value={code} onChangeText={(v) => setCode(v.replace(/[^0-9]/g, '').slice(0, 6))} placeholder="6-digit code" placeholderTextColor={W.text2} keyboardType="number-pad" autoFocus maxLength={6}

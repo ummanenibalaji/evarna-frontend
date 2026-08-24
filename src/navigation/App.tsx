@@ -103,6 +103,10 @@ export default function App() {
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [pendingEmail, setPendingEmail] = useState('');
+  // Set only when the backend could not actually send the mail — development
+  // with no provider configured. It returns the code instead so the flow can
+  // still be completed; production refuses to produce it at all.
+  const [devCode, setDevCode] = useState<string | null>(null);
   // The signed-in user's email, from GET /auth/me — shown in Settings.
   const [userEmail, setUserEmail] = useState('');
   // Track where modal/edit screens were opened from so the back button returns correctly.
@@ -334,12 +338,20 @@ export default function App() {
     setAuthBusy(true);
     setAuthError(null);
     try {
-      await requestEmailCode(email);
+      const res = await requestEmailCode(email);
       setPendingEmail(email);
+      setDevCode(res.dev_code ?? null);
       return true;
     } catch (e) {
       console.warn('[Auth] email request failed:', e);
-      setAuthError("Couldn't send a code to that address. Check it and try again.");
+      // Rate limiting needs its own message: "check the address" is wrong and
+      // actively misleading when the address was fine and they just asked
+      // too many times.
+      setAuthError(
+        e instanceof ApiError && e.code === 'RATE_LIMITED'
+          ? e.message
+          : "Couldn't send a code to that address. Check it and try again.",
+      );
       return false;
     } finally {
       setAuthBusy(false);
@@ -679,7 +691,7 @@ export default function App() {
   // `companions[0]` types as Companion even when the array is empty, so
   // currentCompanion reads as non-null at every use. This guard is the only
   // thing standing between an empty list and a crash.
-  const COMPANION_SCREENS: ScreenName[] = ['callDepleted', 'call', 'chat', 'crisis', 'profile', 'recap'];
+  const COMPANION_SCREENS: ScreenName[] = ['callDepleted', 'call', 'chat', 'crisis', 'profile', 'recap', 'memories'];
 
   const renderScreen = () => {
     if (!currentCompanion && COMPANION_SCREENS.includes(screen)) return renderHome(true);
@@ -760,6 +772,7 @@ export default function App() {
         onApple={() => handleOAuth('apple')}
         onEmailRequest={handleEmailRequest}
         onEmailVerify={handleEmailVerify}
+        devCode={devCode}
         busy={authBusy}
         error={authError}
       />;
