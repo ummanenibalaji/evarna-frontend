@@ -9,7 +9,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { startSession, endSession, getCharacterSessions, getConversationTurns, getMemories, createReport, ReportReason } from '../api';
 import { streamConversation } from '../api/client';
 import { useVoiceCall } from '../hooks/useVoiceCall';
-import { useWave } from '../theme/animations';
+import { useWave, usePressScale, useEntrance, useLoop } from '../theme/animations';
 import { Screen, TopBar } from '../components/Chrome';
 import { AmbientBg } from '../components/AmbientBg';
 import { RadialGlow } from '../components/RadialGlow';
@@ -129,10 +129,6 @@ export function S09_FirstChat({ go, companion, userId, characterId }: { go: Go; 
     };
   }, [userId, characterId]);
 
-  useEffect(() => {
-    scrollRef.current?.scrollToEnd({ animated: true });
-  }, [msgs, typing]);
-
   const send = () => {
     if (!draft.trim()) return;
     const userMsg = draft.trim();
@@ -186,10 +182,11 @@ export function S09_FirstChat({ go, companion, userId, characterId }: { go: Go; 
         ref={scrollRef}
         style={{ flex: 1 }}
         contentContainerStyle={{ padding: 16, paddingBottom: 8, gap: 8 }}
+        onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
       >
         {msgs.map((m, i) => {
           if (m.streaming && !m.text) return <TypingDots key={i} />;
-          return <Bubble key={i} from={m.from} text={m.text || ''} memoryRefs={m.memoryRefs} />;
+          return <Bubble key={i} from={m.from} text={m.text || ''} memoryRefs={m.memoryRefs} streaming={m.streaming} />;
         })}
         {typing && <TypingDots />}
         <View style={{ alignSelf: 'center', marginTop: 6 }}>
@@ -411,40 +408,49 @@ function Word({ word, index }: { word: string; index: number }) {
 
 function CallBtn({ icon, onPress, bg, active, size = 52 }: { icon: IconName; onPress?: () => void; bg?: string; active?: boolean; size?: number }) {
   const isDanger = bg === W.danger;
+  const press = usePressScale(0.9);
   const content = (
     <NavIcon name={icon} color={isDanger ? '#fff' : active ? W.dangerSoft : '#EDE4E7'} size={isDanger ? 24 : 21} />
   );
   if (bg) {
     return (
-      <Pressable
-        onPress={onPress}
-        style={{
-          width: size, height: size, borderRadius: size / 2,
-          alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
-          shadowColor: isDanger ? W.dangerSoft : '#000', shadowOpacity: isDanger ? 0.5 : 0, shadowRadius: 28, shadowOffset: { width: 0, height: 10 },
-        }}
-      >
-        <LinearGradient
-          colors={isDanger ? [...GRAD.danger] : [bg, bg]}
-          start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
-          style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }}
-        />
-        {content}
-      </Pressable>
+      <Animated.View style={press.style}>
+        <Pressable
+          onPress={onPress}
+          onPressIn={press.onPressIn}
+          onPressOut={press.onPressOut}
+          style={{
+            width: size, height: size, borderRadius: size / 2,
+            alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
+            shadowColor: isDanger ? W.dangerSoft : '#000', shadowOpacity: isDanger ? 0.5 : 0, shadowRadius: 28, shadowOffset: { width: 0, height: 10 },
+          }}
+        >
+          <LinearGradient
+            colors={isDanger ? [...GRAD.danger] : [bg, bg]}
+            start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+            style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }}
+          />
+          {content}
+        </Pressable>
+      </Animated.View>
     );
   }
   return (
-    <Pressable
-      onPress={onPress}
-      style={{
-        width: size, height: size, borderRadius: size / 2,
-        backgroundColor: active ? rgba(W.danger, 0.18) : 'rgba(255,255,255,0.06)',
-        borderWidth: 1, borderColor: 'rgba(255,255,255,0.10)',
-        alignItems: 'center', justifyContent: 'center',
-      }}
-    >
-      {content}
-    </Pressable>
+    <Animated.View style={press.style}>
+      <Pressable
+        onPress={onPress}
+        onPressIn={press.onPressIn}
+        onPressOut={press.onPressOut}
+        style={{
+          width: size, height: size, borderRadius: size / 2,
+          backgroundColor: active ? rgba(W.danger, 0.18) : 'rgba(255,255,255,0.06)',
+          borderWidth: 1, borderColor: 'rgba(255,255,255,0.10)',
+          alignItems: 'center', justifyContent: 'center',
+        }}
+      >
+        {content}
+      </Pressable>
+    </Animated.View>
   );
 }
 
@@ -463,15 +469,16 @@ function S13_VoiceNote({ onClose, onSend }: { onClose: () => void; onSend: (t: n
     return () => clearInterval(t);
   }, []);
   const scale = breathe.interpolate({ inputRange: [0, 1], outputRange: [0.95, 1.05] });
+  const entrance = useEntrance({ fromTranslateY: 80, durationMs: 320 });
   return (
-    <View
-      style={{
+    <Animated.View
+      style={[entrance, {
         position: 'absolute', bottom: 64, left: 0, right: 0, zIndex: 20,
         backgroundColor: W.surface1, borderTopWidth: 1, borderTopColor: W.surface2,
         borderTopLeftRadius: 16, borderTopRightRadius: 16,
         paddingVertical: 16, paddingHorizontal: 24,
         flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-      }}
+      }]}
     >
       <Pressable onPress={onClose} style={{ padding: 6 }}>
         <NavIcon name="close" color={W.text2} />
@@ -482,7 +489,7 @@ function S13_VoiceNote({ onClose, onSend }: { onClose: () => void; onSend: (t: n
         </Animated.View>
       </Pressable>
       <Txt font="user" style={{ fontSize: 14, color: W.text }}>{fmt(time)}</Txt>
-    </View>
+    </Animated.View>
   );
 }
 
@@ -669,13 +676,17 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
     return () => clearTimeout(t);
   }, [showPhoneTip]);
 
-  useEffect(() => {
-    scrollRef.current?.scrollToEnd({ animated: true });
-  }, [msgs, typing]);
+  // Autoscroll follows new content only while the user is already near the
+  // bottom; scrolling up to reread history must never be hijacked by a
+  // streaming reply. animated:false — an animated scroll restarted on every
+  // streamed token visibly jitters.
+  const nearBottomRef = useRef(true);
+  const callPress = usePressScale(0.93);
 
   const send = () => {
     if (!draft.trim()) return;
     const text = draft.trim();
+    nearBottomRef.current = true;
     const userMsgCount = msgs.filter(m => m.from === 'user').length;
     setMsgs(m => [...m, { from: 'user', text }]);
     setDraft('');
@@ -748,8 +759,11 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
         </Pressable>
 
         <View>
+          <Animated.View style={callPress.style}>
           <Pressable
             onPress={() => { setShowPhoneTip(false); go('call'); }}
+            onPressIn={callPress.onPressIn}
+            onPressOut={callPress.onPressOut}
             style={{
               flexDirection: 'row', alignItems: 'center', gap: 7,
               paddingVertical: 9, paddingHorizontal: 16, borderRadius: 20,
@@ -767,6 +781,7 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
             <Txt font="user" weight={700} style={{ fontSize: 12.5, color: '#fff' }}>Call</Txt>
             {showPhoneTip && <PhoneHalo />}
           </Pressable>
+          </Animated.View>
           {showPhoneTip && (
             <Coachmark
               text={`Tap to talk to ${companion.name} with your voice`}
@@ -779,20 +794,32 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
       <ScrollView
         ref={scrollRef}
         style={{ flex: 1 }}
-        contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 8, gap: 8 }}
+        contentContainerStyle={{ paddingHorizontal: 16, paddingTop: 12, paddingBottom: 8 }}
+        onScroll={({ nativeEvent: { contentOffset, contentSize, layoutMeasurement } }) => {
+          nearBottomRef.current =
+            contentSize.height - (contentOffset.y + layoutMeasurement.height) < 80;
+        }}
+        scrollEventThrottle={100}
+        onContentSizeChange={() => {
+          if (nearBottomRef.current) scrollRef.current?.scrollToEnd({ animated: false });
+        }}
       >
         {loadingHistory
-          ? <TypingDots />
+          ? <SkeletonBubbles />
           : <>
               {msgs.length > 0 && <DayDivider />}
               {msgs.map((m, i) => {
+                // Consecutive same-sender messages group: tighter gap so a
+                // thread reads as exchanges, not an undifferentiated stack.
+                const grouped = i > 0 && msgs[i - 1].from === m.from;
+                const gap = { marginTop: grouped ? 2 : 10 };
                 if (m.from === 'voiceUser' || m.from === 'voiceComp')
-                  return <VoiceNoteBubble key={i} from={m.from === 'voiceUser' ? 'user' : 'comp'} duration={m.duration} />;
+                  return <View key={i} style={gap}><VoiceNoteBubble from={m.from === 'voiceUser' ? 'user' : 'comp'} duration={m.duration} /></View>;
                 // While a streamed reply has no text yet, show the typing indicator
                 // instead of an empty bubble; it swaps to text once tokens arrive.
                 if (m.streaming && !m.text)
                   return (
-                    <View key={i} style={{ gap: 6 }}>
+                    <View key={i} style={[{ gap: 6 }, gap]}>
                       <RecallIndicator />
                       <TypingDots />
                     </View>
@@ -800,10 +827,10 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
                 // Long-press only on companion messages, and only once the turn
                 // has an id — there is nothing to report until the backend has
                 // persisted it.
-                return <BubbleMem key={i} from={m.from} text={m.text || ''} memoryRefs={m.memoryRefs} accent={accent} onMemoryClick={openMemorySheet}
-                  onLongPress={m.from === 'comp' && m.turnId ? () => setReportTurn(m.turnId!) : undefined} />;
+                return <View key={i} style={gap}><BubbleMem from={m.from} text={m.text || ''} memoryRefs={m.memoryRefs} accent={accent} onMemoryClick={openMemorySheet} streaming={m.streaming}
+                  onLongPress={m.from === 'comp' && m.turnId ? () => setReportTurn(m.turnId!) : undefined} /></View>;
               })}
-              {typing && <TypingDots />}
+              {typing && <View style={{ marginTop: 10 }}><TypingDots /></View>}
             </>
         }
         <View style={{ alignSelf: 'center', marginTop: 6 }}>
@@ -821,7 +848,7 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
             </View>
           )}
         </View>
-        {capHit && <CapHitCard onUpgrade={() => go('paywall')} />}
+        {capHit && <View style={{ marginTop: 10 }}><CapHitCard onUpgrade={() => go('paywall')} /></View>}
       </ScrollView>
       {recording && (
         <S13_VoiceNote
@@ -902,6 +929,29 @@ function ReportSheet({ turnId, onClose }: { turnId: string; onClose: () => void 
           )}
         </View>
       </View>
+    </View>
+  );
+}
+
+// Shimmering placeholder bubbles while history loads. TypingDots was used
+// here before, which read as "companion is typing" during a page load.
+function SkeletonBubbles() {
+  const v = useLoop(1600, { yoyo: true });
+  const opacity = v.interpolate({ inputRange: [0, 1], outputRange: [0.35, 0.75] });
+  const rows: Array<{ w: number; mine?: boolean }> = [{ w: 210 }, { w: 140, mine: true }, { w: 250 }];
+  return (
+    <View style={{ gap: 10 }}>
+      {rows.map((r, i) => (
+        <Animated.View
+          key={i}
+          style={{
+            opacity,
+            alignSelf: r.mine ? 'flex-end' : 'flex-start',
+            width: r.w, height: 40, borderRadius: 18,
+            backgroundColor: r.mine ? W.surface3 : W.surface2,
+          }}
+        />
+      ))}
     </View>
   );
 }

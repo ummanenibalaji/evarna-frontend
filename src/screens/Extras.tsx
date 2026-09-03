@@ -6,7 +6,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   View, ScrollView, Pressable, Animated, Easing, TextInput,
-  LayoutChangeEvent, PanResponder,
+  LayoutChangeEvent, PanResponder, Linking, KeyboardAvoidingView, Platform,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
@@ -226,7 +226,7 @@ export function S26_CompanionEdit({
             ) : (
               <>
                 <Txt font="display" weight={600} style={{ fontSize: 22, color: W.text }}>{name}</Txt>
-                <Pressable onPress={() => setEditName(true)} style={{ padding: 4, opacity: 0.6 }}>
+                <Pressable onPress={() => setEditName(true)} hitSlop={12} style={({ pressed }) => ({ padding: 4, opacity: pressed ? 0.4 : 0.6 })}>
                   <Svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke={W.text2} strokeWidth={1.8} strokeLinecap="round"><Path d="M14 4l6 6-12 12H2v-6L14 4z" /></Svg>
                 </Pressable>
               </>
@@ -587,9 +587,9 @@ export function CrisisBanner() {
 }
 
 export function CrisisResourceCard() {
-  const resources: { icon: IconName; l: string; sub: string }[] = [
-    { icon: 'phone', l: '988 Suicide & Crisis Lifeline', sub: 'Call · Free 24/7' },
-    { icon: 'two', l: 'Crisis Text Line', sub: 'Text HOME to 741741' },
+  const resources: { icon: IconName; l: string; sub: string; url?: string }[] = [
+    { icon: 'phone', l: '988 Suicide & Crisis Lifeline', sub: 'Call · Free 24/7', url: 'tel:988' },
+    { icon: 'two', l: 'Crisis Text Line', sub: 'Text HOME to 741741', url: 'sms:741741' },
     { icon: 'globe', l: 'Chat with a crisis counselor', sub: 'chat.988lifeline.org' },
   ];
   return (
@@ -604,7 +604,7 @@ export function CrisisResourceCard() {
       </View>
       <View style={{ gap: 8 }}>
         {resources.map((r, i) => (
-          <Pressable key={i} style={{ backgroundColor: 'rgba(24,16,20,0.4)', borderWidth: 1, borderColor: 'rgba(255,201,96,0.10)', borderRadius: 10, paddingVertical: 10, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+          <Pressable key={i} onPress={r.url ? () => Linking.openURL(r.url!) : undefined} style={({ pressed }) => ({ backgroundColor: 'rgba(24,16,20,0.4)', borderWidth: 1, borderColor: 'rgba(255,201,96,0.10)', borderRadius: 10, paddingVertical: 10, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 10, opacity: pressed && r.url ? 0.6 : 1 })}>
             <View style={{ width: 30, height: 30, borderRadius: 8, backgroundColor: 'rgba(255,201,96,0.10)', alignItems: 'center', justifyContent: 'center' }}>
               <NavIcon name={r.icon} color={W.accent} />
             </View>
@@ -853,7 +853,20 @@ export function S30_Login({
   return (
     <Screen label="30 Login" hideHomeIndicator>
       <AmbientBg intensity={1.6} includePulse />
-      <View style={{ flex: 1, padding: 24, position: 'relative', zIndex: 1 }}>
+      {/* Keyboard handling: the code/email inputs sit low enough that the
+          keyboard covers them and the buttons beneath. KeyboardAvoidingView
+          lifts the content; the ScrollView lets the user reach anything that
+          is still clipped. persistTaps so "Verify code" works in one tap
+          while the keyboard is open. */}
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={{ flex: 1, position: 'relative', zIndex: 1 }}
+      >
+        <ScrollView
+          contentContainerStyle={{ flexGrow: 1, padding: 24 }}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
         <View style={{ marginTop: '18%', alignItems: 'center' }}>
           <Txt font="display" weight={700} style={{ fontSize: 34, color: W.primary, letterSpacing: -1 }}>whisper</Txt>
           <Animated.View style={welcome}>
@@ -868,7 +881,7 @@ export function S30_Login({
 
         <View style={{ marginTop: 44, gap: 12 }}>
           {/* Apple */}
-          <Pressable onPress={onApple} disabled={busy} style={{ opacity: busy ? 0.5 : 1, width: '100%', height: 52, backgroundColor: '#F0F0F5', borderRadius: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, paddingHorizontal: 16 }}>
+          <Pressable onPress={onApple} disabled={busy} style={({ pressed }) => ({ opacity: busy ? 0.5 : pressed ? 0.6 : 1, width: '100%', height: 52, backgroundColor: '#F0F0F5', borderRadius: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, paddingHorizontal: 16 })}>
             <Svg width={16} height={20} viewBox="0 0 24 28" fill="#000">
               <Path d="M18.7 14.6c0-3.2 2.6-4.8 2.7-4.9-1.5-2.2-3.8-2.5-4.6-2.5-2-.2-3.8 1.1-4.8 1.1-1 0-2.5-1.1-4.2-1.1-2.2 0-4.2 1.3-5.3 3.2-2.3 3.9-.6 9.7 1.6 12.9 1.1 1.6 2.4 3.3 4.1 3.3 1.7-.1 2.3-1.1 4.3-1.1s2.6 1.1 4.3 1c1.8 0 2.9-1.6 4-3.2 1.3-1.8 1.8-3.6 1.8-3.7-.1-.1-3.5-1.3-3.5-5z M15.7 5c.9-1.1 1.5-2.6 1.3-4.1-1.3.1-2.8.9-3.7 2-.8 1-1.6 2.5-1.4 3.9 1.4.1 2.9-.7 3.8-1.8z" />
             </Svg>
@@ -877,7 +890,7 @@ export function S30_Login({
           {/* Google */}
           <View style={{ width: '100%', height: 52, borderRadius: 12, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' }}>
             <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-            <Pressable onPress={onGoogle} disabled={busy} style={{ flex: 1, opacity: busy ? 0.5 : 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: 'rgba(32,22,26,0.6)' }}>
+            <Pressable onPress={onGoogle} disabled={busy} style={({ pressed }) => ({ flex: 1, opacity: busy ? 0.5 : pressed ? 0.6 : 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: 'rgba(32,22,26,0.6)' })}>
               <Svg width={18} height={18} viewBox="0 0 18 18">
                 <Path fill="#4285F4" d="M17.6 9.2c0-.6-.1-1.2-.2-1.7H9v3.3h4.8c-.2 1.1-.9 2.1-1.8 2.7v2.3h3c1.7-1.6 2.6-3.9 2.6-6.6z" />
                 <Path fill="#34A853" d="M9 18c2.4 0 4.5-.8 6-2.2l-3-2.3c-.8.5-1.9.9-3 .9-2.3 0-4.3-1.6-5-3.7H1v2.3C2.5 15.9 5.5 18 9 18z" />
@@ -891,7 +904,7 @@ export function S30_Login({
           {!showEmail ? (
             <View style={{ width: '100%', height: 52, borderRadius: 12, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' }}>
               <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-              <Pressable onPress={() => setShowEmail(true)} style={{ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: 'rgba(32,22,26,0.6)' }}>
+              <Pressable onPress={() => setShowEmail(true)} style={({ pressed }) => ({ flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: 'rgba(32,22,26,0.6)', opacity: pressed ? 0.6 : 1 })}>
                 <Svg width={18} height={18} viewBox="0 0 24 24" fill="none" stroke={W.text2} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
                   <Rect x={3} y={5} width={18} height={14} rx={2} />
                   <Path d="M3 7l9 6 9-6" />
@@ -919,7 +932,14 @@ export function S30_Login({
                       </Txt>
                     </View>
                   </View>
-                  <TextInput value={code} onChangeText={(v) => setCode(v.replace(/[^0-9]/g, '').slice(0, 6))} placeholder="6-digit code" placeholderTextColor={W.text2} keyboardType="number-pad" autoFocus maxLength={6}
+                  {/* Auto-submits on the sixth digit: the number pad has no
+                      return key, so waiting for a button tap is the one step
+                      the keyboard is most likely to be covering. */}
+                  <TextInput value={code} onChangeText={(v) => {
+                      const digits = v.replace(/[^0-9]/g, '').slice(0, 6);
+                      setCode(digits);
+                      if (digits.length === 6 && !busy) onEmailVerify(digits);
+                    }} placeholder="6-digit code" placeholderTextColor={W.text2} keyboardType="number-pad" autoFocus maxLength={6} textContentType="oneTimeCode"
                     style={{ width: '100%', backgroundColor: 'rgba(37,40,54,0.7)', color: W.text, borderWidth: 1, borderColor: 'rgba(255,255,255,0.05)', height: 44, borderRadius: 10, paddingHorizontal: 14, fontFamily: 'Outfit_400Regular', fontSize: 15, letterSpacing: 6 }} />
                   <Pressable onPress={() => codeReady && !busy && onEmailVerify(code)} style={{ width: '100%', height: 44, backgroundColor: W.primary, borderRadius: 10, alignItems: 'center', justifyContent: 'center', opacity: codeReady && !busy ? 1 : 0.5 }}>
                     <Txt font="user" weight={500} style={{ fontSize: 14, color: '#fff' }}>{busy ? 'Signing in…' : 'Verify code'}</Txt>
@@ -937,7 +957,7 @@ export function S30_Login({
                       if (!email.includes('@') || busy) return;
                       if (await onEmailRequest(email.trim())) setSent(true);
                     }}
-                    style={{ width: '100%', height: 44, backgroundColor: W.primary, borderRadius: 10, alignItems: 'center', justifyContent: 'center', opacity: email.includes('@') && !busy ? 1 : 0.5 }}>
+                    style={({ pressed }) => ({ width: '100%', height: 44, backgroundColor: W.primary, borderRadius: 10, alignItems: 'center', justifyContent: 'center', opacity: email.includes('@') && !busy ? (pressed ? 0.6 : 1) : 0.5 })}>
                     <Txt font="user" weight={500} style={{ fontSize: 14, color: '#fff' }}>{busy ? 'Sending…' : 'Send code'}</Txt>
                   </Pressable>
                 </>
@@ -949,12 +969,13 @@ export function S30_Login({
           ) : null}
         </View>
 
-        <View style={{ flex: 1 }} />
+        <View style={{ flex: 1, minHeight: 24 }} />
         <View style={{ flexDirection: 'row', justifyContent: 'center' }}>
           <Txt font="user" style={{ fontSize: 13, color: W.text2 }}>Don't have an account? </Txt>
-          <Pressable onPress={() => setShowEmail(true)}><Txt font="user" weight={500} style={{ fontSize: 13, color: W.primary }}>Get started</Txt></Pressable>
+          <Pressable onPress={() => setShowEmail(true)} style={({ pressed }) => ({ opacity: pressed ? 0.6 : 1 })}><Txt font="user" weight={500} style={{ fontSize: 13, color: W.primary }}>Get started</Txt></Pressable>
         </View>
-      </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
       <HomeIndicator />
     </Screen>
   );

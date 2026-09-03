@@ -20,7 +20,8 @@
         "UIBackgroundModes": [
           "audio",
           "voip"
-        ]
+        ],
+        "NSLocalNetworkUsageDescription": "Whisper connects to the development server on your local network to load the app and reach the backend."
       },
       "bitcode": false
     },
