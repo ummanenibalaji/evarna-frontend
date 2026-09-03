@@ -13,12 +13,17 @@ import { useDotPulse } from '../theme/animations';
 import { W, GRAD, alpha, rgba } from '../theme/theme';
 
 // ─── Bubble (simple, first-chat) ─────────────────────────────────────────
-export function Bubble({ from, text, memoryRefs = [] }: { from: string; text: string; memoryRefs?: string[] }) {
+export function Bubble({ from, text, memoryRefs = [], streaming = false }: { from: string; text: string; memoryRefs?: string[]; streaming?: boolean }) {
   const isUser = from === 'user';
   return (
     <BubbleEntrance isUser={isUser}>
       <BubbleSkin isUser={isUser}>
-        <RefText text={text} memoryRefs={memoryRefs} isUser={isUser} />
+        <View style={{ flexDirection: 'row', alignItems: 'flex-end' }}>
+          <View style={{ flexShrink: 1 }}>
+            <RefText text={text} memoryRefs={memoryRefs} isUser={isUser} />
+          </View>
+          {streaming && <StreamCaret />}
+        </View>
       </BubbleSkin>
     </BubbleEntrance>
   );
@@ -140,10 +145,10 @@ function RefText({
 
 // ─── BubbleMem (glassy, with tappable memory refs) ───────────────────────
 export function BubbleMem({
-  from, text, memoryRefs = [], accent = W.primary, onMemoryClick, onLongPress,
+  from, text, memoryRefs = [], accent = W.primary, onMemoryClick, onLongPress, streaming = false,
 }: {
   from: string; text: string; memoryRefs?: string[]; accent?: string;
-  onMemoryClick?: (ref: string) => void; onLongPress?: () => void;
+  onMemoryClick?: (ref: string) => void; onLongPress?: () => void; streaming?: boolean;
 }) {
   const isUser = from === 'user';
   return (
@@ -154,7 +159,12 @@ export function BubbleMem({
           AI-generated content. */}
       <Pressable onLongPress={onLongPress} delayLongPress={400} disabled={!onLongPress}>
         <BubbleSkin isUser={isUser} accent={accent}>
-          <RefText text={text} memoryRefs={memoryRefs} isUser={isUser} onMemoryClick={onMemoryClick} asMemoryRef />
+          <View style={{ flexDirection: 'row', alignItems: 'flex-end' }}>
+            <View style={{ flexShrink: 1 }}>
+              <RefText text={text} memoryRefs={memoryRefs} isUser={isUser} onMemoryClick={onMemoryClick} asMemoryRef />
+            </View>
+            {streaming && <StreamCaret />}
+          </View>
         </BubbleSkin>
       </Pressable>
     </BubbleEntrance>
@@ -175,13 +185,21 @@ export function ChatInput({
   const borderColor = focusV.interpolate({ inputRange: [0, 1], outputRange: ['rgba(255,255,255,0.06)', 'rgba(255,138,118,0.45)'] });
   const hasDraft = draft.trim().length > 0;
 
-  // Animated send button reveal
+  // Animated send button reveal — width needs the JS driver, so it gets its
+  // own value; scale/opacity stay on the native driver via sendV.
   const sendV = useRef(new Animated.Value(0)).current;
+  const sendW = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     Animated.spring(sendV, { toValue: hasDraft ? 1 : 0, useNativeDriver: true, tension: 120, friction: 10 }).start();
+    Animated.timing(sendW, { toValue: hasDraft ? 1 : 0, duration: 180, easing: Easing.bezier(0.22, 1, 0.36, 1), useNativeDriver: false }).start();
   }, [hasDraft]);
   const sendScale = sendV;
-  const sendOpacity = sendV;
+  const sendWidth = sendW.interpolate({ inputRange: [0, 1], outputRange: [0, 40] });
+
+  // Press feedback on the send button (native driver, inner node only)
+  const pressV = useRef(new Animated.Value(1)).current;
+  const onSendPressIn = () => Animated.spring(pressV, { toValue: 0.9, useNativeDriver: true, tension: 200, friction: 12 }).start();
+  const onSendPressOut = () => Animated.spring(pressV, { toValue: 1, useNativeDriver: true, tension: 200, friction: 12 }).start();
 
   return (
     <View
@@ -223,25 +241,30 @@ export function ChatInput({
         />
       </Animated.View>
 
-      <Animated.View style={{ transform: [{ scale: sendScale }], opacity: sendOpacity, width: hasDraft ? 40 : 0 }}>
-        <Pressable
-          onPress={onSend}
-          disabled={!hasDraft}
-          style={{
-            width: 40, height: 40, borderRadius: 20, overflow: 'hidden',
-            alignItems: 'center', justifyContent: 'center',
-            shadowColor: W.rose, shadowOpacity: 0.45, shadowRadius: 18, shadowOffset: { width: 0, height: 6 },
-          }}
-        >
-          <LinearGradient
-            colors={[...GRAD.aurora]}
-            locations={[0, 0.6, 1]}
-            start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
-            style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }}
-          />
-          <View pointerEvents="none" style={{ position: 'absolute', left: 1, top: 1, right: 1, height: 14, borderTopLeftRadius: 19, borderTopRightRadius: 19, backgroundColor: 'rgba(255,255,255,0.16)' }} />
-          <NavIcon name="send" color="#fff" size={17} />
-        </Pressable>
+      {/* outer node animates width (JS driver); inner node animates scale (native) */}
+      <Animated.View style={{ width: sendWidth, opacity: sendW }}>
+        <Animated.View style={{ transform: [{ scale: sendScale }, { scale: pressV }] }}>
+          <Pressable
+            onPress={onSend}
+            onPressIn={onSendPressIn}
+            onPressOut={onSendPressOut}
+            disabled={!hasDraft}
+            style={{
+              width: 40, height: 40, borderRadius: 20, overflow: 'hidden',
+              alignItems: 'center', justifyContent: 'center',
+              shadowColor: W.rose, shadowOpacity: 0.45, shadowRadius: 18, shadowOffset: { width: 0, height: 6 },
+            }}
+          >
+            <LinearGradient
+              colors={[...GRAD.aurora]}
+              locations={[0, 0.6, 1]}
+              start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+              style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }}
+            />
+            <View pointerEvents="none" style={{ position: 'absolute', left: 1, top: 1, right: 1, height: 14, borderTopLeftRadius: 19, borderTopRightRadius: 19, backgroundColor: 'rgba(255,255,255,0.16)' }} />
+            <NavIcon name="send" color="#fff" size={17} />
+          </Pressable>
+        </Animated.View>
       </Animated.View>
     </View>
   );
@@ -267,6 +290,22 @@ export function TypingDots() {
 function TypingDot({ delay }: { delay: number }) {
   const pulse = useDotPulse(delay);
   return <Animated.View style={[{ width: 6, height: 6, borderRadius: 3, backgroundColor: W.primary }, pulse]} />;
+}
+
+// Blinking caret shown at the end of a bubble while its reply is streaming in.
+function StreamCaret() {
+  const v = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(v, { toValue: 1, duration: 450, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+        Animated.timing(v, { toValue: 0, duration: 450, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, []);
+  return <Animated.View style={{ width: 2, height: 14, borderRadius: 1, marginLeft: 3, marginBottom: 3, backgroundColor: W.primarySoft, opacity: v }} />;
 }
 
 // ─── DayDivider ──────────────────────────────────────────────────────────
@@ -308,7 +347,7 @@ export function VoiceNoteBubble({ from, duration = 12 }: { from: string; duratio
           "audio" reads as one affordance regardless of who recorded it. */}
       <Pressable
         onPress={() => setPlaying(p => !p)}
-        style={{ width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}
+        style={({ pressed }): ViewStyle => ({ width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', overflow: 'hidden', opacity: pressed ? 0.6 : 1, transform: [{ scale: pressed ? 0.94 : 1 }] })}
       >
         <LinearGradient
           colors={[...GRAD.auroraShort]}

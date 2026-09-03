@@ -4,12 +4,13 @@
 // Screen also wraps in KeyboardAvoidingView so text inputs are never hidden.
 
 import React, { useEffect, useState } from 'react';
-import { View, ViewStyle, StyleProp, KeyboardAvoidingView, Platform, Keyboard } from 'react-native';
+import { View, ViewStyle, StyleProp, KeyboardAvoidingView, Platform, Keyboard, Animated } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AmbientBg } from './AmbientBg';
-import { W } from '../theme/theme';
+import { W, GRAD } from '../theme/theme';
+import { useEntrance } from '../theme/animations';
 
 // Kept as a no-op shim so legacy imports (HomeIndicator, StatusBar) don't crash.
 export function HomeIndicator(_props: { color?: string }) { return null; }
@@ -60,6 +61,8 @@ export function Screen({
 }: ScreenProps) {
   const insets = useSafeAreaInsets();
   const { visible: kbVisible, height: kbHeight } = useKeyboard();
+  // Mount-time entrance — each screen mounts fresh per navigation.
+  const entrance = useEntrance({ fromTranslateY: 12, durationMs: 260 });
 
   if (noKeyboardAvoid) {
     return (
@@ -76,7 +79,7 @@ export function Screen({
         ]}
       >
         {ambient && <AmbientBg intensity={ambientIntensity} />}
-        <View style={{ flex: 1, minHeight: 0, zIndex: 1 }}>{children}</View>
+        <Animated.View style={[{ flex: 1, minHeight: 0, zIndex: 1 }, entrance]}>{children}</Animated.View>
       </View>
     );
   }
@@ -97,13 +100,19 @@ export function Screen({
         style,
       ]}
     >
+      <LinearGradient
+        pointerEvents="none"
+        colors={[...GRAD.page]}
+        start={{ x: 0, y: 0 }} end={{ x: 0, y: 1 }}
+        style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }}
+      />
       {ambient && <AmbientBg intensity={ambientIntensity} />}
       <KeyboardAvoidingView
         style={{ flex: 1, zIndex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top : 0}
       >
-        <View style={{ flex: 1, paddingBottom: bottomPad }}>{children}</View>
+        <Animated.View style={[{ flex: 1, paddingBottom: bottomPad }, entrance]}>{children}</Animated.View>
       </KeyboardAvoidingView>
     </View>
   );

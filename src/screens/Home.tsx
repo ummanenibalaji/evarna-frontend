@@ -12,7 +12,7 @@ import { NavIcon } from '../components/NavIcon';
 import { Pill, PrimaryButton, AuroraLine, StreakPill } from '../components/Atoms';
 import { Avatar, Waveform } from '../components/Avatar';
 import { RadialGlow } from '../components/RadialGlow';
-import { usePulse } from '../theme/animations';
+import { usePulse, usePressScale, useEntrance } from '../theme/animations';
 import { W, GRAD, rgba } from '../theme/theme';
 import { Go } from '../navigation/types';
 import { Companion, Tier, ARCHETYPE_COLORS, ARCHETYPE_LABEL, CHECK_IN } from '../data/config';
@@ -21,19 +21,22 @@ import { getActivity, ApiActivity } from '../api';
 // ─── AuroraAvatarButton ──────────────────────────────────────────────────
 // The account button in the header: an aurora ring around the user's initial.
 function AuroraAvatarButton({ initial, onPress }: { initial: string; onPress: () => void }) {
+  const press = usePressScale(0.92);
   return (
-    <Pressable onPress={onPress}>
-      <View style={{ width: 38, height: 38, borderRadius: 19, padding: 2, overflow: 'hidden' }}>
-        <LinearGradient
-          colors={[W.coral, W.rose, W.violet, W.coral]}
-          start={{ x: 0.1, y: 0 }} end={{ x: 0.9, y: 1 }}
-          style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }}
-        />
-        <View style={{ flex: 1, borderRadius: 17, backgroundColor: '#1C1216', alignItems: 'center', justifyContent: 'center' }}>
-          <Txt font="user" weight={600} style={{ fontSize: 13, color: W.cream }}>{initial}</Txt>
+    <Animated.View style={press.style}>
+      <Pressable onPress={onPress} onPressIn={press.onPressIn} onPressOut={press.onPressOut}>
+        <View style={{ width: 38, height: 38, borderRadius: 19, padding: 2, overflow: 'hidden' }}>
+          <LinearGradient
+            colors={[W.coral, W.rose, W.violet, W.coral]}
+            start={{ x: 0.1, y: 0 }} end={{ x: 0.9, y: 1 }}
+            style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }}
+          />
+          <View style={{ flex: 1, borderRadius: 17, backgroundColor: '#1C1216', alignItems: 'center', justifyContent: 'center' }}>
+            <Txt font="user" weight={600} style={{ fontSize: 13, color: W.cream }}>{initial}</Txt>
+          </View>
         </View>
-      </View>
-    </Pressable>
+      </Pressable>
+    </Animated.View>
   );
 }
 
@@ -76,11 +79,12 @@ function CheckInCard({ onMood, streak }: { onMood: (mood: string) => void; strea
           <Pressable
             key={m}
             onPress={() => onMood(m)}
-            style={{
+            style={({ pressed }) => ({
               paddingVertical: 9, paddingHorizontal: 15, borderRadius: 18,
               backgroundColor: 'rgba(255,255,255,0.05)',
               borderWidth: 1, borderColor: 'rgba(255,255,255,0.10)',
-            }}
+              opacity: pressed ? 0.6 : 1,
+            })}
           >
             <Txt font="user" weight={500} style={{ fontSize: 13, color: '#E8DEE1' }}>{m}</Txt>
           </Pressable>
@@ -128,10 +132,13 @@ export function formatLastInteraction(iso?: string): string {
 function CompanionCard({ companion, onChat, onCall }: { companion: Companion; onChat: () => void; onCall: () => void }) {
   const accent = ARCHETYPE_COLORS[companion.archetype] || W.primary;
   const pulse = usePulse();
+  const cardPress = usePressScale(0.98);
+  const callPress = usePressScale(0.9);
   const memory = companion.memoryHighlight ?? companion.memory;
 
   return (
-    <Pressable onPress={onChat}>
+    <Animated.View style={cardPress.style}>
+    <Pressable onPress={onChat} onPressIn={cardPress.onPressIn} onPressOut={cardPress.onPressOut}>
       <View style={{
         borderRadius: 20, padding: 14,
         flexDirection: 'row', alignItems: 'center', gap: 13,
@@ -188,20 +195,34 @@ function CompanionCard({ companion, onChat, onCall }: { companion: Companion; on
           </Txt>
         </View>
 
-        <Pressable
-          onPress={onCall}
-          style={{
-            width: 42, height: 42, borderRadius: 21,
-            backgroundColor: rgba(W.primary, 0.10),
-            borderWidth: 1, borderColor: rgba(W.primary, 0.30),
-            alignItems: 'center', justifyContent: 'center',
-          }}
-        >
-          <NavIcon name="phone" color={W.primary} size={17} />
-        </Pressable>
+        <Animated.View style={callPress.style}>
+          <Pressable
+            onPress={onCall}
+            onPressIn={callPress.onPressIn}
+            onPressOut={callPress.onPressOut}
+            hitSlop={8}
+            style={{
+              width: 42, height: 42, borderRadius: 21,
+              backgroundColor: rgba(W.primary, 0.10),
+              borderWidth: 1, borderColor: rgba(W.primary, 0.30),
+              alignItems: 'center', justifyContent: 'center',
+            }}
+          >
+            <NavIcon name="phone" color={W.primary} size={17} />
+          </Pressable>
+        </Animated.View>
       </View>
     </Pressable>
+    </Animated.View>
   );
+}
+
+// ─── EnterStagger ────────────────────────────────────────────────────────
+// Staggered entrance wrapper — hooks can't run in loops, so each list item
+// gets its own instance.
+function EnterStagger({ delay, children }: { delay: number; children: React.ReactNode }) {
+  const e = useEntrance({ fromTranslateY: 14, durationMs: 480, delayMs: delay });
+  return <Animated.View style={e}>{children}</Animated.View>;
 }
 
 // ─── WeekStrip ───────────────────────────────────────────────────────────
@@ -349,13 +370,14 @@ export function S10_Home({ go, tier, companions, onSelectCompanion, onCallCompan
         </View>
 
         <View style={{ paddingHorizontal: 16, gap: 10 }}>
-          {companions.map(c => (
-            <CompanionCard
-              key={String(c.id)}
-              companion={c}
-              onChat={() => onSelectCompanion(c)}
-              onCall={() => onCallCompanion(c)}
-            />
+          {companions.map((c, index) => (
+            <EnterStagger key={String(c.id)} delay={index * 70}>
+              <CompanionCard
+                companion={c}
+                onChat={() => onSelectCompanion(c)}
+                onCall={() => onCallCompanion(c)}
+              />
+            </EnterStagger>
           ))}
 
           {/* Add companion — ghost row that matches the card rhythm */}
