@@ -5,6 +5,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { View, ScrollView, Pressable, Animated, Easing, Linking, TextInput } from 'react-native';
+import { limitMessage } from '../api/client';
 import { LinearGradient } from 'expo-linear-gradient';
 import { startSession, endSession, getCharacterSessions, getConversationTurns, getMemories, createReport, ReportReason } from '../api';
 import { streamConversation } from '../api/client';
@@ -84,7 +85,7 @@ export function S09_FirstChat({ go, companion, userId, characterId }: { go: Go; 
         onCrisis: (_content) => { finishStreaming({}); go('crisis'); },
         onError: (err) => {
           console.warn('[FirstChat] Stream error:', err);
-          finishStreaming({ text: "(Couldn't reach the server — please try again.)" });
+          finishStreaming({ text: limitMessage(err) ?? "(Couldn't reach the server — please try again.)" });
           // A failed turn used to leave the guided chat with no way forward:
           // "Continue to home" only appeared from onDone, so an offline
           // backend trapped the user here. Offer the exit on failure too.
@@ -116,7 +117,7 @@ export function S09_FirstChat({ go, companion, userId, characterId }: { go: Go; 
         if (!mounted) return;
         if (pendingRef.current) {
           pendingRef.current = null;
-          finishStreaming({ text: "(Couldn't reach the server — please try again.)" });
+          finishStreaming({ text: limitMessage(e) ?? "(Couldn't reach the server — please try again.)" });
         }
       });
     return () => {
@@ -334,7 +335,7 @@ function CallErrorView({ error, onRetry, onCancel }: { error: { kind: string; me
   return (
     <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32 }}>
       <Txt font="comp" weight={600} style={{ fontSize: 20, color: W.text, textAlign: 'center', marginBottom: 12 }}>
-        {isPermission ? 'Microphone needed' : "Couldn't connect"}
+        {isPermission ? 'Microphone needed' : error.kind === 'limit' ? "Can't call right now" : "Couldn't connect"}
       </Txt>
       <Txt font="user" style={{ fontSize: 14, color: W.text2, textAlign: 'center', marginBottom: 24, lineHeight: 20 }}>
         {error.message}
@@ -578,7 +579,7 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
         onCrisis: (_content) => { finishStreaming({}); go('crisis'); },
         onError: (err) => {
           console.warn('[Chat] Stream error:', err);
-          finishStreaming({ text: "(Couldn't reach the server — please try again.)" });
+          finishStreaming({ text: limitMessage(err) ?? "(Couldn't reach the server — please try again.)" });
         },
       },
     );
@@ -609,7 +610,7 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
         // If the user already sent a message, don't leave it spinning forever.
         if (pendingRef.current) {
           pendingRef.current = null;
-          finishStreaming({ text: "(Couldn't reach the server — please try again.)" });
+          finishStreaming({ text: limitMessage(e) ?? "(Couldn't reach the server — please try again.)" });
         }
       });
     return () => {

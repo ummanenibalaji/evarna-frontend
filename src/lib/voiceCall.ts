@@ -19,7 +19,8 @@ export type CallErrorKind =
   | 'token-fetch'
   | 'connect'
   | 'agent-timeout'
-  | 'lost';
+  | 'lost'
+  | 'limit';       // refused by a usage ceiling; the message says which
 
 export interface CallError {
   kind: CallErrorKind;

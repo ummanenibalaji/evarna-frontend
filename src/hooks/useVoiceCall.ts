@@ -18,6 +18,7 @@ function getAudioSession(): {
   }
 }
 import { startVoiceSession, endVoiceSession } from '../api';
+import { limitMessage } from '../api/client';
 import {
   AGENT_JOIN_TIMEOUT_MS,
   decodeAgentState,
@@ -156,6 +157,12 @@ export function useVoiceCall(params: UseVoiceCallParams): UseVoiceCallReturn {
         await room.localParticipant.setMicrophoneEnabled(true);
       } catch (e) {
         if (cancelledRef.current) return;
+        const limit = limitMessage(e);
+        if (limit) {
+          setError({ kind: 'limit', message: limit });
+          setPhase('error');
+          return;
+        }
         const msg = e instanceof Error ? e.message : String(e);
         // Mic permission errors typically come from setMicrophoneEnabled or
         // AudioSession; everything else is more likely token/network/connect.

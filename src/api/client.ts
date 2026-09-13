@@ -24,7 +24,7 @@ let authToken: string | null = null;
 /** Non-2xx that isn't a 401. Carries the backend's `code` so callers can tell
  *  ALREADY_ONBOARDED / UNDER_MINIMUM_AGE apart from a generic failure. */
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number, readonly code?: string) {
+  constructor(message: string, readonly status: number, readonly code?: string, readonly serverMessage?: string) {
     super(message);
     this.name = 'ApiError';
   }
@@ -67,7 +67,7 @@ async function assertOk(res: Response, label: string) {
     throw new AuthExpiredError(`${label} → 401`);
   }
   const body = (await res.json().catch(() => null)) as { error?: string; code?: string } | null;
-  throw new ApiError(`${label} → ${res.status}${body?.code ? ` ${body.code}` : ''}`, res.status, body?.code);
+  throw new ApiError(`${label} → ${res.status}${body?.code ? ` ${body.code}` : ''}`, res.status, body?.code, body?.error);
 }
 
 export async function apiGet<T>(path: string): Promise<T> {
@@ -122,6 +122,18 @@ export async function apiDelete<T>(path: string, body?: unknown): Promise<T> {
   return json.data;
 }
 
+// Refusals the server words for the user. Everything else stays a generic
+// "couldn't reach the server", because raw status text means nothing to anyone.
+const LIMIT_CODES = new Set(['USAGE_LIMIT_REACHED', 'COMPANION_LIMIT_REACHED', 'STUDIO_LIMIT_REACHED']);
+const LIMIT_PREFIX = 'LIMIT: ';
+
+/** The server's own message when `e` is a usage limit, otherwise null. */
+export function limitMessage(e: unknown): string | null {
+  if (e instanceof ApiError) return e.code && LIMIT_CODES.has(e.code) ? e.serverMessage ?? null : null;
+  if (typeof e === 'string' && e.startsWith(LIMIT_PREFIX)) return e.slice(LIMIT_PREFIX.length);
+  return null;
+}
+
 export interface SseHandlers {
   onChunk: (content: string) => void;
   onDone: (turnId: string) => void;
@@ -167,7 +179,12 @@ export function streamConversation(
     // ponytail: SSE reports auth failure as a plain message rather than AuthExpiredError
     // (handlers only take strings). Widen SseHandlers if chat needs to auto-route to login.
     if (res.status === 401) { setAuthToken(null); handlers.onError('UNAUTHENTICATED'); return; }
-    if (!res.ok) { handlers.onError(`HTTP ${res.status}`); return; }
+    if (!res.ok) {
+      // A limit is refused as JSON before the stream starts; pass its wording on.
+      const body = (await res.json().catch(() => null)) as { error?: string; code?: string } | null;
+      handlers.onError(body?.code && LIMIT_CODES.has(body.code) && body.error ? `${LIMIT_PREFIX}${body.error}` : `HTTP ${res.status}`);
+      return;
+    }
 
     const parseBlock = (text: string) => {
       const lines = text.split('\n');

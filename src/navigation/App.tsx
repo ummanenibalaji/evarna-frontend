@@ -16,7 +16,7 @@ import {
   updateCharacter, deleteCharacter, updateMe, deleteMe,
   getScenarios, getStudioCharacters, ApiScenario, ApiStudioCharacter, setPushToken,
 } from '../api';
-import { loadAuthToken, setAuthToken, ApiError, streamConversation } from '../api/client';
+import { loadAuthToken, setAuthToken, ApiError, streamConversation, limitMessage } from '../api/client';
 import { getGoogleIdToken, googleSignOut, GoogleSignInUnavailable } from '../lib/googleSignIn';
 import {
   requestPushPermission, getPushTokenIfGranted, getDeviceTimezone,
@@ -596,9 +596,10 @@ export default function App() {
         refreshUserCharacters();
       } catch (e) {
         console.warn('[AddCompanion] API failed:', e);
+        const limit = limitMessage(e);
         Alert.alert(
-          'Connection problem',
-          "Couldn't reach the server to add your companion. Make sure the backend is reachable and try again.",
+          limit ? 'Companion limit reached' : 'Connection problem',
+          limit ?? "Couldn't reach the server to add your companion. Make sure the backend is reachable and try again.",
         );
       }
       return;

@@ -5,6 +5,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Linking,
   View, ScrollView, Pressable, Animated, Easing,
   LayoutChangeEvent, PanResponder, TextInput, Share,
 } from 'react-native';
@@ -18,6 +19,9 @@ import { Card, Toggle, PrimaryButton } from '../components/Atoms';
 import { useEntrance, usePressScale, useCountUp } from '../theme/animations';
 import { W, GRAD, alpha, rgba } from '../theme/theme';
 import { ARCHETYPE_COLORS, ARCHETYPE_LABEL, MEM_TYPES, Companion, Tier, Memory, BILLING_LIVE } from '../data/config';
+
+const PRIVACY_URL = process.env.EXPO_PUBLIC_PRIVACY_URL || undefined;
+const TERMS_URL = process.env.EXPO_PUBLIC_TERMS_URL || undefined;
 import { Go, ScreenName } from '../navigation/types';
 import { getMemories, deleteMemory, deleteAllMemories, ApiMemory, getUserStats, ApiUserStats, getActivity, ApiActivity, exportMyData } from '../api';
 
@@ -74,6 +78,13 @@ export function S21_Settings({ go, tier, companions, userName, userEmail, settin
     } finally {
       setBusy(false);
     }
+  };
+  // The hosted documents, not a summary of them. The old in-app text promised
+  // things ("encrypted", "never used to train models") that no one had checked,
+  // at a domain we do not own, and both stores require a real policy URL.
+  const openLegal = (title: string, url: string | undefined) => {
+    if (url) { Linking.openURL(url).catch(() => setInfo({ title, body: `Open ${url} in your browser.` })); return; }
+    setInfo({ title, body: 'This document has not been published yet.' });
   };
   const enter = useEntrance({ durationMs: 420, fromTranslateY: 14 });
 
@@ -274,12 +285,12 @@ export function S21_Settings({ go, tier, companions, userName, userEmail, settin
             right={<NavIcon name="right" color={W.text2} size={18} />}
           />
           <Row
-            onPress={() => setInfo({ title: 'Privacy policy', body: 'Your conversations are private and encrypted. We never sell your data or use it to train models without consent. Full policy available at whisper.app/privacy.' })}
+            onPress={() => openLegal('Privacy policy', PRIVACY_URL)}
             label="Privacy policy"
             right={<NavIcon name="right" color={W.text2} size={18} />}
           />
           <Row
-            onPress={() => setInfo({ title: 'Terms of service', body: 'By using Whisper you agree to our terms. Whisper is for support and companionship, not a substitute for professional medical, legal, or mental-health advice. Full terms at whisper.app/terms.' })}
+            onPress={() => openLegal('Terms of service', TERMS_URL)}
             label="Terms of service"
             right={<NavIcon name="right" color={W.text2} size={18} />}
           />
