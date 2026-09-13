@@ -16,10 +16,12 @@ export type CallPhase =
 
 export type CallErrorKind =
   | 'mic-permission'
-  | 'token-fetch'
   | 'connect'
   | 'agent-timeout'
-  | 'lost';
+  /** The account has no voice minutes left. Retrying cannot fix it. */
+  | 'quota-exhausted'
+  /** Another call is already live on this account. Retrying can fix it. */
+  | 'call-in-progress';
 
 export interface CallError {
   kind: CallErrorKind;

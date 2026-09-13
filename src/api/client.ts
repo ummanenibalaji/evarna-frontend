@@ -24,7 +24,17 @@ let authToken: string | null = null;
 /** Non-2xx that isn't a 401. Carries the backend's `code` so callers can tell
  *  ALREADY_ONBOARDED / UNDER_MINIMUM_AGE apart from a generic failure. */
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number, readonly code?: string) {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+    /**
+     * The backend's own `error` string — a sentence written for the user. It
+     * used to be parsed and thrown away, which is why `message` (a synthetic
+     * "POST /x → 402 CODE" label) is the only thing screens could show.
+     */
+    readonly detail?: string,
+  ) {
     super(message);
     this.name = 'ApiError';
   }
@@ -58,6 +68,11 @@ export async function loadAuthToken(): Promise<string | null> {
 const authHeaders = (): Record<string, string> =>
   authToken ? { Authorization: `Bearer ${authToken}` } : {};
 
+interface RefusalBody {
+  error?: string;
+  code?: string;
+}
+
 // 401 → the token is dead; drop it so nothing retries with it. Anything else
 // non-2xx surfaces the backend's error code alongside the status.
 async function assertOk(res: Response, label: string) {
@@ -66,8 +81,13 @@ async function assertOk(res: Response, label: string) {
     setAuthToken(null);
     throw new AuthExpiredError(`${label} → 401`);
   }
-  const body = (await res.json().catch(() => null)) as { error?: string; code?: string } | null;
-  throw new ApiError(`${label} → ${res.status}${body?.code ? ` ${body.code}` : ''}`, res.status, body?.code);
+  const body = (await res.json().catch(() => null)) as RefusalBody | null;
+  throw new ApiError(
+    `${label} → ${res.status}${body?.code ? ` ${body.code}` : ''}`,
+    res.status,
+    body?.code,
+    body?.error,
+  );
 }
 
 export async function apiGet<T>(path: string): Promise<T> {
@@ -122,11 +142,22 @@ export async function apiDelete<T>(path: string, body?: unknown): Promise<T> {
   return json.data;
 }
 
+/**
+ * Detail about a failed turn. Second argument rather than a new handler so the
+ * existing `(err) => …` implementations keep compiling: they simply ignore it.
+ */
+export interface SseErrorInfo {
+  status?: number;
+  code?: string;
+  /** The backend's user-facing sentence, when it sent one. */
+  detail?: string;
+}
+
 export interface SseHandlers {
   onChunk: (content: string) => void;
   onDone: (turnId: string) => void;
   onCrisis: (content: string) => void;
-  onError: (message: string) => void;
+  onError: (message: string, info?: SseErrorInfo) => void;
 }
 
 /**
@@ -167,7 +198,18 @@ export function streamConversation(
     // ponytail: SSE reports auth failure as a plain message rather than AuthExpiredError
     // (handlers only take strings). Widen SseHandlers if chat needs to auto-route to login.
     if (res.status === 401) { setAuthToken(null); handlers.onError('UNAUTHENTICATED'); return; }
-    if (!res.ok) { handlers.onError(`HTTP ${res.status}`); return; }
+    if (!res.ok) {
+      // The body was previously dropped, so a refusal the server explained in
+      // words ("You've reached today's message limit") reached the screen as
+      // the string "HTTP 429" and was rendered as a message from the companion.
+      const body = (await res.json().catch(() => null)) as RefusalBody | null;
+      handlers.onError(`HTTP ${res.status}`, {
+        status: res.status,
+        ...(body?.code ? { code: body.code } : {}),
+        ...(body?.error ? { detail: body.error } : {}),
+      });
+      return;
+    }
 
     const parseBlock = (text: string) => {
       const lines = text.split('\n');

@@ -7,8 +7,11 @@ import React, { useEffect, useRef, useState } from 'react';
 import { View, ScrollView, Pressable, Animated, Easing, Linking, TextInput } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { startSession, endSession, getCharacterSessions, getConversationTurns, getMemories, createReport, ReportReason } from '../api';
-import { streamConversation } from '../api/client';
+import { streamConversation, type SseErrorInfo } from '../api/client';
 import { useVoiceCall } from '../hooks/useVoiceCall';
+import type { CallError } from '../lib/voiceCall';
+import { LOW_BALANCE_SECONDS } from '../lib/entitlement';
+import { dropRefusedTurn, restoreDraft } from '../lib/chatTurns';
 import { useWave, usePressScale, useEntrance, useLoop } from '../theme/animations';
 import { Screen, TopBar } from '../components/Chrome';
 import { AmbientBg } from '../components/AmbientBg';
@@ -20,10 +23,18 @@ import { GlassPill, Pill, PrimaryButton, MemoryBadge, MinuteWarningBanner, Quick
 import { Bubble, BubbleMem, ChatInput, TypingDots, VoiceNoteBubble, CapHitCard, Coachmark, RecallIndicator, DayDivider } from '../components/ChatBits';
 import { Avatar } from '../components/Avatar';
 import { W, GRAD, alpha, rgba } from '../theme/theme';
-import { ARCHETYPE_LABEL, Companion, MinutesRemaining, QUICK_REPLIES } from '../data/config';
+import { ARCHETYPE_LABEL, Companion, QUICK_REPLIES } from '../data/config';
 import { Go } from '../navigation/types';
 
 const fmt = (s: number) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+
+/**
+ * Hitting the daily message cap is not a failure to reach the server, and it
+ * must not be rendered as one. It used to arrive as the string "HTTP 429" and
+ * come out of the companion's mouth as "(Couldn't reach the server — please
+ * try again.)" — the companion apologising for a product limit.
+ */
+export const isMessageCap = (info?: SseErrorInfo): boolean => info?.code === 'DAILY_MESSAGE_CAP';
 
 type Msg = {
   from: string;
@@ -37,13 +48,25 @@ type Msg = {
 };
 
 // ─── S09 FIRST CONVERSATION ──────────────────────────────────────────────
-export function S09_FirstChat({ go, companion, userId, characterId }: { go: Go; companion: Companion; userId?: string; characterId?: string }) {
+export function S09_FirstChat({ go, companion, userId, characterId, textRemainingToday = null, textDailyCap = null, textResetsAt = null, textUpsell = true, onQuotaRefused, onCapUpgrade }: {
+  go: Go; companion: Companion; userId?: string; characterId?: string;
+  textRemainingToday?: number | null;
+  textDailyCap?: number | null;
+  textResetsAt?: string | null;
+  textUpsell?: boolean;
+  onQuotaRefused?: () => void;
+  onCapUpgrade?: () => void;
+}) {
   const [msgs, setMsgs] = useState<Msg[]>([
     { from: 'comp', text: `Hey, this is ${companion.name}. Thanks for choosing me. I'd love to get to know you — what's been on your mind today?` },
   ]);
   const [draft, setDraft] = useState('');
   const [showBadge, setShowBadge] = useState(false);
   const [showContinue, setShowContinue] = useState(false);
+  // Either the server refused this turn, or the balance we already knew about
+  // says there is nothing left today.
+  const [capRefused, setCapRefused] = useState(false);
+  const capHit = capRefused || (textRemainingToday != null && textRemainingToday <= 0);
   const [typing, setTyping] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
 
@@ -82,7 +105,17 @@ export function S09_FirstChat({ go, companion, userId, characterId }: { go: Go; 
           if (userMsgCount >= 1) setTimeout(() => setShowContinue(true), 600);
         },
         onCrisis: (_content) => { finishStreaming({}); go('crisis'); },
-        onError: (err) => {
+        onError: (err, info) => {
+          if (isMessageCap(info)) {
+            // Take back the two bubbles this send added, and hand the text back
+            // so nothing anyone typed is lost.
+            setMsgs(m => dropRefusedTurn(m, text));
+            setDraft(d => restoreDraft(d, text));
+            setCapRefused(true);
+            onQuotaRefused?.();
+            setShowContinue(true);
+            return;
+          }
           console.warn('[FirstChat] Stream error:', err);
           finishStreaming({ text: "(Couldn't reach the server — please try again.)" });
           // A failed turn used to leave the guided chat with no way forward:
@@ -132,6 +165,9 @@ export function S09_FirstChat({ go, companion, userId, characterId }: { go: Go; 
   const send = () => {
     if (!draft.trim()) return;
     const userMsg = draft.trim();
+    // A new attempt clears the last refusal: the cap resets at midnight, and a
+    // card that never goes away would outlive the limit it describes.
+    setCapRefused(false);
     const userMsgCount = msgs.filter(m => m.from === 'user').length;
     setMsgs(m => [...m, { from: 'user', text: userMsg }]);
     setDraft('');
@@ -189,6 +225,16 @@ export function S09_FirstChat({ go, companion, userId, characterId }: { go: Go; 
           return <Bubble key={i} from={m.from} text={m.text || ''} memoryRefs={m.memoryRefs} streaming={m.streaming} />;
         })}
         {typing && <TypingDots />}
+        {capHit && (
+          <View style={{ marginTop: 10 }}>
+            <CapHitCard
+              onUpgrade={() => { onCapUpgrade?.(); go('paywall'); }}
+              dailyCap={textDailyCap}
+              resetsAt={textResetsAt}
+              upsell={textUpsell}
+            />
+          </View>
+        )}
         <View style={{ alignSelf: 'center', marginTop: 6 }}>
           <MemoryBadge show={showBadge} />
         </View>
@@ -210,17 +256,23 @@ interface VoiceCallProps {
   companion: Companion;
   accent?: string;
   orbIntensity?: number;
-  minutesRemaining?: MinutesRemaining | 'critical';
+  /** This period's balance, or null while unknown. Drives the warning banner. */
+  voiceSecondsRemaining?: number | null;
   userId?: string;
   characterId?: string;
+  /** Opens the top-up sheet with a back-target that will not redial. */
+  onOutOfMinutes?: () => void;
+  /** Re-read the balance after the call, since it is what just spent it. */
+  onCallEnded?: () => void;
 }
 
-export function S12_VoiceCall({ go, companion, accent = W.primary, orbIntensity = 1, minutesRemaining = 'normal', userId, characterId }: VoiceCallProps) {
+export function S12_VoiceCall({ go, companion, accent = W.primary, orbIntensity = 1, voiceSecondsRemaining = null, userId, characterId, onOutOfMinutes, onCallEnded }: VoiceCallProps) {
   const [time, setTime] = useState(0);
   const navigatedRef = useRef(false);
   const goHome = () => {
     if (navigatedRef.current) return;
     navigatedRef.current = true;
+    onCallEnded?.();
     go('home');
   };
   const { phase, orbState, muted, error, toggleMute, hangUp, retry } = useVoiceCall({
@@ -230,7 +282,14 @@ export function S12_VoiceCall({ go, companion, accent = W.primary, orbIntensity 
     onEnded: goHome,
   });
 
-  const minutesLeft = minutesRemaining === 'low' ? 5 : minutesRemaining === 'critical' ? 1 : null;
+  // Real seconds, not a config enum. This used to be 5 or 1 depending on a
+  // constant, which is why the banner never appeared for anyone. Rounded UP:
+  // someone with 40 seconds left has a minute of call, and "0 minutes
+  // remaining" mid-call while they are still talking is a lie.
+  const minutesLeft =
+    voiceSecondsRemaining != null && voiceSecondsRemaining <= LOW_BALANCE_SECONDS
+      ? Math.max(0, Math.ceil(voiceSecondsRemaining / 60))
+      : null;
 
   // session timer — only counts up while connected
   useEffect(() => {
@@ -247,7 +306,7 @@ export function S12_VoiceCall({ go, companion, accent = W.primary, orbIntensity 
     goHome();
   };
 
-  const pillText = derivePillText(phase, orbState, companion.name);
+  const pillText = derivePillText(phase, orbState, companion.name, error);
 
   return (
     <Screen ambient={false}>
@@ -281,10 +340,13 @@ export function S12_VoiceCall({ go, companion, accent = W.primary, orbIntensity 
         }
         right={<Txt font="user" style={{ fontSize: 11, color: W.text2, opacity: 0.5 }}>{fmt(time)}</Txt>}
       />
-      {minutesLeft != null && <MinuteWarningBanner minutes={minutesLeft} onTopUp={() => go('topup')} />}
+      {/* onOutOfMinutes, not go('topup'): `go` captures 'call' as the back
+          target, so closing the sheet would return here and start a second
+          billed call. */}
+      {minutesLeft != null && <MinuteWarningBanner minutes={minutesLeft} onTopUp={() => (onOutOfMinutes ? onOutOfMinutes() : go('topup'))} />}
 
       {phase === 'error' && error ? (
-        <CallErrorView error={error} onRetry={retry} onCancel={handleEnd} />
+        <CallErrorView error={error} onRetry={retry} onCancel={handleEnd} onTopUp={onOutOfMinutes} />
       ) : (
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 }}>
           <Orb state={orbState} size={200} accent={accent} intensity={orbIntensity} />
@@ -317,10 +379,14 @@ export function S12_VoiceCall({ go, companion, accent = W.primary, orbIntensity 
   );
 }
 
-function derivePillText(phase: ReturnType<typeof useVoiceCall>['phase'], orbState: ReturnType<typeof useVoiceCall>['orbState'], companionName: string): string {
+function derivePillText(phase: ReturnType<typeof useVoiceCall>['phase'], orbState: ReturnType<typeof useVoiceCall>['orbState'], companionName: string, error?: CallError | null): string {
   if (phase === 'connecting') return 'Connecting…';
   if (phase === 'reconnecting') return 'Reconnecting…';
   if (phase === 'ended') return 'Call ended';
+  // A refusal is not a connection issue, and saying so above a message that
+  // explains the real reason just contradicts it.
+  if (phase === 'error' && error?.kind === 'quota-exhausted') return 'No minutes left';
+  if (phase === 'error' && error?.kind === 'call-in-progress') return 'Call in progress';
   if (phase === 'error') return 'Connection issue';
   // connected — orbState-driven
   if (orbState === 'speaking') return companionName;
@@ -329,12 +395,21 @@ function derivePillText(phase: ReturnType<typeof useVoiceCall>['phase'], orbStat
   return companionName;
 }
 
-function CallErrorView({ error, onRetry, onCancel }: { error: { kind: string; message: string }; onRetry: () => void; onCancel: () => void }) {
+/**
+ * What to offer for each kind of failure. Typed on the real CallError, not a
+ * structural copy of it — the copy is why a new kind could be added to the
+ * union and silently land in the "Try again" branch.
+ */
+function CallErrorView({ error, onRetry, onCancel, onTopUp }: { error: CallError; onRetry: () => void; onCancel: () => void; onTopUp?: () => void }) {
   const isPermission = error.kind === 'mic-permission';
+  const isSpent = error.kind === 'quota-exhausted';
   return (
     <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32 }}>
       <Txt font="comp" weight={600} style={{ fontSize: 20, color: W.text, textAlign: 'center', marginBottom: 12 }}>
-        {isPermission ? 'Microphone needed' : "Couldn't connect"}
+        {isPermission ? 'Microphone needed'
+          : isSpent ? "You're out of voice minutes"
+          : error.kind === 'call-in-progress' ? 'Already on a call'
+          : "Couldn't connect"}
       </Txt>
       <Txt font="user" style={{ fontSize: 14, color: W.text2, textAlign: 'center', marginBottom: 24, lineHeight: 20 }}>
         {error.message}
@@ -343,8 +418,10 @@ function CallErrorView({ error, onRetry, onCancel }: { error: { kind: string; me
           without this it pushes Cancel off the right edge. */}
       <View style={{ flexDirection: 'row', gap: 12, alignItems: 'center' }}>
         <View style={{ flex: 1 }}>
-          <PrimaryButton onPress={isPermission ? () => Linking.openSettings() : onRetry}>
-            {isPermission ? 'Open Settings' : 'Try again'}
+          {/* Never "Try again" for an exhausted balance: the same request
+              would be refused again, which is what the old copy did. */}
+          <PrimaryButton onPress={isPermission ? () => Linking.openSettings() : isSpent ? () => onTopUp?.() : onRetry}>
+            {isPermission ? 'Open Settings' : isSpent ? 'Top up' : 'Try again'}
           </PrimaryButton>
         </View>
         <Pressable
@@ -501,14 +578,23 @@ interface ChatProps {
   companion: Companion;
   accent?: string;
   openMemorySheet?: (ref: string) => void;
-  capHit?: boolean;
+  /** Messages left today, or null while unknown. Replaces a dev-config flag. */
+  textRemainingToday?: number | null;
+  textDailyCap?: number | null;
+  textResetsAt?: string | null;
+  /** False on a paid plan: there is nothing left to sell them. */
+  textUpsell?: boolean;
+  /** Re-read the entitlement after the server refuses a turn. */
+  onQuotaRefused?: () => void;
+  /** Tells App why the paywall is opening, so it shows the right headline. */
+  onCapUpgrade?: () => void;
   userName?: string;
   firstRun?: boolean;
   userId?: string;
   characterId?: string;
 }
 
-export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, capHit = false, userName = '', firstRun = false, userId, characterId }: ChatProps) {
+export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, textRemainingToday = null, textDailyCap = null, textResetsAt = null, textUpsell = true, onQuotaRefused, onCapUpgrade, userName = '', firstRun = false, userId, characterId }: ChatProps) {
   // firstRun → the opening line, which is the companion's own and true.
   // Otherwise empty, and real history loads from the backend.
   //
@@ -524,6 +610,10 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
   );
   const [loadingHistory, setLoadingHistory] = useState(!firstRun && !!characterId);
   const [draft, setDraft] = useState('');
+  // The server refused a turn for the cap, or the known balance says there is
+  // nothing left today. Either way the card appears instead of a fake apology.
+  const [capRefused, setCapRefused] = useState(false);
+  const capHit = capRefused || (textRemainingToday != null && textRemainingToday <= 0);
   const [recording, setRecording] = useState(false);
   const [typing, setTyping] = useState(false);
   const [showBadge, setShowBadge] = useState(false);
@@ -576,7 +666,14 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
           setTimeout(() => setShowBadge(false), 3000);
         },
         onCrisis: (_content) => { finishStreaming({}); go('crisis'); },
-        onError: (err) => {
+        onError: (err, info) => {
+          if (isMessageCap(info)) {
+            setMsgs(m => dropRefusedTurn(m, text));
+            setDraft(d => restoreDraft(d, text));
+            setCapRefused(true);
+            onQuotaRefused?.();
+            return;
+          }
           console.warn('[Chat] Stream error:', err);
           finishStreaming({ text: "(Couldn't reach the server — please try again.)" });
         },
@@ -686,6 +783,8 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
   const send = () => {
     if (!draft.trim()) return;
     const text = draft.trim();
+    // A new attempt clears the last refusal — see S09.
+    setCapRefused(false);
     nearBottomRef.current = true;
     const userMsgCount = msgs.filter(m => m.from === 'user').length;
     setMsgs(m => [...m, { from: 'user', text }]);
@@ -848,7 +947,16 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, c
             </View>
           )}
         </View>
-        {capHit && <View style={{ marginTop: 10 }}><CapHitCard onUpgrade={() => go('paywall')} /></View>}
+        {capHit && (
+          <View style={{ marginTop: 10 }}>
+            <CapHitCard
+              onUpgrade={() => { onCapUpgrade?.(); go('paywall'); }}
+              dailyCap={textDailyCap}
+              resetsAt={textResetsAt}
+              upsell={textUpsell}
+            />
+          </View>
+        )}
       </ScrollView>
       {recording && (
         <S13_VoiceNote

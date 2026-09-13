@@ -15,7 +15,7 @@ import { RadialGlow } from '../components/RadialGlow';
 import { usePulse, usePressScale, useEntrance } from '../theme/animations';
 import { W, GRAD, rgba } from '../theme/theme';
 import { Go } from '../navigation/types';
-import { Companion, Tier, ARCHETYPE_COLORS, ARCHETYPE_LABEL, CHECK_IN } from '../data/config';
+import { Companion, ARCHETYPE_COLORS, ARCHETYPE_LABEL, CHECK_IN } from '../data/config';
 import { getActivity, ApiActivity } from '../api';
 
 // ─── AuroraAvatarButton ──────────────────────────────────────────────────
@@ -285,8 +285,8 @@ function WeekStrip({ activity }: { activity: ApiActivity }) {
 }
 
 // ─── S10 HOME ──────────────────────────────────────────────────────────────
-export function S10_Home({ go, tier, companions, onSelectCompanion, onCallCompanion, userName, onAddCompanion, maxCompanions: maxCompanionsProp }: {
-  go: Go; tier: Tier; companions: Companion[]; userName: string;
+export function S10_Home({ go, companions, onSelectCompanion, onCallCompanion, userName, onAddCompanion, maxCompanions: maxCompanionsProp }: {
+  go: Go; companions: Companion[]; userName: string;
   onSelectCompanion: (c: Companion) => void; onCallCompanion: (c: Companion) => void;
   onAddCompanion?: () => void; maxCompanions?: number;
 }) {

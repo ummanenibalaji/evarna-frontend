@@ -18,6 +18,7 @@ function getAudioSession(): {
   }
 }
 import { startVoiceSession, endVoiceSession } from '../api';
+import { quotaCode } from '../lib/entitlement';
 import {
   AGENT_JOIN_TIMEOUT_MS,
   decodeAgentState,
@@ -25,6 +26,12 @@ import {
   type CallPhase,
   type OrbState,
 } from '../lib/voiceCall';
+
+/** The backend's user-facing sentence, when it sent one. */
+const detailOf = (e: unknown): string | undefined => {
+  const detail = (e as { detail?: unknown } | null)?.detail;
+  return typeof detail === 'string' && detail.length > 0 ? detail : undefined;
+};
 
 interface UseVoiceCallParams {
   userId?: string;
@@ -156,6 +163,29 @@ export function useVoiceCall(params: UseVoiceCallParams): UseVoiceCallReturn {
         await room.localParticipant.setMicrophoneEnabled(true);
       } catch (e) {
         if (cancelledRef.current) return;
+
+        // The server's own refusals first. This catch covers five awaits, and
+        // classifying by message alone sent a 402 "you have no minutes left"
+        // down the network-error path — the user was told to check their
+        // connection and offered a retry that could only fail again.
+        const refusal = quotaCode(e);
+        if (refusal === 'VOICE_MINUTES_EXHAUSTED') {
+          setError({
+            kind: 'quota-exhausted',
+            message: detailOf(e) ?? "You've used all your voice minutes for this month.",
+          });
+          setPhase('error');
+          return;
+        }
+        if (refusal === 'CALL_IN_PROGRESS') {
+          setError({
+            kind: 'call-in-progress',
+            message: detailOf(e) ?? "You're already on a call. End it before starting another.",
+          });
+          setPhase('error');
+          return;
+        }
+
         const msg = e instanceof Error ? e.message : String(e);
         // Mic permission errors typically come from setMicrophoneEnabled or
         // AudioSession; everything else is more likely token/network/connect.

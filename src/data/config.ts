@@ -5,15 +5,12 @@
 import { W } from '../theme/theme';
 
 export type Tier = 'free' | 'plus' | 'premium';
-export type MinutesRemaining = 'normal' | 'low' | 'zero';
 
 export interface AppConfig {
   callState: string;
   sandboxComingSoon: boolean;
   orbHue: string;
   showFirstChat: boolean;
-  capHit: boolean;
-  minutesRemaining: MinutesRemaining;
 }
 
 export const CONFIG: AppConfig = {
@@ -21,20 +18,14 @@ export const CONFIG: AppConfig = {
   sandboxComingSoon: false,
   orbHue: W.primary,   // Ember Dusk: the orb and chat accent are coral, not violet
   showFirstChat: true,
-  capHit: false,
-  minutesRemaining: 'normal',
 };
 
-// There is no billing yet: no IAP, no entitlement on the user record, nobody
-// has paid for anything. `tier` used to be hardcoded to 'plus', which put a
-// PLUS badge on every account and a plan nobody was sold; flipping it to 'free'
-// instead would lock Studio behind a paywall that cannot be paid.
-//
-// So the flag is explicit. Sanjeev's IAP lane replaces both of these with the
-// real entitlement from the backend, and every `BILLING_LIVE &&` guard below
-// becomes live at once.
-export const BILLING_LIVE = false;
-export const CURRENT_TIER: Tier = 'free';
+// BILLING_LIVE and CURRENT_TIER are gone. The tier, the balance and the prices
+// now come from GET /billing/entitlement, held in App.tsx and threaded down —
+// so there is nothing here for the app and the server to disagree about.
+// `capHit` and `minutesRemaining` went with them: both were constants that made
+// the message-cap card and the minute banner unreachable no matter what the
+// account had actually used.
 
 // The nightly check-in card's copy. Prompts and mood words, not data about
 // anyone — the streak and the week strip that used to live here alongside them

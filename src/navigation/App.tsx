@@ -2,12 +2,12 @@
 // router. Keeps the exact go(screen) + tab behavior of the prototype.
 
 import React, { useEffect, useRef, useState } from 'react';
-import { View, Animated, Easing, Alert } from 'react-native';
+import { View, Animated, Easing, Alert, AppState } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { W } from '../theme/theme';
-import { ScreenName } from './types';
+import { ScreenName, PaywallTrigger } from './types';
 import {
-  CONFIG, CURRENT_TIER,
+  CONFIG,
   SCENARIOS, SANDBOX_MODES, ARCHETYPE_COLORS, Companion, Scenario, SandboxMode,
 } from '../data/config';
 import {
@@ -15,9 +15,11 @@ import {
   signInWithGoogle, signInWithApple, requestEmailCode, verifyEmailCode, getMe, logout, AuthSession,
   updateCharacter, deleteCharacter, updateMe, deleteMe,
   getScenarios, getStudioCharacters, ApiScenario, ApiStudioCharacter, setPushToken,
+  getEntitlement, ApiEntitlement,
 } from '../api';
-import { loadAuthToken, setAuthToken, ApiError, streamConversation } from '../api/client';
+import { loadAuthToken, setAuthToken, getAuthToken, ApiError, streamConversation } from '../api/client';
 import { getGoogleIdToken, googleSignOut, GoogleSignInUnavailable } from '../lib/googleSignIn';
+import { formatResetDate } from '../lib/entitlement';
 import {
   requestPushPermission, getPushTokenIfGranted, getDeviceTimezone,
   addPushTapListener, addPushReplyListener, notifyReplyFailed,
@@ -97,7 +99,10 @@ export default function App() {
   const [activeCompanion, setActiveCompanion] = useState<Companion | null>(null);
   const [scenario, setScenario] = useState<Scenario | null>(null);
   const [sandboxMode, setSandboxMode] = useState<SandboxMode | null>(null);
-  const [paywallTrigger] = useState('voice');
+  // Set when something actually triggers the paywall, so PAYWALL_HEADERS'
+  // other cases stop being dead copy. It had no setter before, which is why
+  // every route into the paywall claimed to be about voice.
+  const [paywallTrigger, setPaywallTrigger] = useState<PaywallTrigger>('voice');
   const [isNewUser, setIsNewUser] = useState(false);
   // Login screen state
   const [authBusy, setAuthBusy] = useState(false);
@@ -137,6 +142,12 @@ export default function App() {
   const [userName, setUserName] = useState('');
 
   // Backend IDs — set after successful onboarding API call
+  // What this account is entitled to. Held here rather than fetched in a leaf
+  // because the call button below decides on it, and that decision lives in the
+  // router — same shape as refreshUserCharacters.
+  const [entitlement, setEntitlement] = useState<ApiEntitlement | null>(null);
+  const [entitlementFailed, setEntitlementFailed] = useState(false);
+
   const [userId, setUserId] = useState<string | null>(null);
   const [characterId, setCharacterId] = useState<string | null>(null);
   const [isMinor, setIsMinor] = useState(false);
@@ -163,6 +174,39 @@ export default function App() {
         return mapped;
       })
       .catch((): Companion[] | null => null /* backend offline — fall back to userCompanion */);
+
+  /**
+   * A degraded payload is discarded, not stored. The server fails open by
+   * answering "free, full allowance, period starts now", so rendering it would
+   * tell a Plus subscriber they had been downgraded to 8 minutes. Keeping the
+   * last known values is the lesser wrong; with nothing known, the UI shows
+   * "unknown" rather than guessing.
+   */
+  const entitlementInFlight = useRef(false);
+  const refreshEntitlement = (): Promise<ApiEntitlement | null> => {
+    // One at a time. Opening and closing the paywall quickly would otherwise
+    // race two reads, and the older answer could land last.
+    if (entitlementInFlight.current) return Promise.resolve(entitlement);
+    entitlementInFlight.current = true;
+    return getEntitlement()
+      .then(e => {
+        if (e.degraded) {
+          console.warn('[Entitlement] degraded snapshot — keeping last known values');
+          // With nothing known, this is no better than a failure: the payload
+          // says "free, full allowance" regardless of what was bought.
+          setEntitlement(prev => { if (!prev) setEntitlementFailed(true); return prev; });
+          return null;
+        }
+        setEntitlement(e);
+        setEntitlementFailed(false);
+        return e;
+      })
+      .catch((): null => {
+        setEntitlementFailed(true);
+        return null;
+      })
+      .finally(() => { entitlementInFlight.current = false; });
+  };
 
   // ── Push ──────────────────────────────────────────────────────────────────
   // Every one of these is fire-and-forget with a caught error: a user whose
@@ -259,6 +303,7 @@ export default function App() {
         refreshPushToken();
         if (me.onboarding_completed) {
           refreshUserCharacters();
+          refreshEntitlement();
           setScreen('home');
           // Killed-app case: the tap that launched us. Read after the session is
           // confirmed, or the character fetch it makes would 401.
@@ -274,6 +319,16 @@ export default function App() {
         setScreen('login');
       }
     })();
+  }, []);
+
+  // A balance can change while the app is away: a call on another device, a
+  // period that rolled over, a top-up. Without this a cached zero would keep
+  // showing the depleted sheet after the minutes came back.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', st => {
+      if (st === 'active' && getAuthToken()) refreshEntitlement();
+    });
+    return () => sub.remove();
   }, []);
 
   // Backgrounded case. Registered once; the app is already authenticated by the
@@ -294,6 +349,7 @@ export default function App() {
     refreshPushToken();
     if (s.onboarding_completed) {
       refreshUserCharacters();
+      refreshEntitlement();
       go('home');
     } else {
       setIsNewUser(true);
@@ -388,6 +444,8 @@ export default function App() {
     setCharacterId(null);
     setUserCompanion(null);
     setUserCharacters(null);
+    setEntitlement(null);
+    setEntitlementFailed(false);
     setUserName('');
     setUserEmail('');
     setPendingEmail('');
@@ -514,6 +572,9 @@ export default function App() {
     if (s === 'profile' || s === 'user-profile') setProfileBack(screen);
     if (s === 'paywall') setPaywallBack(screen);
     if (s === 'topup') setTopupBack(screen);
+    // Both sheets show a balance and a catalog, so re-read on the way in rather
+    // than on every navigation.
+    if (s === 'paywall' || s === 'topup') refreshEntitlement();
     setScreen(s);
     if (s === 'home' || s === 'first-chat') setActiveTab('home');
     if (s === 'studio' || s === 'scenario-setup' || s === 'studio-session' || s === 'character-creator') setActiveTab('studio');
@@ -662,14 +723,18 @@ export default function App() {
   const renderHome = (interactive: boolean) => (
     <S10_Home
       go={interactive ? go : () => {}}
-      tier={CURRENT_TIER}
       companions={companions}
       userName={displayName}
       maxCompanions={MAX_COMPANIONS}
       onSelectCompanion={interactive ? (c) => { setActiveCompanion(c); setScreen('chat'); } : () => {}}
       onCallCompanion={interactive ? (c) => {
         setActiveCompanion(c);
-        if (t.minutesRemaining === 'zero') setScreen('callDepleted');
+        // The balance we already know about, so someone with nothing left gets
+        // the depleted sheet instead of a call that fails on connect. An
+        // unknown balance dials anyway and lets the server decide — "we could
+        // not read your plan" must not read as "you are out of minutes".
+        const spent = entitlement != null && entitlement.voice.remaining_seconds <= 0;
+        if (spent) { setPaywallTrigger('voice'); setScreen('callDepleted'); }
         else setScreen('call');
       } : () => {}}
       onAddCompanion={interactive ? () => {
@@ -718,11 +783,56 @@ export default function App() {
       />;
       case 'notif': return <S25_NotifPermission go={go} companion={{ id: 'new', name: companionName, archetype: archetypePick }}
         onAllow={() => { requestPushPermission().then(uploadPushToken).catch(() => {}); }} />;
-      case 'first-chat': return <S09_FirstChat go={(s) => go(s)} companion={{ id: characterId ?? 'new', name: companionName, archetype: archetypePick }} userId={userId ?? undefined} characterId={characterId ?? undefined} />;
+      case 'first-chat': return <S09_FirstChat go={(s) => go(s)} companion={{ id: characterId ?? 'new', name: companionName, archetype: archetypePick }} userId={userId ?? undefined} characterId={characterId ?? undefined} textRemainingToday={entitlement ? entitlement.text.remaining_today : null}
+        textDailyCap={entitlement ? entitlement.text.daily_cap : null}
+        textResetsAt={entitlement ? entitlement.text.resets_at : null}
+        textUpsell={entitlement ? entitlement.tier === 'free' : true}
+        onQuotaRefused={refreshEntitlement} onCapUpgrade={() => setPaywallTrigger('cap')} />;
       case 'home': return renderHome(true);
-      case 'callDepleted': return <S27_StartCallDepleted companion={currentCompanion} onClose={() => setScreen('home')} onTopUp={() => setScreen('topup')} onUpgrade={() => setScreen('paywall')} onText={() => setScreen('chat')} />;
-      case 'call': return <S12_VoiceCall go={(s) => go(s)} companion={currentCompanion} accent={t.orbHue} orbIntensity={1} minutesRemaining={t.minutesRemaining} userId={activeCharacterId ? userId ?? undefined : undefined} characterId={activeCharacterId ?? undefined} />;
-      case 'chat': return <S14_Chat go={(s) => go(s)} companion={currentCompanion} accent={t.orbHue} capHit={t.capHit} userName={displayName} openMemorySheet={() => {}} userId={activeCharacterId ? userId ?? undefined : undefined} characterId={activeCharacterId ?? undefined} />;
+      case 'callDepleted': return (
+        <S27_StartCallDepleted
+          companion={currentCompanion}
+          onClose={() => setScreen('home')}
+          // Back-target forced to home: `go()` would capture 'callDepleted',
+          // and returning there from the sheet would dead-end the user.
+          onTopUp={() => { setTopupBack('home'); setScreen('topup'); refreshEntitlement(); }}
+          onUpgrade={() => { setPaywallBack('home'); setPaywallTrigger('voice'); setScreen('paywall'); refreshEntitlement(); }}
+          onText={() => setScreen('chat')}
+          resetDate={entitlement ? formatResetDate(entitlement.period.renews_at) : undefined}
+        />
+      );
+      case 'call': return (
+        <S12_VoiceCall
+          go={(s) => go(s)}
+          companion={currentCompanion}
+          accent={t.orbHue}
+          orbIntensity={1}
+          voiceSecondsRemaining={entitlement ? entitlement.voice.remaining_seconds : null}
+          userId={activeCharacterId ? userId ?? undefined : undefined}
+          characterId={activeCharacterId ?? undefined}
+          // Home, not 'call': returning to the call screen would redial into
+          // the same refusal.
+          onOutOfMinutes={() => { setTopupBack('home'); setScreen('topup'); refreshEntitlement(); }}
+          onCallEnded={refreshEntitlement}
+        />
+      );
+      case 'chat': return (
+        <S14_Chat
+          go={(s) => go(s)}
+          companion={currentCompanion}
+          accent={t.orbHue}
+          textRemainingToday={entitlement ? entitlement.text.remaining_today : null}
+          textDailyCap={entitlement ? entitlement.text.daily_cap : null}
+          textResetsAt={entitlement ? entitlement.text.resets_at : null}
+          textUpsell={entitlement ? entitlement.tier === 'free' : true}
+          onQuotaRefused={refreshEntitlement}
+          onCapUpgrade={() => setPaywallTrigger('cap')}
+          userName={displayName}
+          openMemorySheet={() => {}}
+          userId={activeCharacterId ? userId ?? undefined : undefined}
+          characterId={activeCharacterId ?? undefined}
+        />
+      );
       case 'crisis': return <S28_CrisisChat go={go} companion={currentCompanion} />;
       case 'profile': return <S26_CompanionEdit
         go={(s) => go(s)}
@@ -746,7 +856,7 @@ export default function App() {
           <S29_Recap go={go} companion={currentCompanion} characterId={activeCharacterId ?? undefined} />
         </View>
       );
-      case 'studio': return <S15_StudioHome go={go} tier={CURRENT_TIER} characters={studioCharacters}
+      case 'studio': return <S15_StudioHome go={go} characters={studioCharacters}
         setupScenario={(s) => { setScenario(s); setStudioCharacter(null); setStudioCharacterId(null); setStudioRemember(true); setScreen('scenario-setup'); }}
         resumeConvo={(c) => { setScenario(studioScenarioFor(c)); setStudioCharacter(c); setStudioCharacterId(c._id); setStudioRemember(true); setScreen('studio-session'); }}
         openCreator={() => setScreen('character-creator')} />;
@@ -756,16 +866,20 @@ export default function App() {
         onStart={(id, remember) => { setStudioCharacter(null); setStudioCharacterId(id); setStudioRemember(remember); setScreen('studio-session'); }} />;
       case 'studio-session': return <S17_StudioSession go={go} scenario={scenario || SCENARIOS[0]}
         characterId={studioCharacterId ?? undefined} totalSessions={studioCharacter?.total_sessions ?? 0}
-        remember={studioRemember} />;
+        remember={studioRemember} textRemainingToday={entitlement ? entitlement.text.remaining_today : null}
+        textDailyCap={entitlement ? entitlement.text.daily_cap : null}
+        textResetsAt={entitlement ? entitlement.text.resets_at : null}
+        textUpsell={entitlement ? entitlement.tier === 'free' : true}
+        onQuotaRefused={refreshEntitlement} onCapUpgrade={() => setPaywallTrigger('cap')} />;
       case 'character-creator': return <S18_CharacterCreator go={go} apiVoices={backendVoices} />;
       case 'sandbox': return <S19_SandboxHome go={go} comingSoon={t.sandboxComingSoon} isMinor={isMinor} openMode={(m) => { setSandboxMode(m); setScreen('sandbox-session'); }} />;
       case 'sandbox-session': return <S20_SandboxSession go={go} mode={sandboxMode || SANDBOX_MODES[0]} />;
       // Settings' only route to 'login' is its Sign out row — intercept it so it
       // actually ends the session instead of just showing the login screen.
-      case 'settings': return <S21_Settings go={(sc) => { if (sc === 'login') signOut(); else go(sc); }} tier={CURRENT_TIER} companions={companions} userName={displayName} userEmail={displayEmail} settings={settings} setSettings={setSettings} openCompanionProfile={openCompanionProfile} userId={userId ?? undefined} onDeleteAccount={deleteAccount} />;
+      case 'settings': return <S21_Settings go={(sc) => { if (sc === 'login') signOut(); else go(sc); }} entitlement={entitlement} entitlementFailed={entitlementFailed} onRetryEntitlement={refreshEntitlement} companions={companions} userName={displayName} userEmail={displayEmail} settings={settings} setSettings={setSettings} openCompanionProfile={openCompanionProfile} userId={userId ?? undefined} onDeleteAccount={deleteAccount} />;
       case 'memories': return <S22_Memories go={go} characterId={activeCharacterId ?? undefined} companionName={currentCompanion.name} />;
-      case 'paywall': return <S23_Paywall go={go} trigger={paywallTrigger} currentTier={CURRENT_TIER} backTo={paywallBack} />;
-      case 'topup': return <S24_TopUp go={go} backTo={topupBack} />;
+      case 'paywall': return <S23_Paywall go={go} trigger={paywallTrigger} backTo={paywallBack} entitlement={entitlement} />;
+      case 'topup': return <S24_TopUp go={go} backTo={topupBack} entitlement={entitlement} />;
       case 'login': return <S30_Login
         isNew={isNewUser}
         onGoogle={() => handleOAuth('google')}
@@ -787,7 +901,7 @@ export default function App() {
   const renderUnderlay = () => {
     const origin = screen === 'paywall' ? paywallBack : screen === 'topup' ? topupBack : 'home';
     if (origin === 'settings') {
-      return <S21_Settings go={() => {}} tier={CURRENT_TIER} companions={companions} userName={displayName} userEmail={displayEmail} settings={settings} setSettings={setSettings} openCompanionProfile={() => {}} userId={userId ?? undefined} />;
+      return <S21_Settings go={() => {}} entitlement={entitlement} entitlementFailed={entitlementFailed} companions={companions} userName={displayName} userEmail={displayEmail} settings={settings} setSettings={setSettings} openCompanionProfile={() => {}} userId={userId ?? undefined} />;
     }
     return renderHome(false);
   };

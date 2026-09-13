@@ -368,7 +368,30 @@ export function VoiceNoteBubble({ from, duration = 12 }: { from: string; duratio
 }
 
 // ─── CapHitCard ──────────────────────────────────────────────────────────
-export function CapHitCard({ onUpgrade }: { onUpgrade: () => void }) {
+/**
+ * The daily message cap, said plainly. It replaces what used to appear in its
+ * place: a message from the companion apologising for not reaching the server.
+ *
+ * A paid subscriber is told the limit and nothing else — offering them Plus
+ * when they already pay more than Plus is worse than saying nothing.
+ */
+export function CapHitCard({ onUpgrade, dailyCap, resetsAt, upsell = true }: {
+  onUpgrade: () => void;
+  /** Messages a day on this plan, when known. */
+  dailyCap?: number | null;
+  /** ISO instant the cap resets — the user's own next midnight. */
+  resetsAt?: string | null;
+  upsell?: boolean;
+}) {
+  // Usually the user's own local midnight, so say "midnight" rather than
+  // "12:00 AM". An account with no timezone stored resets at UTC midnight,
+  // which really is a wall-clock time for them — so show it.
+  const reset = resetsAt ? new Date(resetsAt) : null;
+  const when = !reset || Number.isNaN(reset.getTime())
+    ? null
+    : reset.getHours() === 0 && reset.getMinutes() === 0
+      ? 'midnight'
+      : reset.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
   return (
     <View
       style={{
@@ -378,11 +401,15 @@ export function CapHitCard({ onUpgrade }: { onUpgrade: () => void }) {
       }}
     >
       <Txt font="user" style={{ fontSize: 13, color: W.text, lineHeight: 18 }}>
-        Want unlimited conversations? Upgrade to Plus.
+        {dailyCap ? `You've sent today's ${dailyCap} messages.` : "You've reached today's message limit."}
+        {when ? ` They reset at ${when}.` : ''}
+        {upsell ? ' Plus is unlimited.' : ''}
       </Txt>
-      <Pressable onPress={onUpgrade} style={{ backgroundColor: W.primary, borderRadius: 12, paddingVertical: 7, paddingHorizontal: 14 }}>
-        <Txt font="user" weight={500} style={{ fontSize: 12, color: '#fff' }}>See plans</Txt>
-      </Pressable>
+      {upsell ? (
+        <Pressable onPress={onUpgrade} style={{ backgroundColor: W.primary, borderRadius: 12, paddingVertical: 7, paddingHorizontal: 14 }}>
+          <Txt font="user" weight={500} style={{ fontSize: 12, color: '#fff' }}>See plans</Txt>
+        </Pressable>
+      ) : null}
     </View>
   );
 }

@@ -10,6 +10,9 @@ export type ScreenName =
   | 'character-creator' | 'sandbox' | 'sandbox-session' | 'settings'
   | 'memories' | 'paywall' | 'topup' | 'login';
 
+/** Why the paywall opened. Chooses its headline (PAYWALL_HEADERS in Settings). */
+export type PaywallTrigger = 'voice' | 'cap' | 'more' | 'studio';
+
 // Navigation function shape used by every screen (matches prototype `go`).
 export type Go = (screen: ScreenName) => void;
 
