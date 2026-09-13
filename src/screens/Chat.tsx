@@ -5,6 +5,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { View, ScrollView, Pressable, Animated, Easing, Linking, TextInput } from 'react-native';
+import { limitMessage } from '../api/client';
 import { LinearGradient } from 'expo-linear-gradient';
 import { startSession, endSession, getCharacterSessions, getConversationTurns, getMemories, createReport, ReportReason } from '../api';
 import { streamConversation, type SseErrorInfo } from '../api/client';
@@ -34,7 +35,18 @@ const fmt = (s: number) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${Str
  * come out of the companion's mouth as "(Couldn't reach the server — please
  * try again.)" — the companion apologising for a product limit.
  */
-export const isMessageCap = (info?: SseErrorInfo): boolean => info?.code === 'DAILY_MESSAGE_CAP';
+export const messageLimitOf = (
+  info?: SseErrorInfo,
+): { message?: string; planCap: boolean } | null => {
+  if (info?.code === 'DAILY_MESSAGE_CAP') return { planCap: true };
+  // The server's abuse ceilings (a burst per minute, a rolling day) land here.
+  // They are not a plan limit, so no upsell — but they are still a limit, and
+  // must not come out of the companion's mouth either.
+  if (info?.code === 'USAGE_LIMIT_REACHED') {
+    return info.serverMessage ? { message: info.serverMessage, planCap: false } : { planCap: false };
+  }
+  return null;
+};
 
 type Msg = {
   from: string;
@@ -65,8 +77,8 @@ export function S09_FirstChat({ go, companion, userId, characterId, textRemainin
   const [showContinue, setShowContinue] = useState(false);
   // Either the server refused this turn, or the balance we already knew about
   // says there is nothing left today.
-  const [capRefused, setCapRefused] = useState(false);
-  const capHit = capRefused || (textRemainingToday != null && textRemainingToday <= 0);
+  const [capRefused, setCapRefused] = useState<{ message?: string; planCap: boolean } | null>(null);
+  const capHit = capRefused != null || (textRemainingToday != null && textRemainingToday <= 0);
   const [typing, setTyping] = useState(false);
   const scrollRef = useRef<ScrollView>(null);
 
@@ -106,18 +118,19 @@ export function S09_FirstChat({ go, companion, userId, characterId, textRemainin
         },
         onCrisis: (_content) => { finishStreaming({}); go('crisis'); },
         onError: (err, info) => {
-          if (isMessageCap(info)) {
+          const limited = messageLimitOf(info);
+          if (limited) {
             // Take back the two bubbles this send added, and hand the text back
             // so nothing anyone typed is lost.
             setMsgs(m => dropRefusedTurn(m, text));
             setDraft(d => restoreDraft(d, text));
-            setCapRefused(true);
+            setCapRefused(limited);
             onQuotaRefused?.();
             setShowContinue(true);
             return;
           }
           console.warn('[FirstChat] Stream error:', err);
-          finishStreaming({ text: "(Couldn't reach the server — please try again.)" });
+          finishStreaming({ text: limitMessage(err) ?? "(Couldn't reach the server — please try again.)" });
           // A failed turn used to leave the guided chat with no way forward:
           // "Continue to home" only appeared from onDone, so an offline
           // backend trapped the user here. Offer the exit on failure too.
@@ -149,7 +162,7 @@ export function S09_FirstChat({ go, companion, userId, characterId, textRemainin
         if (!mounted) return;
         if (pendingRef.current) {
           pendingRef.current = null;
-          finishStreaming({ text: "(Couldn't reach the server — please try again.)" });
+          finishStreaming({ text: limitMessage(e) ?? "(Couldn't reach the server — please try again.)" });
         }
       });
     return () => {
@@ -167,7 +180,7 @@ export function S09_FirstChat({ go, companion, userId, characterId, textRemainin
     const userMsg = draft.trim();
     // A new attempt clears the last refusal: the cap resets at midnight, and a
     // card that never goes away would outlive the limit it describes.
-    setCapRefused(false);
+    setCapRefused(null);
     const userMsgCount = msgs.filter(m => m.from === 'user').length;
     setMsgs(m => [...m, { from: 'user', text: userMsg }]);
     setDraft('');
@@ -231,7 +244,8 @@ export function S09_FirstChat({ go, companion, userId, characterId, textRemainin
               onUpgrade={() => { onCapUpgrade?.(); go('paywall'); }}
               dailyCap={textDailyCap}
               resetsAt={textResetsAt}
-              upsell={textUpsell}
+              upsell={textUpsell && (capRefused?.planCap ?? true)}
+              message={capRefused?.message ?? null}
             />
           </View>
         )}
@@ -409,6 +423,7 @@ function CallErrorView({ error, onRetry, onCancel, onTopUp }: { error: CallError
         {isPermission ? 'Microphone needed'
           : isSpent ? "You're out of voice minutes"
           : error.kind === 'call-in-progress' ? 'Already on a call'
+          : error.kind === 'limit' ? "Can't call right now"
           : "Couldn't connect"}
       </Txt>
       <Txt font="user" style={{ fontSize: 14, color: W.text2, textAlign: 'center', marginBottom: 24, lineHeight: 20 }}>
@@ -418,10 +433,18 @@ function CallErrorView({ error, onRetry, onCancel, onTopUp }: { error: CallError
           without this it pushes Cancel off the right edge. */}
       <View style={{ flexDirection: 'row', gap: 12, alignItems: 'center' }}>
         <View style={{ flex: 1 }}>
-          {/* Never "Try again" for an exhausted balance: the same request
-              would be refused again, which is what the old copy did. */}
-          <PrimaryButton onPress={isPermission ? () => Linking.openSettings() : isSpent ? () => onTopUp?.() : onRetry}>
-            {isPermission ? 'Open Settings' : isSpent ? 'Top up' : 'Try again'}
+          {/* The offer has to match the cause. "Try again" for an exhausted
+              balance repeats a request that cannot succeed; "Top up" for an
+              abuse ceiling sells something that would not lift it. */}
+          <PrimaryButton
+            onPress={
+              isPermission ? () => Linking.openSettings()
+                : isSpent ? () => onTopUp?.()
+                : error.kind === 'limit' ? onCancel
+                : onRetry
+            }
+          >
+            {isPermission ? 'Open Settings' : isSpent ? 'Top up' : error.kind === 'limit' ? 'Close' : 'Try again'}
           </PrimaryButton>
         </View>
         <Pressable
@@ -612,8 +635,8 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, t
   const [draft, setDraft] = useState('');
   // The server refused a turn for the cap, or the known balance says there is
   // nothing left today. Either way the card appears instead of a fake apology.
-  const [capRefused, setCapRefused] = useState(false);
-  const capHit = capRefused || (textRemainingToday != null && textRemainingToday <= 0);
+  const [capRefused, setCapRefused] = useState<{ message?: string; planCap: boolean } | null>(null);
+  const capHit = capRefused != null || (textRemainingToday != null && textRemainingToday <= 0);
   const [recording, setRecording] = useState(false);
   const [typing, setTyping] = useState(false);
   const [showBadge, setShowBadge] = useState(false);
@@ -667,15 +690,16 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, t
         },
         onCrisis: (_content) => { finishStreaming({}); go('crisis'); },
         onError: (err, info) => {
-          if (isMessageCap(info)) {
+          const limited = messageLimitOf(info);
+          if (limited) {
             setMsgs(m => dropRefusedTurn(m, text));
             setDraft(d => restoreDraft(d, text));
-            setCapRefused(true);
+            setCapRefused(limited);
             onQuotaRefused?.();
             return;
           }
           console.warn('[Chat] Stream error:', err);
-          finishStreaming({ text: "(Couldn't reach the server — please try again.)" });
+          finishStreaming({ text: limitMessage(err) ?? "(Couldn't reach the server — please try again.)" });
         },
       },
     );
@@ -706,7 +730,7 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, t
         // If the user already sent a message, don't leave it spinning forever.
         if (pendingRef.current) {
           pendingRef.current = null;
-          finishStreaming({ text: "(Couldn't reach the server — please try again.)" });
+          finishStreaming({ text: limitMessage(e) ?? "(Couldn't reach the server — please try again.)" });
         }
       });
     return () => {
@@ -784,7 +808,7 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, t
     if (!draft.trim()) return;
     const text = draft.trim();
     // A new attempt clears the last refusal — see S09.
-    setCapRefused(false);
+    setCapRefused(null);
     nearBottomRef.current = true;
     const userMsgCount = msgs.filter(m => m.from === 'user').length;
     setMsgs(m => [...m, { from: 'user', text }]);
@@ -953,7 +977,8 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, t
               onUpgrade={() => { onCapUpgrade?.(); go('paywall'); }}
               dailyCap={textDailyCap}
               resetsAt={textResetsAt}
-              upsell={textUpsell}
+              upsell={textUpsell && (capRefused?.planCap ?? true)}
+              message={capRefused?.message ?? null}
             />
           </View>
         )}

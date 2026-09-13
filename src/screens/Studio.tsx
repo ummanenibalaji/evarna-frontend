@@ -15,6 +15,7 @@ import { Pill, PrimaryButton, Toggle } from '../components/Atoms';
 import { Avatar, Waveform } from '../components/Avatar';
 import { BubbleMem, CapHitCard, ChatInput } from '../components/ChatBits';
 import { dropRefusedTurn, restoreDraft } from '../lib/chatTurns';
+import { messageLimitOf } from './Chat';
 import { W, alpha } from '../theme/theme';
 import { SCENARIOS, Scenario } from '../data/config';
 import {
@@ -404,8 +405,8 @@ export function S17_StudioSession({ go, scenario, characterId, totalSessions = 0
 }) {
   const [msgs, setMsgs] = useState<SMsg[]>([]);
   const [draft, setDraft] = useState('');
-  const [capRefused, setCapRefused] = useState(false);
-  const capHit = capRefused || (textRemainingToday != null && textRemainingToday <= 0);
+  const [capRefused, setCapRefused] = useState<{ message?: string; planCap: boolean } | null>(null);
+  const capHit = capRefused != null || (textRemainingToday != null && textRemainingToday <= 0);
   const [showSummary, setShowSummary] = useState(false);
   const [memoryCount, setMemoryCount] = useState<number | null>(null);
   const scrollRef = useRef<ScrollView>(null);
@@ -441,12 +442,13 @@ export function S17_StudioSession({ go, scenario, characterId, totalSessions = 0
         onDone: () => finishStreaming({}),
         onCrisis: () => { finishStreaming({}); go('crisis'); },
         onError: (e, info) => {
-          if (info?.code === 'DAILY_MESSAGE_CAP') {
-            // Same limit as the companion chat, and the same rule: give the
+          const limited = messageLimitOf(info);
+          if (limited) {
+            // Same limits as the companion chat, and the same rule: give the
             // typed line back rather than losing it inside a fake reply.
             setMsgs(m => dropRefusedTurn(m, text));
             setDraft(d => restoreDraft(d, text));
-            setCapRefused(true);
+            setCapRefused(limited);
             onQuotaRefused?.();
             return;
           }
@@ -526,7 +528,7 @@ export function S17_StudioSession({ go, scenario, characterId, totalSessions = 0
     if (!draft.trim() || !characterId) return;
     const text = draft.trim();
     // A new attempt clears the last refusal — the cap resets at midnight.
-    setCapRefused(false);
+    setCapRefused(null);
     setMsgs(m => [...m, { from: 'user', text }, { from: 'comp', text: '', streaming: true }]);
     setDraft('');
     if (sessionRef.current) runTurn(sessionRef.current, text);
@@ -560,7 +562,8 @@ export function S17_StudioSession({ go, scenario, characterId, totalSessions = 0
               onUpgrade={() => { onCapUpgrade?.(); go('paywall'); }}
               dailyCap={textDailyCap}
               resetsAt={textResetsAt}
-              upsell={textUpsell}
+              upsell={textUpsell && (capRefused?.planCap ?? true)}
+              message={capRefused?.message ?? null}
             />
           </View>
         )}

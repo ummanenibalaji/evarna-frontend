@@ -18,10 +18,16 @@ export type CallErrorKind =
   | 'mic-permission'
   | 'connect'
   | 'agent-timeout'
-  /** The account has no voice minutes left. Retrying cannot fix it. */
+  | 'lost'
+  /**
+   * The plan is spent: no voice minutes left this period. Retrying cannot fix
+   * it, but buying can — this is the one that opens the paywall.
+   */
   | 'quota-exhausted'
-  /** Another call is already live on this account. Retrying can fix it. */
-  | 'call-in-progress';
+  /** A call is already live on this account. Retrying CAN fix this one. */
+  | 'call-in-progress'
+  /** Refused by an abuse ceiling; the server's message says which. */
+  | 'limit';
 
 export interface CallError {
   kind: CallErrorKind;

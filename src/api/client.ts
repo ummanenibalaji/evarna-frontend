@@ -33,7 +33,13 @@ export class ApiError extends Error {
      * used to be parsed and thrown away, which is why `message` (a synthetic
      * "POST /x → 402 CODE" label) is the only thing screens could show.
      */
-    readonly detail?: string,
+    readonly serverMessage?: string,
+    /**
+     * Which ceiling refused, when the server named one (usage.service.ts sends
+     * `limit`). Concurrency is the only one a retry can fix, so the call screen
+     * needs to tell it apart from the rest.
+     */
+    readonly limit?: string,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -71,6 +77,8 @@ const authHeaders = (): Record<string, string> =>
 interface RefusalBody {
   error?: string;
   code?: string;
+  /** Set by the usage ceilings: which one was hit. */
+  limit?: string;
 }
 
 // 401 → the token is dead; drop it so nothing retries with it. Anything else
@@ -87,6 +95,7 @@ async function assertOk(res: Response, label: string) {
     res.status,
     body?.code,
     body?.error,
+    body?.limit,
   );
 }
 
@@ -142,15 +151,32 @@ export async function apiDelete<T>(path: string, body?: unknown): Promise<T> {
   return json.data;
 }
 
+// Refusals the server words for the user. Everything else stays a generic
+// "couldn't reach the server", because raw status text means nothing to anyone.
+const LIMIT_CODES = new Set(['USAGE_LIMIT_REACHED', 'COMPANION_LIMIT_REACHED', 'STUDIO_LIMIT_REACHED']);
+const LIMIT_PREFIX = 'LIMIT: ';
+
+/** The server's own message when `e` is a usage limit, otherwise null. */
+export function limitMessage(e: unknown): string | null {
+  if (e instanceof ApiError) return e.code && LIMIT_CODES.has(e.code) ? e.serverMessage ?? null : null;
+  if (typeof e === 'string' && e.startsWith(LIMIT_PREFIX)) return e.slice(LIMIT_PREFIX.length);
+  return null;
+}
+
 /**
- * Detail about a failed turn. Second argument rather than a new handler so the
- * existing `(err) => …` implementations keep compiling: they simply ignore it.
+ * Detail about a failed turn, as a second argument rather than a new handler so
+ * the existing `(err) => …` implementations keep compiling: they simply ignore
+ * it. The message string still carries the LIMIT: prefix above, so a caller can
+ * use either — `limitMessage()` for wording, this for the code a screen needs
+ * to branch on (the plan cap opens the paywall; an abuse ceiling does not).
  */
 export interface SseErrorInfo {
   status?: number;
   code?: string;
   /** The backend's user-facing sentence, when it sent one. */
-  detail?: string;
+  serverMessage?: string;
+  /** Which usage ceiling refused, when the server named one. */
+  limit?: string;
 }
 
 export interface SseHandlers {
@@ -199,14 +225,19 @@ export function streamConversation(
     // (handlers only take strings). Widen SseHandlers if chat needs to auto-route to login.
     if (res.status === 401) { setAuthToken(null); handlers.onError('UNAUTHENTICATED'); return; }
     if (!res.ok) {
-      // The body was previously dropped, so a refusal the server explained in
-      // words ("You've reached today's message limit") reached the screen as
-      // the string "HTTP 429" and was rendered as a message from the companion.
+      // The body used to be dropped entirely, so a refusal the server had
+      // explained in words reached the screen as "HTTP 429" and was rendered as
+      // a message from the companion. Both forms go out now: the prefixed
+      // wording for callers that only take a string, and the code alongside it.
       const body = (await res.json().catch(() => null)) as RefusalBody | null;
-      handlers.onError(`HTTP ${res.status}`, {
+      const worded = body?.code && LIMIT_CODES.has(body.code) && body.error
+        ? `${LIMIT_PREFIX}${body.error}`
+        : `HTTP ${res.status}`;
+      handlers.onError(worded, {
         status: res.status,
         ...(body?.code ? { code: body.code } : {}),
-        ...(body?.error ? { detail: body.error } : {}),
+        ...(body?.error ? { serverMessage: body.error } : {}),
+        ...(body?.limit ? { limit: body.limit } : {}),
       });
       return;
     }

@@ -8,7 +8,6 @@ web-build/
 .env
 .env.*
 !.env.example
-package-lock.json
 
 # Redis snapshot, written when redis-server is run from the repo root
 dump.rdb

@@ -18,6 +18,7 @@ function getAudioSession(): {
   }
 }
 import { startVoiceSession, endVoiceSession } from '../api';
+import { limitMessage } from '../api/client';
 import { quotaCode } from '../lib/entitlement';
 import {
   AGENT_JOIN_TIMEOUT_MS,
@@ -28,9 +29,9 @@ import {
 } from '../lib/voiceCall';
 
 /** The backend's user-facing sentence, when it sent one. */
-const detailOf = (e: unknown): string | undefined => {
-  const detail = (e as { detail?: unknown } | null)?.detail;
-  return typeof detail === 'string' && detail.length > 0 ? detail : undefined;
+const serverMessageOf = (e: unknown): string | undefined => {
+  const m = (e as { serverMessage?: unknown } | null)?.serverMessage;
+  return typeof m === 'string' && m.length > 0 ? m : undefined;
 };
 
 interface UseVoiceCallParams {
@@ -168,20 +169,25 @@ export function useVoiceCall(params: UseVoiceCallParams): UseVoiceCallReturn {
         // classifying by message alone sent a 402 "you have no minutes left"
         // down the network-error path — the user was told to check their
         // connection and offered a retry that could only fail again.
-        const refusal = quotaCode(e);
-        if (refusal === 'VOICE_MINUTES_EXHAUSTED') {
+        //
+        // Two layers, because they need different offers. The plan being spent
+        // is worth a Top up; an abuse ceiling is not — no purchase lifts it.
+        if (quotaCode(e) === 'VOICE_MINUTES_EXHAUSTED') {
           setError({
             kind: 'quota-exhausted',
-            message: detailOf(e) ?? "You've used all your voice minutes for this month.",
+            message: serverMessageOf(e) ?? "You've used all your voice minutes for this month.",
           });
           setPhase('error');
           return;
         }
-        if (refusal === 'CALL_IN_PROGRESS') {
-          setError({
-            kind: 'call-in-progress',
-            message: detailOf(e) ?? "You're already on a call. End it before starting another.",
-          });
+
+        const limit = limitMessage(e);
+        if (limit) {
+          // Concurrency is the one ceiling a retry fixes, so it gets its own
+          // kind and keeps the Try again button. usage.service.ts owns the rule
+          // and names it in `limit`.
+          const concurrent = (e as { limit?: unknown } | null)?.limit === 'concurrent_calls';
+          setError({ kind: concurrent ? 'call-in-progress' : 'limit', message: limit });
           setPhase('error');
           return;
         }

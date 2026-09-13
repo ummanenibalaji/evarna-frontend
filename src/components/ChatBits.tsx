@@ -375,13 +375,18 @@ export function VoiceNoteBubble({ from, duration = 12 }: { from: string; duratio
  * A paid subscriber is told the limit and nothing else — offering them Plus
  * when they already pay more than Plus is worse than saying nothing.
  */
-export function CapHitCard({ onUpgrade, dailyCap, resetsAt, upsell = true }: {
+export function CapHitCard({ onUpgrade, dailyCap, resetsAt, upsell = true, message }: {
   onUpgrade: () => void;
   /** Messages a day on this plan, when known. */
   dailyCap?: number | null;
   /** ISO instant the cap resets — the user's own next midnight. */
   resetsAt?: string | null;
   upsell?: boolean;
+  /**
+   * The server's own wording, for a refusal this card does not know the shape
+   * of — the per-minute abuse ceiling, say. Shown instead of the copy below.
+   */
+  message?: string | null;
 }) {
   // Usually the user's own local midnight, so say "midnight" rather than
   // "12:00 AM". An account with no timezone stored resets at UTC midnight,
@@ -401,9 +406,13 @@ export function CapHitCard({ onUpgrade, dailyCap, resetsAt, upsell = true }: {
       }}
     >
       <Txt font="user" style={{ fontSize: 13, color: W.text, lineHeight: 18 }}>
-        {dailyCap ? `You've sent today's ${dailyCap} messages.` : "You've reached today's message limit."}
-        {when ? ` They reset at ${when}.` : ''}
-        {upsell ? ' Plus is unlimited.' : ''}
+        {message ?? (
+          <>
+            {dailyCap ? `You've sent today's ${dailyCap} messages.` : "You've reached today's message limit."}
+            {when ? ` They reset at ${when}.` : ''}
+            {upsell ? ' Plus is unlimited.' : ''}
+          </>
+        )}
       </Txt>
       {upsell ? (
         <Pressable onPress={onUpgrade} style={{ backgroundColor: W.primary, borderRadius: 12, paddingVertical: 7, paddingHorizontal: 14 }}>
