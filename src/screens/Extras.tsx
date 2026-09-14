@@ -889,13 +889,16 @@ export function S30_Login({
         </View>
 
         <View style={{ marginTop: 44, gap: 12 }}>
-          {/* Apple */}
-          <Pressable onPress={onApple} disabled={busy} style={({ pressed }) => ({ opacity: busy ? 0.5 : pressed ? 0.6 : 1, width: '100%', height: 52, backgroundColor: '#F0F0F5', borderRadius: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, paddingHorizontal: 16 })}>
+          {/* Apple: iOS only. Sign in with Apple is not set up and does not exist on
+              Android, so the button could only fail there. */}
+          {Platform.OS === 'ios' && (
+            <Pressable onPress={onApple} disabled={busy} style={({ pressed }) => ({ opacity: busy ? 0.5 : pressed ? 0.6 : 1, width: '100%', height: 52, backgroundColor: '#F0F0F5', borderRadius: 12, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, paddingHorizontal: 16 })}>
             <Svg width={16} height={20} viewBox="0 0 24 28" fill="#000">
               <Path d="M18.7 14.6c0-3.2 2.6-4.8 2.7-4.9-1.5-2.2-3.8-2.5-4.6-2.5-2-.2-3.8 1.1-4.8 1.1-1 0-2.5-1.1-4.2-1.1-2.2 0-4.2 1.3-5.3 3.2-2.3 3.9-.6 9.7 1.6 12.9 1.1 1.6 2.4 3.3 4.1 3.3 1.7-.1 2.3-1.1 4.3-1.1s2.6 1.1 4.3 1c1.8 0 2.9-1.6 4-3.2 1.3-1.8 1.8-3.6 1.8-3.7-.1-.1-3.5-1.3-3.5-5z M15.7 5c.9-1.1 1.5-2.6 1.3-4.1-1.3.1-2.8.9-3.7 2-.8 1-1.6 2.5-1.4 3.9 1.4.1 2.9-.7 3.8-1.8z" />
             </Svg>
             <Txt font="user" weight={500} style={{ fontSize: 15, color: '#000' }}>Continue with Apple</Txt>
           </Pressable>
+          )}
           {/* Google */}
           <View style={{ width: '100%', height: 52, borderRadius: 12, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' }}>
             <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
