@@ -411,6 +411,7 @@ export interface ApiBillingPlan {
   tier: 'plus' | 'premium';
   label: string;
   voice_minutes: number;
+  daily_messages: number;
   monthly_usd: number;
   annual_monthly_usd: number;
   product_ids: { monthly: string; annual: string };

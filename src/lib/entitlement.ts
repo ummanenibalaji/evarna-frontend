@@ -73,15 +73,18 @@ export function resetLabel(e: ApiEntitlement): string {
   return e.period.source === 'subscription' ? 'Renews on' : 'Minutes reset on';
 }
 
-/** The plan card's bullet list, derived so the minutes can never contradict the tier. */
+/** The plan card's bullet list, derived so the minutes and messages can never contradict the tier. */
 export function planFeatures(p: ApiBillingPlan): string[] {
+  // "Unlimited text" was shown over a 1,000-a-day cap. The number comes from
+  // the server's plan, which reads it from the tier the gate enforces.
+  const messages = `${p.daily_messages.toLocaleString('en-US')} messages a day`;
   // "Up to 5 companions" on both, deliberately: five is the flat cap the app
   // actually enforces (MAX_COMPANIONS), and the backend has no per-tier
   // companion limit yet. The card used to claim 3 for Plus, which nothing
   // implemented. Derive this from the plan once the backend serves it.
   return p.tier === 'plus'
-    ? [`${p.voice_minutes} voice min/mo`, 'Unlimited text', 'All companion types', 'Up to 5 companions', 'Full Studio access']
-    : [`${p.voice_minutes} voice min/mo`, 'Everything in Plus', 'Up to 5 companions', 'Custom characters', 'Priority responses'];
+    ? [`${p.voice_minutes} voice min/mo`, messages, 'All companion types', 'Up to 5 companions', 'Full Studio access']
+    : [`${p.voice_minutes} voice min/mo`, messages, 'Everything in Plus', 'Custom characters', 'Priority responses'];
 }
 
 export const priceFor = (p: ApiBillingPlan, annual: boolean): string =>

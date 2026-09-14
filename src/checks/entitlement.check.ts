@@ -26,8 +26,8 @@ const check = (label: string, got: unknown, want: unknown) => {
 };
 const refusal = (status: number, code: string) => ({ status, code, name: 'ApiError' });
 
-const PLUS: ApiBillingPlan = { tier: 'plus', label: 'Plus', voice_minutes: 120, monthly_usd: 19.99, annual_monthly_usd: 12.49, product_ids: { monthly: 'evarna.plus.monthly', annual: 'evarna.plus.annual' } };
-const PREMIUM: ApiBillingPlan = { tier: 'premium', label: 'Premium', voice_minutes: 400, monthly_usd: 39.99, annual_monthly_usd: 24.99, product_ids: { monthly: 'evarna.premium.monthly', annual: 'evarna.premium.annual' } };
+const PLUS: ApiBillingPlan = { tier: 'plus', label: 'Plus', voice_minutes: 120, daily_messages: 1000, monthly_usd: 19.99, annual_monthly_usd: 12.49, product_ids: { monthly: 'evarna.plus.monthly', annual: 'evarna.plus.annual' } };
+const PREMIUM: ApiBillingPlan = { tier: 'premium', label: 'Premium', voice_minutes: 400, daily_messages: 2000, monthly_usd: 39.99, annual_monthly_usd: 24.99, product_ids: { monthly: 'evarna.premium.monthly', annual: 'evarna.premium.annual' } };
 
 const base = (over: Partial<ApiEntitlement> = {}): ApiEntitlement => ({
   tier: 'free', tier_label: 'Free', status: 'none', platform: 'none', auto_renew: false, expires_at: null,
@@ -66,6 +66,9 @@ console.log('\nThe store catalog');
 check('premium advertises its real allowance', planFeatures(PREMIUM)[0], '400 voice min/mo');
 check('plus advertises its real allowance', planFeatures(PLUS)[0], '120 voice min/mo');
 check('no card promises a cap nothing enforces', planFeatures(PLUS).includes('Up to 3 companions'), false);
+check('plus advertises its real message cap', planFeatures(PLUS)[1], '1,000 messages a day');
+check('premium advertises its real message cap', planFeatures(PREMIUM)[1], '2,000 messages a day');
+check('no card promises unlimited text over a daily cap', [...planFeatures(PLUS), ...planFeatures(PREMIUM)].some((l) => /unlimited/i.test(l)), false);
 check('monthly price', priceFor(PLUS, false), '$19.99');
 check('an annual plan is priced per month', priceFor(PREMIUM, true), '$24.99');
 

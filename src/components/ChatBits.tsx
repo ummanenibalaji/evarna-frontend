@@ -410,7 +410,7 @@ export function CapHitCard({ onUpgrade, dailyCap, resetsAt, upsell = true, messa
           <>
             {dailyCap ? `You've sent today's ${dailyCap} messages.` : "You've reached today's message limit."}
             {when ? ` They reset at ${when}.` : ''}
-            {upsell ? ' Plus is unlimited.' : ''}
+            {upsell ? ' Plus raises the daily limit.' : ''}
           </>
         )}
       </Txt>
