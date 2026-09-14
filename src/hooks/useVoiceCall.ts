@@ -171,7 +171,7 @@ export function useVoiceCall(params: UseVoiceCallParams): UseVoiceCallReturn {
         // connection and offered a retry that could only fail again.
         //
         // Two layers, because they need different offers. The plan being spent
-        // is worth a Top up; an abuse ceiling is not — no purchase lifts it.
+        // is worth offering plans; an abuse ceiling is not — no purchase lifts it.
         if (quotaCode(e) === 'VOICE_MINUTES_EXHAUSTED') {
           setError({
             kind: 'quota-exhausted',

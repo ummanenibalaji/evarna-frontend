@@ -463,36 +463,10 @@ function Sheet({ children, onClose }: { children: React.ReactNode; onClose?: () 
   );
 }
 
-// State B — depleted mid-call
-export function S27_Depleted({ onTopUp, onText, resetDate }: { onTopUp: () => void; onText: () => void;
-  /** Unused until the backend can end a call mid-way; no invented default. */
-  resetDate?: string }) {
-  return (
-    <Sheet>
-      <View style={{ paddingHorizontal: 24, paddingTop: 12, paddingBottom: 28 }}>
-        <View style={{ width: 36, height: 4, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 2, alignSelf: 'center', marginBottom: 18 }} />
-        <Txt font="comp" weight={600} style={{ fontSize: 18, color: W.text }}>You've used all your voice minutes</Txt>
-        <Txt font="user" style={{ marginTop: 6, fontSize: 13, color: W.text2, lineHeight: 20 }}>Top up to keep calling, or continue in text.</Txt>
-        <View style={{ marginTop: 18, gap: 10 }}>
-          <Pressable onPress={onTopUp} style={{ width: '100%', height: 48, backgroundColor: W.primary, borderRadius: 14, alignItems: 'center', justifyContent: 'center', shadowColor: W.primary, shadowOpacity: 0.31, shadowRadius: 24, shadowOffset: { width: 0, height: 8 } }}>
-            <Txt font="user" weight={500} style={{ fontSize: 15, color: '#fff' }}>Top up</Txt>
-          </Pressable>
-          <Pressable onPress={onText} style={{ width: '100%', height: 48, backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', borderRadius: 14, alignItems: 'center', justifyContent: 'center' }}>
-            <Txt font="user" weight={500} style={{ fontSize: 15, color: W.text }}>Continue in text</Txt>
-          </Pressable>
-        </View>
-        {resetDate ? (
-          <Txt font="user" style={{ marginTop: 14, fontSize: 11, color: W.text3, textAlign: 'center' }}>Your minutes reset on {resetDate}.</Txt>
-        ) : null}
-      </View>
-    </Sheet>
-  );
-}
-
 // State C — already depleted, trying to start a call
 export function S27_StartCallDepleted({
-  companion, onTopUp, onUpgrade, onText, onClose, resetDate,
-}: { companion: Companion; onTopUp: () => void; onUpgrade: () => void; onText: () => void; onClose: () => void;
+  companion, onUpgrade, onText, onClose, resetDate,
+}: { companion: Companion; onUpgrade: () => void; onText: () => void; onClose: () => void;
   /** When the allowance comes back, in the reader's own timezone. Omitted
    *  while unknown — this used to default to "June 1" and say it out loud. */
   resetDate?: string }) {
@@ -508,11 +482,10 @@ export function S27_StartCallDepleted({
           </View>
         </View>
         <View style={{ marginTop: 18, gap: 10 }}>
-          <Pressable onPress={onTopUp} style={{ width: '100%', height: 48, backgroundColor: W.primary, borderRadius: 14, alignItems: 'center', justifyContent: 'center', shadowColor: W.primary, shadowOpacity: 0.31, shadowRadius: 24, shadowOffset: { width: 0, height: 8 } }}>
-            <Txt font="user" weight={500} style={{ fontSize: 15, color: '#fff' }}>Top up minutes</Txt>
-          </Pressable>
-          <Pressable onPress={onUpgrade} style={{ width: '100%', height: 48, borderWidth: 1, borderColor: alpha(W.accent, '66'), borderRadius: 14, alignItems: 'center', justifyContent: 'center' }}>
-            <Txt font="user" weight={500} style={{ fontSize: 15, color: W.accent }}>Upgrade plan</Txt>
+          {/* No top-up: bought minutes can't be spent until usage counters exist,
+              so v1 sells plans only. */}
+          <Pressable onPress={onUpgrade} style={{ width: '100%', height: 48, backgroundColor: W.primary, borderRadius: 14, alignItems: 'center', justifyContent: 'center', shadowColor: W.primary, shadowOpacity: 0.31, shadowRadius: 24, shadowOffset: { width: 0, height: 8 } }}>
+            <Txt font="user" weight={500} style={{ fontSize: 15, color: '#fff' }}>See plans</Txt>
           </Pressable>
           <Pressable onPress={onText} style={{ padding: 8, alignItems: 'center' }}>
             <Txt font="user" style={{ fontSize: 13, color: W.text2 }}>Text instead</Txt>
@@ -523,27 +496,6 @@ export function S27_StartCallDepleted({
         ) : null}
       </View>
     </Sheet>
-  );
-}
-
-// State D — inline minutes-remaining indicator
-export function MinutesRemainingIndicator({ minutes, max = 120, onTopUp }: { minutes: number | null; max?: number; onTopUp?: () => void }) {
-  if (minutes == null || minutes >= 15) return null;
-  const pct = Math.max(0, minutes / max);
-  return (
-    <View style={{ gap: 4, marginTop: 6 }}>
-      <View style={{ height: 2, backgroundColor: 'rgba(255,255,255,0.06)', borderRadius: 1, overflow: 'hidden' }}>
-        <View style={{ height: '100%', width: `${pct * 100}%`, backgroundColor: minutes === 0 ? W.challenger : W.primary, borderRadius: 1 }} />
-      </View>
-      {minutes === 0 ? (
-        <View style={{ flexDirection: 'row' }}>
-          <Txt font="user" style={{ fontSize: 11, color: W.text2 }}>No minutes left · </Txt>
-          <Pressable onPress={onTopUp}><Txt font="user" style={{ fontSize: 11, color: W.accent }}>Top up</Txt></Pressable>
-        </View>
-      ) : (
-        <Txt font="user" style={{ fontSize: 11, color: W.text2 }}>{minutes} min remaining</Txt>
-      )}
-    </View>
   );
 }
 

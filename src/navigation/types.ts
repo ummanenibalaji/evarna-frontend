@@ -8,7 +8,7 @@ export type ScreenName =
   | 'home' | 'callDepleted' | 'add-companion' | 'call' | 'chat' | 'crisis'
   | 'profile' | 'user-profile' | 'recap' | 'studio' | 'scenario-setup' | 'studio-session'
   | 'character-creator' | 'sandbox' | 'sandbox-session' | 'settings'
-  | 'memories' | 'paywall' | 'topup' | 'login';
+  | 'memories' | 'paywall' | 'login';
 
 /** Why the paywall opened. Chooses its headline (PAYWALL_HEADERS in Settings). */
 export type PaywallTrigger = 'voice' | 'cap' | 'more' | 'studio';

@@ -19,6 +19,8 @@ import { Card, Toggle, PrimaryButton, MeterBar } from '../components/Atoms';
 import { useEntrance, usePressScale, useCountUp } from '../theme/animations';
 import { W, GRAD, alpha, rgba } from '../theme/theme';
 import * as Application from 'expo-application';
+import { buyPlan, loadStorePlans, restorePurchases, storeAvailable, StorePlan } from '../lib/purchases';
+import { syncEntitlement } from '../api';
 // BILLING_LIVE is gone: the tier now comes from the entitlement, not a constant.
 import { ARCHETYPE_COLORS, ARCHETYPE_LABEL, MEM_TYPES, Companion, Tier, Memory } from '../data/config';
 import { Go, PaywallTrigger, ScreenName } from '../navigation/types';
@@ -230,7 +232,6 @@ export function S21_Settings({ go, entitlement, entitlementFailed, onRetryEntitl
             }
             right={<NavIcon name="right" color={W.text2} size={18} />}
           />
-          <Row onPress={() => go('topup')} label="Buy voice minutes" right={<NavIcon name="right" color={W.text2} size={18} />} />
           {/* Hidden until it is known. A date is worse than no date if it is
               invented — this row read "June 1, 2026" for every account. */}
           {entitlement && formatResetDate(entitlement.period.renews_at) ? (
@@ -764,10 +765,6 @@ export function S22_Memories({ go, characterId, companionName }: { go: Go; chara
 }
 
 // ─── S23 PAYWALL ─────────────────────────────────────────────────────────
-/** One honest line wherever a purchase button sits. StoreKit is the next step;
- *  until it lands a tap cannot complete, so nothing pretends it can. */
-const PURCHASES_NOT_LIVE = "Purchases aren't live yet — they arrive with the next update.";
-
 const PAYWALL_HEADERS: Record<PaywallTrigger, string> = {
   voice: 'Unlock your voice connection',
   cap: 'Continue the conversation',
@@ -775,7 +772,9 @@ const PAYWALL_HEADERS: Record<PaywallTrigger, string> = {
   studio: 'Practice makes perfect',
 };
 
-export function S23_Paywall({ go, trigger = 'voice', backTo = 'home', entitlement }: { go: Go; trigger?: PaywallTrigger; backTo?: ScreenName; entitlement?: ApiEntitlement | null }) {
+export function S23_Paywall({ go, trigger = 'voice', backTo = 'home', entitlement, onPurchased }: { go: Go; trigger?: PaywallTrigger; backTo?: ScreenName; entitlement?: ApiEntitlement | null;
+  /** Called with the refreshed entitlement once a purchase or restore lands. */
+  onPurchased?: (e: ApiEntitlement) => void }) {
   const [annual, setAnnual] = useState(true);
   const [picked, setPicked] = useState<'plus' | 'premium'>('premium');
   // The catalog is served, not shipped, so there is nothing to fall back to:
@@ -784,6 +783,54 @@ export function S23_Paywall({ go, trigger = 'voice', backTo = 'home', entitlemen
   // replaced.
   const plans = entitlement?.plans ?? [];
   const pickedPlan = plans.find(p => p.tier === picked);
+  // Prices and purchases come from Google Play through RevenueCat. The cards
+  // keep the server's catalog, so plan details show before the store answers.
+  const [storePlans, setStorePlans] = useState<StorePlan[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    loadStorePlans()
+      .then(p => { if (alive) setStorePlans(p); })
+      .catch(() => { if (alive) setStorePlans([]); });
+    return () => { alive = false; };
+  }, []);
+  const storeReady = storeAvailable();
+  const storePlan = storePlans?.find(p => p.tier === picked && p.annual === annual) ?? null;
+  const anyTrial = !!storePlans?.some(p => p.hasFreeTrial);
+  const subscribe = async () => {
+    if (!storePlan || busy) return;
+    setBusy(true);
+    setMessage(null);
+    try {
+      if ((await buyPlan(storePlan)) === 'cancelled') return;
+      onPurchased?.(await syncEntitlement());
+    } catch {
+      setMessage("The purchase didn't complete. Check Google Play and try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const restore = async () => {
+    if (!storeReady || busy) return;
+    setBusy(true);
+    setMessage(null);
+    try {
+      await restorePurchases();
+      const e = await syncEntitlement();
+      if (e.tier !== 'free') onPurchased?.(e);
+      else setMessage('No active subscription was found for this Google account.');
+    } catch {
+      setMessage("Couldn't restore right now. Try again in a moment.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  const priceLine = storePlan
+    ? `${storePlan.hasFreeTrial ? 'Free trial, then ' : ''}${storePlan.priceString} a ${storePlan.annual ? 'year' : 'month'}. Renews automatically until you cancel in Google Play.`
+    : pickedPlan
+      ? `${priceFor(pickedPlan, annual)}/month${annual ? ', billed annually' : ''}. Renews automatically until you cancel in Google Play.`
+      : '';
 
   return (
     <ModalSheet zIndex={40} radius={28} maxHeightPct={0.92} onClose={() => go(backTo)}>
@@ -798,7 +845,7 @@ export function S23_Paywall({ go, trigger = 'voice', backTo = 'home', entitlemen
       </View>
       <View style={{ height: 10 }} />
       <Txt font="comp" weight={700} style={{ fontSize: 22, color: W.text, textAlign: 'center' }}>{PAYWALL_HEADERS[trigger] ?? 'Upgrade Evarna'}</Txt>
-      <Txt font="user" style={{ marginTop: 8, fontSize: 14, color: W.text2, textAlign: 'center' }}>Start with a 7-day free trial. Cancel anytime.</Txt>
+      <Txt font="user" style={{ marginTop: 8, fontSize: 14, color: W.text2, textAlign: 'center' }}>{anyTrial ? 'Start with a free trial. Cancel anytime.' : 'Cancel anytime in Google Play.'}</Txt>
 
       <View style={{ marginTop: 20, alignItems: 'center' }}>
         <View style={{ flexDirection: 'row', borderRadius: 22, padding: 3, backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.06)' }}>
@@ -843,21 +890,35 @@ export function S23_Paywall({ go, trigger = 'voice', backTo = 'home', entitlemen
       </View>
       )}
 
-      {/* Disabled rather than dismissive. Both of these used to close the sheet
-          and do nothing, which reads as a purchase that silently failed. There
-          is no StoreKit yet, and saying so is better than pretending. */}
       {plans.length > 0 ? (
       <>
-      <View style={{ marginTop: 20, width: '100%', height: 48, backgroundColor: W.primary, borderRadius: 14, alignItems: 'center', justifyContent: 'center', opacity: 0.45 }}>
-        <Txt font="user" weight={500} style={{ fontSize: 15, color: '#fff' }}>Start free trial</Txt>
-      </View>
-      <View style={{ marginTop: 6, width: '100%', height: 36, alignItems: 'center', justifyContent: 'center', opacity: 0.45 }}>
+      <Pressable
+        onPress={subscribe}
+        disabled={!storePlan || busy}
+        accessibilityRole="button"
+        accessibilityState={{ disabled: !storePlan || busy, busy }}
+        style={{ marginTop: 20, width: '100%', height: 48, backgroundColor: W.primary, borderRadius: 14, alignItems: 'center', justifyContent: 'center', opacity: !storePlan || busy ? 0.45 : 1 }}
+      >
+        <Txt font="user" weight={500} style={{ fontSize: 15, color: '#fff' }}>
+          {busy ? 'One moment…' : storePlan?.hasFreeTrial ? 'Start free trial' : 'Subscribe'}
+        </Txt>
+      </Pressable>
+      <Pressable
+        onPress={restore}
+        disabled={!storeReady || busy}
+        accessibilityRole="button"
+        style={{ marginTop: 6, width: '100%', height: 36, alignItems: 'center', justifyContent: 'center', opacity: !storeReady || busy ? 0.45 : 1 }}
+      >
         <Txt font="user" style={{ fontSize: 12, color: W.text2 }}>Restore purchase</Txt>
-      </View>
-      <Txt font="user" style={{ marginTop: 8, fontSize: 11, color: W.accent, textAlign: 'center' }}>{PURCHASES_NOT_LIVE}</Txt>
-      <Txt font="user" style={{ marginTop: 6, fontSize: 11, color: W.text3, textAlign: 'center', lineHeight: 16 }}>
-        7-day free trial, then {pickedPlan ? priceFor(pickedPlan, annual) : '—'}/month. Cancel anytime in App Store settings.
-      </Txt>
+      </Pressable>
+      {message ? (
+        <Txt font="user" style={{ marginTop: 6, fontSize: 12, color: W.accent, textAlign: 'center' }}>{message}</Txt>
+      ) : !storeReady ? (
+        <Txt font="user" style={{ marginTop: 6, fontSize: 12, color: W.accent, textAlign: 'center' }}>Purchases aren't available in this build.</Txt>
+      ) : storePlans !== null && !storePlan ? (
+        <Txt font="user" style={{ marginTop: 6, fontSize: 12, color: W.accent, textAlign: 'center' }}>This plan isn't available right now.</Txt>
+      ) : null}
+      <Txt font="user" style={{ marginTop: 6, fontSize: 11, color: W.text3, textAlign: 'center', lineHeight: 16 }}>{priceLine}</Txt>
       </>
       ) : null}
     </ModalSheet>
@@ -897,73 +958,6 @@ function PlanCard({ tier, accent, secondary, annual, price, features, bestValue,
         </View>
       </LinearGradient>
     </Pressable>
-  );
-}
-
-// ─── S24 VOICE TOP-UP ────────────────────────────────────────────────────
-export function S24_TopUp({ go, backTo = 'home', entitlement }: { go: Go; backTo?: ScreenName; entitlement?: ApiEntitlement | null }) {
-  const [autoTopUp, setAutoTopUp] = useState(false);
-  // Packs come from the server so a price can only be wrong in one place. The
-  // badges stay local: "Most popular" is a merchandising choice, not data.
-  const BADGES: Record<number, { badge: string; accent: string }> = {
-    75: { badge: 'Most popular', accent: W.primary },
-    150: { badge: 'Best value', accent: W.accent },
-  };
-  const packs = (entitlement?.topup_packs ?? []).map(p => ({
-    id: p.id,
-    min: Math.round(p.seconds / 60),
-    price: `$${p.price_usd.toFixed(2)}`,
-    ...(BADGES[Math.round(p.seconds / 60)] ?? { badge: null as string | null, accent: undefined as string | undefined }),
-  }));
-  const balance = entitlement ? balanceLine(entitlement) : null;
-  return (
-    <ModalSheet zIndex={40} radius={24} maxHeightPct={0.85} solid backdrop={alpha(W.bg, 'd9')} onClose={() => go(backTo)}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
-        <Pressable onPress={() => go(backTo)} hitSlop={12} style={{ padding: 6 }}>
-          <NavIcon name="back" color={W.text2} size={20} />
-        </Pressable>
-        <View style={{ width: 36, height: 4, backgroundColor: W.surface2, borderRadius: 2 }} />
-        <Pressable onPress={() => go(backTo)} hitSlop={12} style={{ padding: 6 }}>
-          <NavIcon name="close" color={W.text2} size={20} />
-        </Pressable>
-      </View>
-      <Txt font="comp" weight={700} style={{ fontSize: 20, color: W.text }}>Add voice minutes</Txt>
-      {/* The real balance. This line said "12 minutes remaining" to every
-          account, including one with a full allowance and one with none. */}
-      {balance ? (
-        <View style={{ marginTop: 6, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-          <Txt font="user" style={{ fontSize: 13, color: balance.urgent ? W.challenger : W.text2 }}>{balance.text}</Txt>
-        </View>
-      ) : null}
-      {packs.length === 0 ? (
-        <Txt font="user" style={{ marginTop: 20, fontSize: 13, color: W.text2 }}>
-          Couldn't load the minute packs just now.
-        </Txt>
-      ) : null}
-      <View style={{ marginTop: 20, gap: 8 }}>
-        {packs.map(p => (
-          <View key={p.id} style={{ backgroundColor: W.surface2, borderRadius: 12, padding: 14, borderTopWidth: 2, borderTopColor: p.accent || 'transparent', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', opacity: 0.45 }}>
-            <View style={{ gap: 2, alignItems: 'flex-start' }}>
-              <Txt font="comp" weight={600} style={{ fontSize: 16, color: W.text }}>{p.min} minutes</Txt>
-              {p.badge && <Txt font="user" weight={600} style={{ fontSize: 10, color: p.accent }}>{p.badge}</Txt>}
-            </View>
-            <Txt font="user" weight={600} style={{ fontSize: 16, color: W.text }}>{p.price}</Txt>
-          </View>
-        ))}
-      </View>
-      <Txt font="user" style={{ marginTop: 10, fontSize: 11, color: W.accent }}>{PURCHASES_NOT_LIVE}</Txt>
-      {/* Dimmed with the packs: it promises a charge that nothing can make. */}
-      <View style={{ marginTop: 20, backgroundColor: W.surface2, borderRadius: 12, padding: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, opacity: 0.45 }}>
-        <View style={{ flex: 1 }}>
-          <Txt font="user" style={{ fontSize: 13, color: W.text }}>Auto top-up 30 min when low</Txt>
-          <Txt font="user" style={{ marginTop: 2, fontSize: 11, color: W.text2 }}>Charges $4.99 when balance drops below 10 min.</Txt>
-        </View>
-        <Toggle value={autoTopUp} onChange={setAutoTopUp} />
-      </View>
-      <Pressable onPress={() => go(backTo)} style={{ marginTop: 16, width: '100%', height: 36, alignItems: 'center', justifyContent: 'center' }}>
-        <Txt font="user" style={{ fontSize: 13, color: W.text2 }}>Done</Txt>
-      </Pressable>
-    </ModalSheet>
   );
 }
 

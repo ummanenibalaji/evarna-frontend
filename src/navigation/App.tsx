@@ -39,7 +39,8 @@ import {
   S15_StudioHome, S16_ScenarioSetup, S17_StudioSession, S18_CharacterCreator,
 } from '../screens/Studio';
 import { S19_SandboxHome, S20_SandboxSession } from '../screens/Sandbox';
-import { S21_Settings, S22_Memories, S23_Paywall, S24_TopUp, S_UserProfile } from '../screens/Settings';
+import { S21_Settings, S22_Memories, S23_Paywall, S_UserProfile } from '../screens/Settings';
+import { purchasesSignIn, purchasesSignOut } from '../lib/purchases';
 import {
   S25_NotifPermission, S26_CompanionEdit, S27_StartCallDepleted,
   S28_CrisisChat, S29_Recap, S30_Login,
@@ -117,7 +118,6 @@ export default function App() {
   // Track where modal/edit screens were opened from so the back button returns correctly.
   const [profileBack, setProfileBack] = useState<ScreenName>('chat');
   const [paywallBack, setPaywallBack] = useState<ScreenName>('home');
-  const [topupBack, setTopupBack] = useState<ScreenName>('home');
 
   // Onboarding-collected
   const [voicePick, setVoicePick] = useState<string | null>(null);
@@ -439,6 +439,7 @@ export default function App() {
     // account picker instead of silently resuming the same account — which
     // looks exactly like sign-out having failed.
     await googleSignOut();
+    await purchasesSignOut();
     setAuthToken(null);
     await AsyncStorage.removeItem(SESSION_KEY).catch(() => {});
     setUserId(null);
@@ -536,6 +537,8 @@ export default function App() {
 
   // settings
   const [settings, setSettings] = useState({ dailyCheckin: true });
+  // Purchases belong to the signed-in account, so RevenueCat follows it.
+  useEffect(() => { if (userId) void purchasesSignIn(userId); }, [userId]);
   // The one setting left is real: the server skips proactive check-ins for
   // anyone who turns it off. Optimistic, and put back if the save fails, so the
   // switch never shows a state the server does not have.
@@ -577,19 +580,18 @@ export default function App() {
 
   // Navigation helper — mirrors prototype go() and remembers origin for modal-like screens.
   const go = (s: ScreenName) => {
-    // Capture the back-target BEFORE we change screen, so profile/paywall/topup return correctly.
+    // Capture the back-target BEFORE we change screen, so profile/paywall return correctly.
     if (s === 'profile' || s === 'user-profile') setProfileBack(screen);
     if (s === 'paywall') setPaywallBack(screen);
-    if (s === 'topup') setTopupBack(screen);
     // Both sheets show a balance and a catalog, so re-read on the way in rather
     // than on every navigation.
-    if (s === 'paywall' || s === 'topup') refreshEntitlement();
+    if (s === 'paywall') refreshEntitlement();
     setScreen(s);
     if (s === 'home' || s === 'first-chat') setActiveTab('home');
     if (s === 'studio' || s === 'scenario-setup' || s === 'studio-session' || s === 'character-creator') setActiveTab('studio');
     if (s === 'sandbox' || s === 'sandbox-session') setActiveTab('sandbox');
     if (s === 'settings' || s === 'memories' || s === 'user-profile') setActiveTab('settings');
-    // paywall / topup keep whatever tab was active so the underlay matches the origin
+    // the paywall keeps whatever tab was active so the underlay matches the origin
   };
 
   // Allow Settings to set the active companion before opening profile.
@@ -805,7 +807,6 @@ export default function App() {
           onClose={() => setScreen('home')}
           // Back-target forced to home: `go()` would capture 'callDepleted',
           // and returning there from the sheet would dead-end the user.
-          onTopUp={() => { setTopupBack('home'); setScreen('topup'); refreshEntitlement(); }}
           onUpgrade={() => { setPaywallBack('home'); setPaywallTrigger('voice'); setScreen('paywall'); refreshEntitlement(); }}
           onText={() => setScreen('chat')}
           resetDate={entitlement ? formatResetDate(entitlement.period.renews_at) : undefined}
@@ -822,7 +823,7 @@ export default function App() {
           characterId={activeCharacterId ?? undefined}
           // Home, not 'call': returning to the call screen would redial into
           // the same refusal.
-          onOutOfMinutes={() => { setTopupBack('home'); setScreen('topup'); refreshEntitlement(); }}
+          onOutOfMinutes={() => { setPaywallBack('home'); setPaywallTrigger('voice'); setScreen('paywall'); refreshEntitlement(); }}
           onCallEnded={refreshEntitlement}
         />
       );
@@ -889,8 +890,7 @@ export default function App() {
       // actually ends the session instead of just showing the login screen.
       case 'settings': return <S21_Settings go={(sc) => { if (sc === 'login') signOut(); else go(sc); }} entitlement={entitlement} entitlementFailed={entitlementFailed} onRetryEntitlement={refreshEntitlement} companions={companions} userName={displayName} userEmail={displayEmail} settings={settings} setSettings={saveSettings} openCompanionProfile={openCompanionProfile} userId={userId ?? undefined} onDeleteAccount={deleteAccount} />;
       case 'memories': return <S22_Memories go={go} characterId={activeCharacterId ?? undefined} companionName={currentCompanion.name} />;
-      case 'paywall': return <S23_Paywall go={go} trigger={paywallTrigger} backTo={paywallBack} entitlement={entitlement} />;
-      case 'topup': return <S24_TopUp go={go} backTo={topupBack} entitlement={entitlement} />;
+      case 'paywall': return <S23_Paywall go={go} trigger={paywallTrigger} backTo={paywallBack} entitlement={entitlement} onPurchased={(e) => { setEntitlement(e); go(paywallBack); }} />;
       case 'login': return <S30_Login
         isNew={isNewUser}
         onGoogle={() => handleOAuth('google')}
@@ -906,11 +906,11 @@ export default function App() {
   };
 
   const showNav = ['home', 'studio', 'sandbox', 'settings', 'memories', 'recap'].includes(screen);
-  const isModal = screen === 'paywall' || screen === 'topup' || screen === 'callDepleted';
+  const isModal = screen === 'paywall' || screen === 'callDepleted';
 
   // Render the appropriate underlay for modal sheets so backdrops match the screen they were launched from.
   const renderUnderlay = () => {
-    const origin = screen === 'paywall' ? paywallBack : screen === 'topup' ? topupBack : 'home';
+    const origin = screen === 'paywall' ? paywallBack : 'home';
     if (origin === 'settings') {
       return <S21_Settings go={() => {}} entitlement={entitlement} entitlementFailed={entitlementFailed} companions={companions} userName={displayName} userEmail={displayEmail} settings={settings} setSettings={saveSettings} openCompanionProfile={() => {}} userId={userId ?? undefined} />;
     }

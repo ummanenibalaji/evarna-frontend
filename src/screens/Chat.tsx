@@ -280,7 +280,7 @@ interface VoiceCallProps {
   voiceSecondsRemaining?: number | null;
   userId?: string;
   characterId?: string;
-  /** Opens the top-up sheet with a back-target that will not redial. */
+  /** Opens the paywall with a back-target that will not redial. */
   onOutOfMinutes?: () => void;
   /** Re-read the balance after the call, since it is what just spent it. */
   onCallEnded?: () => void;
@@ -360,13 +360,13 @@ export function S12_VoiceCall({ go, companion, accent = W.primary, orbIntensity 
         }
         right={<Txt font="user" style={{ fontSize: 11, color: W.text2, opacity: 0.5 }}>{fmt(time)}</Txt>}
       />
-      {/* onOutOfMinutes, not go('topup'): `go` captures 'call' as the back
+      {/* onOutOfMinutes, not go('paywall'): `go` captures 'call' as the back
           target, so closing the sheet would return here and start a second
           billed call. */}
-      {minutesLeft != null && <MinuteWarningBanner minutes={minutesLeft} onTopUp={() => (onOutOfMinutes ? onOutOfMinutes() : go('topup'))} />}
+      {minutesLeft != null && <MinuteWarningBanner minutes={minutesLeft} onUpgrade={() => (onOutOfMinutes ? onOutOfMinutes() : go('paywall'))} />}
 
       {phase === 'error' && error ? (
-        <CallErrorView error={error} onRetry={retry} onCancel={handleEnd} onTopUp={onOutOfMinutes} />
+        <CallErrorView error={error} onRetry={retry} onCancel={handleEnd} onUpgrade={onOutOfMinutes} />
       ) : (
         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24 }}>
           <Orb state={orbState} size={200} accent={accent} intensity={orbIntensity} />
@@ -414,7 +414,7 @@ function derivePillText(phase: ReturnType<typeof useVoiceCall>['phase'], orbStat
  * structural copy of it — the copy is why a new kind could be added to the
  * union and silently land in the "Try again" branch.
  */
-function CallErrorView({ error, onRetry, onCancel, onTopUp }: { error: CallError; onRetry: () => void; onCancel: () => void; onTopUp?: () => void }) {
+function CallErrorView({ error, onRetry, onCancel, onUpgrade }: { error: CallError; onRetry: () => void; onCancel: () => void; onUpgrade?: () => void }) {
   const isPermission = error.kind === 'mic-permission';
   const isSpent = error.kind === 'quota-exhausted';
   return (
@@ -434,17 +434,17 @@ function CallErrorView({ error, onRetry, onCancel, onTopUp }: { error: CallError
       <View style={{ flexDirection: 'row', gap: 12, alignItems: 'center' }}>
         <View style={{ flex: 1 }}>
           {/* The offer has to match the cause. "Try again" for an exhausted
-              balance repeats a request that cannot succeed; "Top up" for an
+              balance repeats a request that cannot succeed; "See plans" for an
               abuse ceiling sells something that would not lift it. */}
           <PrimaryButton
             onPress={
               isPermission ? () => Linking.openSettings()
-                : isSpent ? () => onTopUp?.()
+                : isSpent ? () => onUpgrade?.()
                 : error.kind === 'limit' ? onCancel
                 : onRetry
             }
           >
-            {isPermission ? 'Open Settings' : isSpent ? 'Top up' : error.kind === 'limit' ? 'Close' : 'Try again'}
+            {isPermission ? 'Open Settings' : isSpent ? 'See plans' : error.kind === 'limit' ? 'Close' : 'Try again'}
           </PrimaryButton>
         </View>
         <Pressable

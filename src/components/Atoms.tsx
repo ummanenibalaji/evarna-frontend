@@ -405,7 +405,7 @@ export function MemoryRef({ children, onPress }: { children: React.ReactNode; on
 // ─── MinuteWarningBanner ─────────────────────────────────────────────────
 // Ported from extras.jsx; used by the voice call + depleted flows. Lives here
 // (shared) so both Chat and Extras screens can import without a cycle.
-export function MinuteWarningBanner({ minutes, onTopUp }: { minutes: number | null; onTopUp?: () => void }) {
+export function MinuteWarningBanner({ minutes, onUpgrade }: { minutes: number | null; onUpgrade?: () => void }) {
   const breathe = useRef(new Animated.Value(0)).current;
   useEffect(() => {
     Animated.loop(
@@ -444,11 +444,11 @@ export function MinuteWarningBanner({ minutes, onTopUp }: { minutes: number | nu
         }}
       />
       <Txt font="user" style={{ flex: 1, fontSize: 12, color: W.text2 }}>
-        {minutes} {minutes === 1 ? 'minute' : 'minutes'} remaining{urgency === 'high' ? '. Top up to keep talking.' : ' this month'}
+        {minutes} {minutes === 1 ? 'minute' : 'minutes'} remaining{urgency === 'high' ? '. See plans to keep talking.' : ' this month'}
       </Txt>
       {urgency === 'high' && (
-        <Pressable onPress={onTopUp}>
-          <Txt font="user" weight={500} style={{ fontSize: 12, color: W.accent }}>Top up</Txt>
+        <Pressable onPress={onUpgrade}>
+          <Txt font="user" weight={500} style={{ fontSize: 12, color: W.accent }}>See plans</Txt>
         </Pressable>
       )}
     </View>

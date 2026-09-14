@@ -471,3 +471,8 @@ export interface ApiEntitlement {
 
 export const getEntitlement = (): Promise<ApiEntitlement> =>
   apiGet<ApiEntitlement>('/billing/entitlement');
+
+// Re-reads the store after a purchase or restore, so the new plan shows at once
+// instead of whenever RevenueCat's webhook reaches the server.
+export const syncEntitlement = (): Promise<ApiEntitlement> =>
+  apiPost<ApiEntitlement>('/billing/sync', {});

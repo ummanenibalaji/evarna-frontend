@@ -45,7 +45,7 @@ check('nothing left reads as 0 min', formatBalance(0), '0 min');
 check('under a minute reads in seconds', formatBalance(40), '40 sec');
 check('59s is still seconds', formatBalance(59), '59 sec');
 check('60s is a minute', formatBalance(60), '1 min');
-check('the free allowance is 8 min', formatBalance(480), '8 min');
+check('whole minutes format as "8 min"', formatBalance(480), '8 min');
 check('whole minutes floor', minutesFrom(59), 0);
 check('never negative', minutesFrom(-90), 0);
 
@@ -106,3 +106,11 @@ check('whitespace does not count as newer', restoreDraft('   ', 'are you there?'
 
 console.log(failures === 0 ? '\nAll entitlement checks passed.\n' : `\n${failures} entitlement check(s) FAILED.\n`);
 process.exit(failures === 0 ? 0 : 1);
+
+// Which plan a Google Play product is, as RevenueCat reports it.
+import { tierAndPeriodOf } from '../lib/storeProducts';
+check('a Plus monthly base plan is Plus, monthly', JSON.stringify(tierAndPeriodOf('evarna.plus:monthly')), JSON.stringify({ tier: 'plus', annual: false }));
+check('a Premium annual base plan is Premium, annual', JSON.stringify(tierAndPeriodOf('evarna.premium:annual')), JSON.stringify({ tier: 'premium', annual: true }));
+check('the package type wins over the id', JSON.stringify(tierAndPeriodOf('evarna.plus', 'ANNUAL')), JSON.stringify({ tier: 'plus', annual: true }));
+check('a product that is not ours is ignored', tierAndPeriodOf('com.other:monthly'), null);
+

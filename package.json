@@ -38,6 +38,7 @@
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "react-native": "0.81.4",
+    "react-native-purchases": "^10.9.1",
     "react-native-safe-area-context": "~5.6.0",
     "react-native-svg": "15.12.1",
     "react-native-web": "^0.21.0",
@@ -47,8 +48,8 @@
     "@babel/core": "^7.25.0",
     "@types/react": "~19.1.0",
     "babel-preset-expo": "~54.0.0",
-    "typescript": "~5.9.2",
-    "tsx": "^4"
+    "tsx": "^4",
+    "typescript": "~5.9.2"
   },
   "private": true
 }
