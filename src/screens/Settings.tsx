@@ -18,20 +18,21 @@ import { Txt } from '../components/Txt';
 import { Card, Toggle, PrimaryButton, MeterBar } from '../components/Atoms';
 import { useEntrance, usePressScale, useCountUp } from '../theme/animations';
 import { W, GRAD, alpha, rgba } from '../theme/theme';
+import * as Application from 'expo-application';
 // BILLING_LIVE is gone: the tier now comes from the entitlement, not a constant.
 import { ARCHETYPE_COLORS, ARCHETYPE_LABEL, MEM_TYPES, Companion, Tier, Memory } from '../data/config';
 import { Go, PaywallTrigger, ScreenName } from '../navigation/types';
 import { getMemories, deleteMemory, deleteAllMemories, ApiMemory, getUserStats, ApiUserStats, getActivity, ApiActivity, exportMyData, ApiEntitlement } from '../api';
 import { balanceLine, formatBalance, formatResetDate, minutesFrom, planFeatures, priceFor, resetLabel } from '../lib/entitlement';
 
+// The installed build's own version, not a number typed into the screen.
+const APP_VERSION = `${Application.nativeApplicationVersion ?? '?'} (${Application.nativeBuildVersion ?? '?'})`;
 const PRIVACY_URL = process.env.EXPO_PUBLIC_PRIVACY_URL || undefined;
 const TERMS_URL = process.env.EXPO_PUBLIC_TERMS_URL || undefined;
 
 export interface AppSettings {
+  /** Proactive check-ins. Saved on the server, which skips outreach when off. */
   dailyCheckin: boolean;
-  weeklyReflection: boolean;
-  autoPlay: boolean;
-  liveCaptions: boolean;
 }
 
 // ─── S21 SETTINGS ────────────────────────────────────────────────────────
@@ -65,7 +66,6 @@ export function S21_Settings({ go, entitlement, entitlementFailed, onRetryEntitl
   const tierBg = !entitlement || tier === 'free' ? W.surface2 : tier === 'plus' ? W.primary : W.accent;
   const tierFg = entitlement && tier === 'plus' ? '#fff' : entitlement && tier === 'premium' ? W.bg : W.text2;
 
-  const [voiceSpeed, setVoiceSpeed] = useState(1.0);
   const [userStats, setUserStats] = useState<ApiUserStats | null>(null);
   const [activity, setActivity] = useState<ApiActivity | null>(null);
 
@@ -74,11 +74,7 @@ export function S21_Settings({ go, entitlement, entitlementFailed, onRetryEntitl
     getUserStats().then(setUserStats).catch(() => {});
     getActivity().then(setActivity).catch(() => {});
   }, [userId]);
-  const [bgSoundIdx, setBgSoundIdx] = useState(0);
   // Notification time as an exact moment of day.
-  const [notifHour, setNotifHour] = useState(21);   // 9 PM default
-  const [notifMinute, setNotifMinute] = useState(0);
-  const [showTimePicker, setShowTimePicker] = useState(false);
   const [info, setInfo] = useState<{ title: string; body: string; danger?: { label: string; onPress: () => void } } | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -105,8 +101,6 @@ export function S21_Settings({ go, entitlement, entitlementFailed, onRetryEntitl
   };
   const enter = useEntrance({ durationMs: 420, fromTranslateY: 14 });
 
-  const BG_SOUNDS = ['Off', 'Rain', 'Ocean', 'Fireplace', 'White noise'];
-  const notifTimeLabel = useMemo(() => formatTime(notifHour, notifMinute), [notifHour, notifMinute]);
 
   return (
     <Screen>
@@ -196,47 +190,10 @@ export function S21_Settings({ go, entitlement, entitlementFailed, onRetryEntitl
         </Section>
 
         <Section title="Communication" accent={W.coral}>
+          {/* The only setting here with something behind it. The notification time,
+              weekly reflection, voice speed, background sounds, auto-play and live
+              captions controls were removed: none of them changed anything. */}
           <Row icon="bell" iconColor={W.coral} label="Daily check-in" right={<Toggle value={settings.dailyCheckin} onChange={v => setSettings({ ...settings, dailyCheckin: v })} />} />
-          <Row
-            icon="clock" iconColor={W.gold}
-            onPress={() => setShowTimePicker(true)}
-            label="Notification time"
-            right={
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                <Txt font="user" style={{ fontSize: 13, color: W.secondary }}>{notifTimeLabel}</Txt>
-                <NavIcon name="right" color={W.text3} size={14} />
-              </View>
-            }
-          />
-          <Row icon="sparkle" iconColor={W.secondary} label="Weekly reflection" right={<Toggle value={settings.weeklyReflection} onChange={v => setSettings({ ...settings, weeklyReflection: v })} />} />
-        </Section>
-
-        <Section title="Voice" accent={W.violet}>
-          <Row
-            icon="mic" iconColor={W.secondary}
-            label="Voice speed"
-            right={
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                <View style={{ width: 80 }}>
-                  <MiniSlider value={(voiceSpeed - 0.8) / 0.7} onChange={(t) => setVoiceSpeed(Math.round((0.8 + t * 0.7) * 10) / 10)} />
-                </View>
-                <Txt font="user" style={{ fontSize: 12, color: W.text2, minWidth: 30 }}>{voiceSpeed.toFixed(1)}×</Txt>
-              </View>
-            }
-          />
-          <Row
-            icon="speaker" iconColor={W.success}
-            onPress={() => setBgSoundIdx((bgSoundIdx + 1) % BG_SOUNDS.length)}
-            label="Background sounds"
-            right={
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                <Txt font="user" style={{ fontSize: 13, color: bgSoundIdx === 0 ? W.text2 : W.secondary }}>{BG_SOUNDS[bgSoundIdx]}</Txt>
-                <NavIcon name="right" color={W.text3} size={14} />
-              </View>
-            }
-          />
-          <Row icon="play" iconColor={W.coral} label="Auto-play voice notes" right={<Toggle value={settings.autoPlay} onChange={v => setSettings({ ...settings, autoPlay: v })} />} />
-          <Row icon="chat" iconColor={W.secondary} label="Show live text during calls" right={<Toggle value={settings.liveCaptions} onChange={v => setSettings({ ...settings, liveCaptions: v })} />} />
         </Section>
 
         <Section title="Memories" accent={W.gold}>
@@ -322,125 +279,13 @@ export function S21_Settings({ go, entitlement, entitlementFailed, onRetryEntitl
             label="Terms of service"
             right={<NavIcon name="right" color={W.text2} size={18} />}
           />
-          <Row label="App version" right={<Txt font="user" style={{ fontSize: 12, color: W.text2 }}>1.0.0 (42)</Txt>} />
+          <Row label="App version" right={<Txt font="user" style={{ fontSize: 12, color: W.text2 }}>{APP_VERSION}</Txt>} />
         </Section>
       </Animated.ScrollView>
 
       {/* Lightweight info sheet for informational rows */}
       {info && <InfoSheet title={info.title} body={info.body} danger={info.danger} onClose={() => setInfo(null)} />}
-      {showTimePicker && (
-        <TimePickerSheet
-          hour={notifHour}
-          minute={notifMinute}
-          onCancel={() => setShowTimePicker(false)}
-          onConfirm={(h, m) => { setNotifHour(h); setNotifMinute(m); setShowTimePicker(false); }}
-        />
-      )}
     </Screen>
-  );
-}
-
-// ─── TimePickerSheet — scrollable hour / minute / AM-PM wheel ─────────────
-function formatTime(h: number, m: number) {
-  const period = h >= 12 ? 'PM' : 'AM';
-  const h12 = ((h + 11) % 12) + 1;
-  return `${h12}:${String(m).padStart(2, '0')} ${period}`;
-}
-
-function TimePickerSheet({ hour, minute, onCancel, onConfirm }: { hour: number; minute: number; onCancel: () => void; onConfirm: (h: number, m: number) => void }) {
-  const initialH12 = ((hour + 11) % 12) + 1;
-  const initialPeriod: 'AM' | 'PM' = hour >= 12 ? 'PM' : 'AM';
-  const [h12, setH12] = useState(initialH12);
-  const [m, setM] = useState(minute);
-  const [period, setPeriod] = useState<'AM' | 'PM'>(initialPeriod);
-
-  const hours = useMemo(() => Array.from({ length: 12 }, (_, i) => i + 1), []);
-  const minutes = useMemo(() => Array.from({ length: 60 }, (_, i) => i), []);
-  const periods: ('AM' | 'PM')[] = ['AM', 'PM'];
-
-  const submit = () => {
-    let h = h12 % 12;
-    if (period === 'PM') h += 12;
-    onConfirm(h, m);
-  };
-
-  const a = useEntrance({ fromTranslateY: 60, durationMs: 380 });
-
-  return (
-    <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(14,10,13,0.6)', zIndex: 60, justifyContent: 'flex-end' }}>
-      <Pressable onPress={onCancel} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-      <Animated.View style={[{ borderTopLeftRadius: 28, borderTopRightRadius: 28, overflow: 'hidden', borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.10)' }, a]}>
-        <LinearGradient colors={['rgba(48,32,40,0.95)', 'rgba(24,16,20,0.95)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-        <BlurView intensity={40} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-        <View style={{ paddingHorizontal: 24, paddingTop: 14, paddingBottom: 28 }}>
-          <View style={{ width: 36, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.18)', alignSelf: 'center', marginBottom: 14 }} />
-          <Txt font="comp" weight={600} style={{ fontSize: 18, color: W.cream, textAlign: 'center', letterSpacing: -0.3 }}>Notification time</Txt>
-          <Txt font="user" style={{ marginTop: 4, fontSize: 12, color: W.text2, textAlign: 'center' }}>{formatTime((period === 'PM' ? (h12 % 12) + 12 : h12 % 12), m)}</Txt>
-
-          <View style={{ marginTop: 16, flexDirection: 'row', justifyContent: 'center', gap: 6, height: 200, alignItems: 'center' }}>
-            <Wheel items={hours.map(v => String(v))} value={String(h12)} onChange={v => setH12(Number(v))} width={70} />
-            <Txt font="comp" weight={600} style={{ fontSize: 22, color: W.text2 }}>:</Txt>
-            <Wheel items={minutes.map(v => String(v).padStart(2, '0'))} value={String(m).padStart(2, '0')} onChange={v => setM(Number(v))} width={70} />
-            <Wheel items={periods} value={period} onChange={v => setPeriod(v as 'AM' | 'PM')} width={64} />
-          </View>
-
-          <View style={{ marginTop: 22, flexDirection: 'row', gap: 10 }}>
-            <Pressable onPress={onCancel} style={{ flex: 1, height: 48, borderRadius: 14, backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', alignItems: 'center', justifyContent: 'center' }}>
-              <Txt font="user" weight={500} style={{ fontSize: 15, color: W.text }}>Cancel</Txt>
-            </Pressable>
-            <Pressable onPress={submit} style={{ flex: 1, height: 48, borderRadius: 14, backgroundColor: W.primary, alignItems: 'center', justifyContent: 'center', shadowColor: W.primary, shadowOpacity: 0.4, shadowRadius: 18, shadowOffset: { width: 0, height: 8 } }}>
-              <Txt font="user" weight={600} style={{ fontSize: 15, color: '#fff' }}>Set time</Txt>
-            </Pressable>
-          </View>
-        </View>
-      </Animated.View>
-    </View>
-  );
-}
-
-// Snap-scroll wheel column. Highlights the center row; snapping picks the value.
-const WHEEL_ITEM_HEIGHT = 40;
-function Wheel({ items, value, onChange, width }: { items: string[]; value: string; onChange: (v: string) => void; width: number }) {
-  const ref = useRef<ScrollView>(null);
-  const initialIdx = Math.max(0, items.indexOf(value));
-
-  useEffect(() => {
-    const id = setTimeout(() => ref.current?.scrollTo({ y: initialIdx * WHEEL_ITEM_HEIGHT, animated: false }), 0);
-    return () => clearTimeout(id);
-  }, []);
-
-  const onMomentumEnd = (e: any) => {
-    const y = e.nativeEvent.contentOffset.y;
-    const idx = Math.max(0, Math.min(items.length - 1, Math.round(y / WHEEL_ITEM_HEIGHT)));
-    const v = items[idx];
-    if (v !== value) onChange(v);
-  };
-
-  return (
-    <View style={{ width, height: 5 * WHEEL_ITEM_HEIGHT, position: 'relative' }}>
-      <View pointerEvents="none" style={{ position: 'absolute', left: 4, right: 4, top: 2 * WHEEL_ITEM_HEIGHT, height: WHEEL_ITEM_HEIGHT, borderRadius: 12, backgroundColor: 'rgba(255,138,118,0.14)', borderWidth: 1, borderColor: 'rgba(255,138,118,0.30)' }} />
-      <ScrollView
-        ref={ref}
-        showsVerticalScrollIndicator={false}
-        snapToInterval={WHEEL_ITEM_HEIGHT}
-        decelerationRate="fast"
-        onMomentumScrollEnd={onMomentumEnd}
-        onScrollEndDrag={onMomentumEnd}
-        contentContainerStyle={{ paddingVertical: 2 * WHEEL_ITEM_HEIGHT }}
-      >
-        {items.map((it) => (
-          <View key={it} style={{ height: WHEEL_ITEM_HEIGHT, alignItems: 'center', justifyContent: 'center' }}>
-            <Txt font="comp" weight={600} style={{ fontSize: 20, color: it === value ? W.text : W.text2, opacity: it === value ? 1 : 0.6 }}>{it}</Txt>
-          </View>
-        ))}
-      </ScrollView>
-      <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, top: 0, height: WHEEL_ITEM_HEIGHT, overflow: 'hidden' }}>
-        <LinearGradient colors={['rgba(24,16,20,1)', 'rgba(24,16,20,0)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-      </View>
-      <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: WHEEL_ITEM_HEIGHT, overflow: 'hidden' }}>
-        <LinearGradient colors={['rgba(24,16,20,0)', 'rgba(24,16,20,1)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-      </View>
-    </View>
   );
 }
 
@@ -1154,26 +999,3 @@ function ModalSheet({ children, zIndex = 40, radius = 24, maxHeightPct = 0.9, so
   );
 }
 
-// Small inline slider (voice speed).
-function MiniSlider({ value, onChange }: { value: number; onChange: (v: number) => void }) {
-  const [width, setWidth] = useState(0);
-  const widthRef = useRef(0);
-  const onLayout = (e: LayoutChangeEvent) => { widthRef.current = e.nativeEvent.layout.width; setWidth(e.nativeEvent.layout.width); };
-  const pan = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: (e) => { const w = widthRef.current; if (w > 0) onChange(Math.max(0, Math.min(1, e.nativeEvent.locationX / w))); },
-      onPanResponderMove: (e) => { const w = widthRef.current; if (w > 0) onChange(Math.max(0, Math.min(1, e.nativeEvent.locationX / w))); },
-    }),
-  ).current;
-  const pct = Math.max(0, Math.min(1, value));
-  return (
-    <View onLayout={onLayout} {...pan.panHandlers} style={{ height: 18, justifyContent: 'center' }}>
-      <View style={{ height: 4, backgroundColor: W.surface2, borderRadius: 2 }}>
-        <View style={{ position: 'absolute', left: 0, top: 0, height: 4, width: `${pct * 100}%`, backgroundColor: W.primary, borderRadius: 2 }} />
-      </View>
-      <View style={{ position: 'absolute', left: Math.max(0, pct * width - 7), top: 2, width: 14, height: 14, borderRadius: 7, backgroundColor: W.primary }} />
-    </View>
-  );
-}

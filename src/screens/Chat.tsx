@@ -21,7 +21,7 @@ import { Orb } from '../components/Orb';
 import { NavIcon, IconName } from '../components/NavIcon';
 import { Txt } from '../components/Txt';
 import { GlassPill, Pill, PrimaryButton, MemoryBadge, MinuteWarningBanner, QuickReply } from '../components/Atoms';
-import { Bubble, BubbleMem, ChatInput, TypingDots, VoiceNoteBubble, CapHitCard, Coachmark, RecallIndicator, DayDivider } from '../components/ChatBits';
+import { Bubble, BubbleMem, ChatInput, TypingDots, CapHitCard, Coachmark, RecallIndicator, DayDivider } from '../components/ChatBits';
 import { Avatar } from '../components/Avatar';
 import { W, GRAD, alpha, rgba } from '../theme/theme';
 import { ARCHETYPE_LABEL, Companion, QUICK_REPLIES } from '../data/config';
@@ -368,16 +368,6 @@ export function S12_VoiceCall({ go, companion, accent = W.primary, orbIntensity 
             <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: W.primary, shadowColor: W.primary, shadowOpacity: 1, shadowRadius: 10, shadowOffset: { width: 0, height: 0 } }} />
             <Txt font="display" weight={600} style={{ fontSize: 24, color: W.cream, letterSpacing: -0.3 }}>{companion.name}</Txt>
           </View>
-          <BlurInCaption text={null} />
-          <View style={{
-            marginTop: 14, flexDirection: 'row', alignItems: 'center', gap: 6,
-            paddingVertical: 5, paddingHorizontal: 12, borderRadius: 13,
-            backgroundColor: 'rgba(255,255,255,0.05)',
-            borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)',
-          }}>
-            <NavIcon name="chat" color={W.text2} size={12} />
-            <Txt font="user" style={{ fontSize: 10.5, color: W.text2 }}>Live captions on</Txt>
-          </View>
         </View>
       )}
 
@@ -479,16 +469,6 @@ function BlurPill({ children }: { children: React.ReactNode }) {
   );
 }
 
-// Caption that blur-fades-in word by word (approximated: per-word fade + slight rise).
-function BlurInCaption({ text }: { text: string | null }) {
-  if (!text) return <View style={{ marginTop: 16, minHeight: 22 }} />;
-  const words = text.split(' ');
-  return (
-    <View style={{ marginTop: 16, minHeight: 22, maxWidth: 280, flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center' }}>
-      {words.map((w, i) => <Word key={`${text}-${i}`} word={w} index={i} />)}
-    </View>
-  );
-}
 function Word({ word, index }: { word: string; index: number }) {
   const v = useRef(new Animated.Value(0)).current;
   useEffect(() => {
@@ -554,45 +534,6 @@ function CallBtn({ icon, onPress, bg, active, size = 52 }: { icon: IconName; onP
   );
 }
 
-// ─── S13 VOICE NOTE — recording sheet ────────────────────────────────────
-function S13_VoiceNote({ onClose, onSend }: { onClose: () => void; onSend: (t: number) => void }) {
-  const [time, setTime] = useState(0);
-  const breathe = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    const t = setInterval(() => setTime(s => s + 1), 1000);
-    Animated.loop(
-      Animated.sequence([
-        Animated.timing(breathe, { toValue: 1, duration: 600, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
-        Animated.timing(breathe, { toValue: 0, duration: 600, easing: Easing.inOut(Easing.ease), useNativeDriver: true }),
-      ]),
-    ).start();
-    return () => clearInterval(t);
-  }, []);
-  const scale = breathe.interpolate({ inputRange: [0, 1], outputRange: [0.95, 1.05] });
-  const entrance = useEntrance({ fromTranslateY: 80, durationMs: 320 });
-  return (
-    <Animated.View
-      style={[entrance, {
-        position: 'absolute', bottom: 64, left: 0, right: 0, zIndex: 20,
-        backgroundColor: W.surface1, borderTopWidth: 1, borderTopColor: W.surface2,
-        borderTopLeftRadius: 16, borderTopRightRadius: 16,
-        paddingVertical: 16, paddingHorizontal: 24,
-        flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-      }]}
-    >
-      <Pressable onPress={onClose} style={{ padding: 6 }}>
-        <NavIcon name="close" color={W.text2} />
-      </Pressable>
-      <Pressable onPress={() => onSend(time)}>
-        <Animated.View style={{ width: 56, height: 56, borderRadius: 28, backgroundColor: W.primary, alignItems: 'center', justifyContent: 'center', transform: [{ scale }] }}>
-          <NavIcon name="mic" color="#fff" />
-        </Animated.View>
-      </Pressable>
-      <Txt font="user" style={{ fontSize: 14, color: W.text }}>{fmt(time)}</Txt>
-    </Animated.View>
-  );
-}
-
 // ─── S14 CHAT ────────────────────────────────────────────────────────────
 
 // Shown only when no backend connection (pure prototype mode)
@@ -637,7 +578,6 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, t
   // nothing left today. Either way the card appears instead of a fake apology.
   const [capRefused, setCapRefused] = useState<{ message?: string; planCap: boolean } | null>(null);
   const capHit = capRefused != null || (textRemainingToday != null && textRemainingToday <= 0);
-  const [recording, setRecording] = useState(false);
   const [typing, setTyping] = useState(false);
   const [showBadge, setShowBadge] = useState(false);
   const [showPhoneTip, setShowPhoneTip] = useState(firstRun);
@@ -936,8 +876,6 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, t
                 // thread reads as exchanges, not an undifferentiated stack.
                 const grouped = i > 0 && msgs[i - 1].from === m.from;
                 const gap = { marginTop: grouped ? 2 : 10 };
-                if (m.from === 'voiceUser' || m.from === 'voiceComp')
-                  return <View key={i} style={gap}><VoiceNoteBubble from={m.from === 'voiceUser' ? 'user' : 'comp'} duration={m.duration} /></View>;
                 // While a streamed reply has no text yet, show the typing indicator
                 // instead of an empty bubble; it swaps to text once tokens arrive.
                 if (m.streaming && !m.text)
@@ -983,12 +921,6 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, t
           </View>
         )}
       </ScrollView>
-      {recording && (
-        <S13_VoiceNote
-          onClose={() => setRecording(false)}
-          onSend={(d) => { setMsgs(m => [...m, { from: 'voiceUser', duration: d || 8 }]); setRecording(false); }}
-        />
-      )}
       {/* Quick replies — only offered when the thread is idle and the user
           hasn't started typing, so they never compete with a live draft. */}
       {!draft.trim() && !typing && !msgs.some(m => m.streaming) ? (
@@ -1003,7 +935,7 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, t
         </ScrollView>
       ) : null}
       {reportTurn && <ReportSheet turnId={reportTurn} onClose={() => setReportTurn(null)} />}
-      <ChatInput draft={draft} setDraft={setDraft} onSend={send} onMic={() => setRecording(true)} companionName={companion.name} />
+      <ChatInput draft={draft} setDraft={setDraft} onSend={send} companionName={companion.name} />
     </Screen>
   );
 }

@@ -1,5 +1,5 @@
 // ChatBits.tsx — shared chat UI: Bubble, BubbleMem (with inline memory refs),
-// ChatInput, TypingDots, VoiceNoteBubble, CapHitCard, Coachmark.
+// ChatInput, TypingDots, CapHitCard, Coachmark.
 // Ported from home.jsx + chat.jsx.
 
 import React, { useEffect, useRef, useState } from 'react';
@@ -217,9 +217,12 @@ export function ChatInput({
       {/* inset top highlight — the capsule catching light */}
       <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, top: 0, height: 1, backgroundColor: 'rgba(255,255,255,0.07)' }} />
 
-      <Pressable onPress={onMic} android_ripple={{ color: alpha(W.primary, '22'), borderless: true }} style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.05)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' }}>
-        <NavIcon name="mic" color={W.text2} size={18} />
-      </Pressable>
+      {/* Only with a real handler: the old voice-note sheet recorded nothing. */}
+      {onMic ? (
+        <Pressable onPress={onMic} android_ripple={{ color: alpha(W.primary, '22'), borderless: true }} style={{ width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.05)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)' }}>
+          <NavIcon name="mic" color={W.text2} size={18} />
+        </Pressable>
+      ) : null}
 
       <Animated.View
         style={{
@@ -331,39 +334,6 @@ export function RecallIndicator() {
         recalling your memories…
       </Txt>
     </Animated.View>
-  );
-}
-
-// ─── VoiceNoteBubble ─────────────────────────────────────────────────────
-export function VoiceNoteBubble({ from, duration = 12 }: { from: string; duration?: number }) {
-  const isUser = from === 'user';
-  const [playing, setPlaying] = useState(false);
-  const color = isUser ? '#C9B4BC' : W.primarySoft;
-  const bars = [4, 6, 10, 16, 12, 8, 14, 20, 16, 10, 18, 14, 8, 12, 16, 22, 14, 10, 16, 8, 6, 4];
-  return (
-  <BubbleEntrance isUser={isUser}>
-    <BubbleSkin isUser={isUser} style={{ maxWidth: 260, paddingVertical: 9, paddingHorizontal: 13, flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-      {/* Play control — always the aurora, on both sides of the thread, so
-          "audio" reads as one affordance regardless of who recorded it. */}
-      <Pressable
-        onPress={() => setPlaying(p => !p)}
-        style={({ pressed }): ViewStyle => ({ width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', overflow: 'hidden', opacity: pressed ? 0.6 : 1, transform: [{ scale: pressed ? 0.94 : 1 }] })}
-      >
-        <LinearGradient
-          colors={[...GRAD.auroraShort]}
-          start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
-          style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }}
-        />
-        <NavIcon name={playing ? 'pause' : 'play'} color="#fff" size={16} />
-      </Pressable>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2, flex: 1 }}>
-        {bars.map((h, i) => (
-          <View key={i} style={{ width: 2, height: h, backgroundColor: color, borderRadius: 1 }} />
-        ))}
-      </View>
-      <Txt font="user" style={{ fontSize: 11, color: W.text2 }}>0:{String(duration).padStart(2, '0')}</Txt>
-    </BubbleSkin>
-  </BubbleEntrance>
   );
 }
 

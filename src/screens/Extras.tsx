@@ -171,7 +171,6 @@ export function S26_CompanionEdit({
       .finally(() => setSuggestionBusy(false));
   };
 
-  const [showAvatarSheet, setShowAvatarSheet] = useState(false);
   const [showDelete, setShowDelete] = useState(false);
   const accent = ARCHETYPE_COLORS[archetype] || W.primary;
 
@@ -216,9 +215,6 @@ export function S26_CompanionEdit({
         {/* Avatar hero */}
         <View style={{ alignItems: 'center', gap: 8, paddingTop: 4 }}>
           <Avatar color={accent} size={96} />
-          <Pressable onPress={() => setShowAvatarSheet(true)} style={{ padding: 6 }}>
-            <Txt font="user" weight={500} style={{ fontSize: 12, color: W.secondary }}>Change avatar</Txt>
-          </Pressable>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
             {editName ? (
               <TextInput value={name} onChangeText={setName} autoFocus onBlur={() => setEditName(false)} onSubmitEditing={() => setEditName(false)}
@@ -316,7 +312,6 @@ export function S26_CompanionEdit({
         </Pressable>
       </ScrollView>
 
-      {showAvatarSheet ? <AvatarSheet onClose={() => setShowAvatarSheet(false)} /> : null}
       {showDelete ? <DeleteConfirm name={name} onCancel={() => setShowDelete(false)} onConfirm={() => { setShowDelete(false); onDelete && onDelete(); go('home'); }} /> : null}
     </Screen>
   );
@@ -422,36 +417,6 @@ function TraitSlider({ value, onChange }: { value: number; onChange: (v: number)
         <LinearGradient colors={[W.primary, W.secondary]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }} style={{ position: 'absolute', left: 0, top: 0, height: '100%', width: `${value * 100}%`, borderRadius: 2 }} />
       </View>
       <View pointerEvents="none" style={{ position: 'absolute', left: Math.max(0, value * w - 8), width: 16, height: 16, borderRadius: 8, backgroundColor: W.primary, shadowColor: W.primary, shadowOpacity: 0.4, shadowRadius: 10, shadowOffset: { width: 0, height: 1 } }} />
-    </View>
-  );
-}
-
-function AvatarSheet({ onClose }: { onClose: () => void }) {
-  // Avatar swatches, re-cut for Ember Dusk: the aurora three, gold, and the
-  // archetype accents.
-  const colors = [W.coral, W.rose, W.violet, W.gold, W.mentor, W.friend, W.partner, W.secondary];
-  return (
-    <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(24,16,20,0.55)', zIndex: 30, justifyContent: 'flex-end' }}>
-      <BlurView intensity={8} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-      <View style={{ width: '100%', borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingHorizontal: 20, paddingTop: 12, paddingBottom: 24, overflow: 'hidden', borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.10)' }}>
-        <LinearGradient colors={['rgba(48,32,40,0.88)', 'rgba(20,13,17,0.80)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-        <BlurView intensity={36} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-        <View style={{ width: 36, height: 4, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 2, alignSelf: 'center', marginBottom: 14 }} />
-        <Txt font="comp" weight={600} style={{ fontSize: 17, color: W.text }}>Change avatar</Txt>
-        <View style={{ marginTop: 16, flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', rowGap: 10 }}>
-          {colors.map((c, i) => (
-            <Pressable key={i} style={{ width: '23%', alignItems: 'center' }}>
-              <Avatar size={56} color={c} breathe={false} />
-            </Pressable>
-          ))}
-        </View>
-        <Pressable onPress={onClose} style={{ marginTop: 18, width: '100%', height: 44, backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', borderRadius: 12, alignItems: 'center', justifyContent: 'center' }}>
-          <Txt font="user" style={{ fontSize: 14, color: W.text }}>Upload from photos…</Txt>
-        </Pressable>
-        <Pressable onPress={onClose} style={{ marginTop: 8, width: '100%', height: 36, alignItems: 'center', justifyContent: 'center' }}>
-          <Txt font="user" style={{ fontSize: 13, color: W.text2 }}>Cancel</Txt>
-        </Pressable>
-      </View>
     </View>
   );
 }

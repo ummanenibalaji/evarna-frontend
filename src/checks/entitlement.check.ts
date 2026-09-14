@@ -68,6 +68,7 @@ check('plus advertises its real allowance', planFeatures(PLUS)[0], '120 voice mi
 check('no card promises a cap nothing enforces', planFeatures(PLUS).includes('Up to 3 companions'), false);
 check('plus advertises its real message cap', planFeatures(PLUS)[1], '1,000 messages a day');
 check('premium advertises its real message cap', planFeatures(PREMIUM)[1], '2,000 messages a day');
+check('no card promises priority responses, which nothing implements', planFeatures(PREMIUM).some((l) => /priority/i.test(l)), false);
 check('no card promises unlimited text over a daily cap', [...planFeatures(PLUS), ...planFeatures(PREMIUM)].some((l) => /unlimited/i.test(l)), false);
 check('monthly price', priceFor(PLUS, false), '$19.99');
 check('an annual plan is priced per month', priceFor(PREMIUM, true), '$24.99');

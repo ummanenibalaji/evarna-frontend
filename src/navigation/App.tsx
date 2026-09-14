@@ -300,6 +300,7 @@ export default function App() {
         if (me.display_name) setUserName(me.display_name);
         setUserEmail(me.email ?? '');
         setIsMinor(!!me.is_minor);
+        setSettings({ dailyCheckin: me.checkins_enabled !== false });
         refreshPushToken();
         if (me.onboarding_completed) {
           refreshUserCharacters();
@@ -534,9 +535,17 @@ export default function App() {
   }, [screen]);
 
   // settings
-  const [settings, setSettings] = useState({
-    dailyCheckin: true, weeklyReflection: true, autoPlay: true, liveCaptions: true,
-  });
+  const [settings, setSettings] = useState({ dailyCheckin: true });
+  // The one setting left is real: the server skips proactive check-ins for
+  // anyone who turns it off. Optimistic, and put back if the save fails, so the
+  // switch never shows a state the server does not have.
+  const saveSettings = (next: { dailyCheckin: boolean }) => {
+    const previous = settings;
+    setSettings(next);
+    if (next.dailyCheckin !== previous.dailyCheckin) {
+      updateMe({ checkins_enabled: next.dailyCheckin }).catch(() => setSettings(previous));
+    }
+  };
 
   // The real, onboarded name — or empty. It used to fall back to "Aria", so
   // anyone whose profile had not loaded yet was greeted by someone else's name.
@@ -877,7 +886,7 @@ export default function App() {
       case 'sandbox-session': return <S20_SandboxSession go={go} mode={sandboxMode || SANDBOX_MODES[0]} />;
       // Settings' only route to 'login' is its Sign out row — intercept it so it
       // actually ends the session instead of just showing the login screen.
-      case 'settings': return <S21_Settings go={(sc) => { if (sc === 'login') signOut(); else go(sc); }} entitlement={entitlement} entitlementFailed={entitlementFailed} onRetryEntitlement={refreshEntitlement} companions={companions} userName={displayName} userEmail={displayEmail} settings={settings} setSettings={setSettings} openCompanionProfile={openCompanionProfile} userId={userId ?? undefined} onDeleteAccount={deleteAccount} />;
+      case 'settings': return <S21_Settings go={(sc) => { if (sc === 'login') signOut(); else go(sc); }} entitlement={entitlement} entitlementFailed={entitlementFailed} onRetryEntitlement={refreshEntitlement} companions={companions} userName={displayName} userEmail={displayEmail} settings={settings} setSettings={saveSettings} openCompanionProfile={openCompanionProfile} userId={userId ?? undefined} onDeleteAccount={deleteAccount} />;
       case 'memories': return <S22_Memories go={go} characterId={activeCharacterId ?? undefined} companionName={currentCompanion.name} />;
       case 'paywall': return <S23_Paywall go={go} trigger={paywallTrigger} backTo={paywallBack} entitlement={entitlement} />;
       case 'topup': return <S24_TopUp go={go} backTo={topupBack} entitlement={entitlement} />;
@@ -902,7 +911,7 @@ export default function App() {
   const renderUnderlay = () => {
     const origin = screen === 'paywall' ? paywallBack : screen === 'topup' ? topupBack : 'home';
     if (origin === 'settings') {
-      return <S21_Settings go={() => {}} entitlement={entitlement} entitlementFailed={entitlementFailed} companions={companions} userName={displayName} userEmail={displayEmail} settings={settings} setSettings={setSettings} openCompanionProfile={() => {}} userId={userId ?? undefined} />;
+      return <S21_Settings go={() => {}} entitlement={entitlement} entitlementFailed={entitlementFailed} companions={companions} userName={displayName} userEmail={displayEmail} settings={settings} setSettings={saveSettings} openCompanionProfile={() => {}} userId={userId ?? undefined} />;
     }
     return renderHome(false);
   };

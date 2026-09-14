@@ -41,6 +41,8 @@ export interface ApiMe {
   onboarding_completed: boolean;
   is_minor: boolean;
   member_since: string;
+  /** Proactive check-ins. Absent from older servers, which always sent them. */
+  checkins_enabled?: boolean;
 }
 
 export const getMe = (): Promise<ApiMe> => apiGet<ApiMe>('/auth/me');
@@ -258,6 +260,7 @@ export interface UpdateMePayload {
   display_name?: string;
   communication_style?: string;
   gender?: string;
+  checkins_enabled?: boolean;
 }
 
 export const updateMe = (p: UpdateMePayload): Promise<unknown> =>

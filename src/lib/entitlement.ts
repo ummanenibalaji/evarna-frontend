@@ -84,7 +84,7 @@ export function planFeatures(p: ApiBillingPlan): string[] {
   // implemented. Derive this from the plan once the backend serves it.
   return p.tier === 'plus'
     ? [`${p.voice_minutes} voice min/mo`, messages, 'All companion types', 'Up to 5 companions', 'Full Studio access']
-    : [`${p.voice_minutes} voice min/mo`, messages, 'Everything in Plus', 'Custom characters', 'Priority responses'];
+    : [`${p.voice_minutes} voice min/mo`, messages, 'Everything in Plus', 'Custom characters'];
 }
 
 export const priceFor = (p: ApiBillingPlan, annual: boolean): string =>
