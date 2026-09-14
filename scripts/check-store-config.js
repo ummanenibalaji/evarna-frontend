@@ -42,6 +42,14 @@ const appGradle = fs.readFileSync('android/app/build.gradle', 'utf8');
 assert.ok(/apply plugin: 'com\.google\.gms\.google-services'/.test(appGradle), 'android/app/build.gradle must apply the Google services plugin (Firebase push)');
 console.log('  ✓ the notification permission and Firebase push wiring are in place');
 
+// Without a microphone foreground service a call goes silent when the screen
+// locks: Android blocks the microphone for background apps.
+const callManifest = fs.readFileSync('modules/call-service/android/src/main/AndroidManifest.xml', 'utf8');
+assert.ok(/android:foregroundServiceType="microphone"/.test(callManifest), 'the call service must be a microphone foreground service');
+assert.ok(callManifest.includes('android.permission.FOREGROUND_SERVICE_MICROPHONE'), 'the call service must declare FOREGROUND_SERVICE_MICROPHONE');
+assert.ok(JSON.parse(fs.readFileSync('package.json', 'utf8')).expo?.autolinking?.nativeModulesDir === './modules', 'package.json must point autolinking at ./modules, or the call service is never built');
+console.log('  ✓ voice calls keep the microphone with the screen locked');
+
 // Background VoIP without VoIP push is a common App Store rejection.
 assert.ok(!/<string>voip<\/string>/.test(plist), 'Info.plist declares the voip background mode again');
 assert.ok(!app.ios.infoPlist.UIBackgroundModes.includes('voip'), 'app.json declares the voip background mode again');

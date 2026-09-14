@@ -20,6 +20,7 @@ function getAudioSession(): {
 import { startVoiceSession, endVoiceSession } from '../api';
 import { limitMessage } from '../api/client';
 import { quotaCode } from '../lib/entitlement';
+import { startCallService, stopCallService } from '../lib/callService';
 import {
   AGENT_JOIN_TIMEOUT_MS,
   decodeAgentState,
@@ -39,6 +40,8 @@ interface UseVoiceCallParams {
   characterId?: string;
   enabled: boolean;
   onEnded?: () => void;
+  /** Shown in Android's ongoing call notification. */
+  callTitle?: string;
 }
 
 interface UseVoiceCallReturn {
@@ -56,7 +59,9 @@ interface UseVoiceCallReturn {
 // "ui" DataChannel topic (falling back to ActiveSpeakersChanged when no hint
 // arrives). Mute hits the real mic; hangUp tears down the Room + audio session.
 export function useVoiceCall(params: UseVoiceCallParams): UseVoiceCallReturn {
-  const { userId, characterId, enabled, onEnded } = params;
+  const { userId, characterId, enabled, onEnded, callTitle } = params;
+  const callTitleRef = useRef(callTitle);
+  callTitleRef.current = callTitle;
 
   const [phase, setPhase] = useState<CallPhase>('connecting');
   const [orbState, setOrbState] = useState<OrbState>('thinking');
@@ -131,6 +136,7 @@ export function useVoiceCall(params: UseVoiceCallParams): UseVoiceCallReturn {
             setPhase('connected');
           })
           .on(RoomEvent.Disconnected, () => {
+            stopCallService();
             if (cancelledRef.current) return;
             setPhase('ended');
             onEndedRef.current?.();
@@ -162,6 +168,9 @@ export function useVoiceCall(params: UseVoiceCallParams): UseVoiceCallReturn {
         await room.connect(res.livekit_url, res.livekit_token);
         if (cancelledRef.current) return;
         await room.localParticipant.setMicrophoneEnabled(true);
+        // Only now: Android allows a microphone service once the mic permission
+        // is granted, and only while the app is on screen.
+        if (!cancelledRef.current) startCallService(callTitleRef.current ?? 'your companion');
       } catch (e) {
         if (cancelledRef.current) return;
 
@@ -208,6 +217,7 @@ export function useVoiceCall(params: UseVoiceCallParams): UseVoiceCallReturn {
 
     return () => {
       cancelledRef.current = true;
+      stopCallService();
       if (agentJoinTimer) clearTimeout(agentJoinTimer);
       const r = roomRef.current;
       roomRef.current = null;
@@ -234,6 +244,7 @@ export function useVoiceCall(params: UseVoiceCallParams): UseVoiceCallReturn {
       try { await r.disconnect(); } catch { /* swallow */ }
     }
     try { await getAudioSession().stopAudioSession(); } catch { /* swallow */ }
+    stopCallService();
     finalizeSession();
     setPhase('ended');
   }, [finalizeSession]);

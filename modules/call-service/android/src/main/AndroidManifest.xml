@@ -1,0 +1,12 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+  <application>
+    <!-- Keeps a voice call's microphone alive with the screen locked. Play
+         Console asks for a foreground service declaration for this type. -->
+    <service
+      android:name="expo.modules.callservice.CallForegroundService"
+      android:exported="false"
+      android:foregroundServiceType="microphone" />
+  </application>
+</manifest>

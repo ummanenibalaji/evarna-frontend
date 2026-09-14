@@ -300,6 +300,7 @@ export function S12_VoiceCall({ go, companion, accent = W.primary, orbIntensity 
     characterId,
     enabled: true,
     onEnded: goHome,
+    callTitle: companion.name,
   });
 
   // Real seconds, not a config enum. This used to be 5 or 1 depending on a
