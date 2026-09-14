@@ -1,4 +1,5 @@
 import { apiGet, apiPost, apiPut, apiPatch, apiDelete } from './client';
+import type { Tier } from '../data/config';
 
 // ── Auth ───────────────────────────────────────────────────────────────────
 
@@ -395,3 +396,74 @@ export type ReportReason = 'harmful' | 'sexual' | 'inappropriate_minor' | 'inacc
 
 export const createReport = (turnId: string, reason: ReportReason, note?: string): Promise<{ report_id: string }> =>
   apiPost('/reports', { turn_id: turnId, reason, ...(note ? { note: note.slice(0, 1000) } : {}) });
+
+// ── Billing ────────────────────────────────────────────────────────────────
+
+/**
+ * What the account is entitled to right now, and what the store sells.
+ *
+ * Mirrors the backend's EntitlementView. Everything the paywall, the top-up
+ * sheet and the stats hero used to hardcode — the plan name, the renewal date,
+ * the remaining balance, the prices — comes from here, so the app and the
+ * server cannot drift apart again.
+ */
+export interface ApiBillingPlan {
+  tier: 'plus' | 'premium';
+  label: string;
+  voice_minutes: number;
+  monthly_usd: number;
+  annual_monthly_usd: number;
+  product_ids: { monthly: string; annual: string };
+}
+
+export interface ApiTopUpPack {
+  id: string;
+  seconds: number;
+  price_usd: number;
+  product_id: string;
+}
+
+export interface ApiEntitlement {
+  tier: Tier;
+  tier_label: string;
+  status: 'none' | 'active' | 'grace' | 'expired' | 'cancelled';
+  platform: 'none' | 'ios' | 'android' | 'dev_grant';
+  auto_renew: boolean;
+  expires_at: string | null;
+  voice: {
+    allowance_seconds: number;
+    /** Bought minutes. Carried by the backend but not yet spendable, so it is
+     *  deliberately NOT added to remaining_seconds anywhere in the app. */
+    topup_seconds: number;
+    used_seconds: number;
+    in_flight_seconds: number;
+    remaining_seconds: number;
+  };
+  text: {
+    daily_cap: number;
+    used_today: number;
+    remaining_today: number;
+    /** ISO instant of the user's next local midnight. */
+    resets_at: string;
+  };
+  period: {
+    start: string;
+    end: string;
+    renews_at: string;
+    /** "subscription" is a real renewal; "signup_anniversary" is a free
+     *  allowance resetting, which is not the same thing and must not say
+     *  "Renews on". */
+    source: 'subscription' | 'signup_anniversary';
+  };
+  plans: ApiBillingPlan[];
+  topup_packs: ApiTopUpPack[];
+  /**
+   * True when the server could not read usage and failed open. The payload then
+   * describes a free account with a full allowance regardless of what the user
+   * actually has — never render it.
+   */
+  degraded: boolean;
+}
+
+export const getEntitlement = (): Promise<ApiEntitlement> =>
+  apiGet<ApiEntitlement>('/billing/entitlement');

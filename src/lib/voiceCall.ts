@@ -16,11 +16,18 @@ export type CallPhase =
 
 export type CallErrorKind =
   | 'mic-permission'
-  | 'token-fetch'
   | 'connect'
   | 'agent-timeout'
   | 'lost'
-  | 'limit';       // refused by a usage ceiling; the message says which
+  /**
+   * The plan is spent: no voice minutes left this period. Retrying cannot fix
+   * it, but buying can — this is the one that opens the paywall.
+   */
+  | 'quota-exhausted'
+  /** A call is already live on this account. Retrying CAN fix this one. */
+  | 'call-in-progress'
+  /** Refused by an abuse ceiling; the server's message says which. */
+  | 'limit';
 
 export interface CallError {
   kind: CallErrorKind;

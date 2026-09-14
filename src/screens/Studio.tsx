@@ -13,9 +13,11 @@ import { NavIcon, IconName } from '../components/NavIcon';
 import { Txt } from '../components/Txt';
 import { Pill, PrimaryButton, Toggle } from '../components/Atoms';
 import { Avatar, Waveform } from '../components/Avatar';
-import { BubbleMem, ChatInput } from '../components/ChatBits';
+import { BubbleMem, CapHitCard, ChatInput } from '../components/ChatBits';
+import { dropRefusedTurn, restoreDraft } from '../lib/chatTurns';
+import { messageLimitOf } from './Chat';
 import { W, alpha } from '../theme/theme';
-import { SCENARIOS, Scenario, Tier, BILLING_LIVE } from '../data/config';
+import { SCENARIOS, Scenario } from '../data/config';
 import {
   ApiGender, ApiMemory, ApiScenario, ApiStudioCharacter, ApiVoice,
   createStudioCharacter, deleteMemory, endSession, getCharacterSessions,
@@ -87,7 +89,6 @@ function VoicePicker({ voices, voiceId, onPick }: { voices: ApiVoice[]; voiceId:
 // ─── S15 STUDIO HOME ─────────────────────────────────────────────────────
 interface StudioHomeProps {
   go: Go;
-  tier: Tier;
   characters: ApiStudioCharacter[];
   setupScenario: (s: Scenario) => void;
   openCreator: () => void;
@@ -98,12 +99,12 @@ interface StudioHomeProps {
 const studioLook = (c: ApiStudioCharacter) =>
   SCENARIOS.find(s => s.id === c.scenario_id) ?? { icon: 'sparkle', accent: W.secondary };
 
-export function S15_StudioHome({ go, tier, characters, setupScenario, openCreator, resumeConvo }: StudioHomeProps) {
-  // Studio is not behind a paywall while there is no paywall. `tier` was
-  // hardcoded to 'plus' app-wide, so this read as unlocked by accident;
-  // making the tier honest would have locked a shipped feature nobody can pay
-  // to unlock. BILLING_LIVE flips both at once when IAP lands.
-  const locked = BILLING_LIVE && tier === 'free';
+export function S15_StudioHome({ go, characters, setupScenario, openCreator, resumeConvo }: StudioHomeProps) {
+  // Studio stays open for every account, deliberately. Entitlement is real now
+  // and says `free` for almost everyone, so gating on it would lock a shipped
+  // feature nobody can buy their way out of — there is no purchase flow yet.
+  // Re-gate here when StoreKit lands.
+  const locked = false;
   // "Continue" is every studio character that has actually been talked to.
   const activeConvos = characters.filter(c => !!c.last_interaction_at);
   const startedScenarios = new Set(characters.map(c => c.scenario_id).filter(Boolean));
@@ -391,11 +392,21 @@ export function S16_ScenarioSetup({ go, scenario, def, apiVoices = [], onStart }
 // on unmount. A studio character is just a character, so the endpoints match.
 type SMsg = { from: string; text: string; streaming?: boolean };
 
-export function S17_StudioSession({ go, scenario, characterId, totalSessions = 0, remember }: {
+export function S17_StudioSession({ go, scenario, characterId, totalSessions = 0, remember, textRemainingToday = null, textDailyCap = null, textResetsAt = null, textUpsell = true, onQuotaRefused, onCapUpgrade }: {
   go: Go; scenario: Scenario; characterId?: string; totalSessions?: number; remember?: boolean;
+  /** Messages left today, or null while unknown. */
+  textRemainingToday?: number | null;
+  textDailyCap?: number | null;
+  textResetsAt?: string | null;
+  /** False on a paid plan: there is nothing left to sell them. */
+  textUpsell?: boolean;
+  onQuotaRefused?: () => void;
+  onCapUpgrade?: () => void;
 }) {
   const [msgs, setMsgs] = useState<SMsg[]>([]);
   const [draft, setDraft] = useState('');
+  const [capRefused, setCapRefused] = useState<{ message?: string; planCap: boolean } | null>(null);
+  const capHit = capRefused != null || (textRemainingToday != null && textRemainingToday <= 0);
   const [showSummary, setShowSummary] = useState(false);
   const [memoryCount, setMemoryCount] = useState<number | null>(null);
   const scrollRef = useRef<ScrollView>(null);
@@ -430,7 +441,17 @@ export function S17_StudioSession({ go, scenario, characterId, totalSessions = 0
         },
         onDone: () => finishStreaming({}),
         onCrisis: () => { finishStreaming({}); go('crisis'); },
-        onError: (e) => {
+        onError: (e, info) => {
+          const limited = messageLimitOf(info);
+          if (limited) {
+            // Same limits as the companion chat, and the same rule: give the
+            // typed line back rather than losing it inside a fake reply.
+            setMsgs(m => dropRefusedTurn(m, text));
+            setDraft(d => restoreDraft(d, text));
+            setCapRefused(limited);
+            onQuotaRefused?.();
+            return;
+          }
           console.warn('[Studio] stream error:', e);
           finishStreaming({ text: "(Couldn't reach the server — please try again.)" });
         },
@@ -506,6 +527,8 @@ export function S17_StudioSession({ go, scenario, characterId, totalSessions = 0
   const send = () => {
     if (!draft.trim() || !characterId) return;
     const text = draft.trim();
+    // A new attempt clears the last refusal — the cap resets at midnight.
+    setCapRefused(null);
     setMsgs(m => [...m, { from: 'user', text }, { from: 'comp', text: '', streaming: true }]);
     setDraft('');
     if (sessionRef.current) runTurn(sessionRef.current, text);
@@ -533,6 +556,17 @@ export function S17_StudioSession({ go, scenario, characterId, totalSessions = 0
         {msgs.map((m, i) => (
           <BubbleMem key={i} from={m.from} text={m.text} accent={scenario.accent} />
         ))}
+        {capHit && (
+          <View style={{ marginTop: 10 }}>
+            <CapHitCard
+              onUpgrade={() => { onCapUpgrade?.(); go('paywall'); }}
+              dailyCap={textDailyCap}
+              resetsAt={textResetsAt}
+              upsell={textUpsell && (capRefused?.planCap ?? true)}
+              message={capRefused?.message ?? null}
+            />
+          </View>
+        )}
       </ScrollView>
       <ChatInput draft={draft} setDraft={setDraft} onSend={send} companionName={scenario.name} />
       {showSummary && (

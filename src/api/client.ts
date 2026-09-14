@@ -24,7 +24,23 @@ let authToken: string | null = null;
 /** Non-2xx that isn't a 401. Carries the backend's `code` so callers can tell
  *  ALREADY_ONBOARDED / UNDER_MINIMUM_AGE apart from a generic failure. */
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number, readonly code?: string, readonly serverMessage?: string) {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly code?: string,
+    /**
+     * The backend's own `error` string — a sentence written for the user. It
+     * used to be parsed and thrown away, which is why `message` (a synthetic
+     * "POST /x → 402 CODE" label) is the only thing screens could show.
+     */
+    readonly serverMessage?: string,
+    /**
+     * Which ceiling refused, when the server named one (usage.service.ts sends
+     * `limit`). Concurrency is the only one a retry can fix, so the call screen
+     * needs to tell it apart from the rest.
+     */
+    readonly limit?: string,
+  ) {
     super(message);
     this.name = 'ApiError';
   }
@@ -58,6 +74,13 @@ export async function loadAuthToken(): Promise<string | null> {
 const authHeaders = (): Record<string, string> =>
   authToken ? { Authorization: `Bearer ${authToken}` } : {};
 
+interface RefusalBody {
+  error?: string;
+  code?: string;
+  /** Set by the usage ceilings: which one was hit. */
+  limit?: string;
+}
+
 // 401 → the token is dead; drop it so nothing retries with it. Anything else
 // non-2xx surfaces the backend's error code alongside the status.
 async function assertOk(res: Response, label: string) {
@@ -66,8 +89,14 @@ async function assertOk(res: Response, label: string) {
     setAuthToken(null);
     throw new AuthExpiredError(`${label} → 401`);
   }
-  const body = (await res.json().catch(() => null)) as { error?: string; code?: string } | null;
-  throw new ApiError(`${label} → ${res.status}${body?.code ? ` ${body.code}` : ''}`, res.status, body?.code, body?.error);
+  const body = (await res.json().catch(() => null)) as RefusalBody | null;
+  throw new ApiError(
+    `${label} → ${res.status}${body?.code ? ` ${body.code}` : ''}`,
+    res.status,
+    body?.code,
+    body?.error,
+    body?.limit,
+  );
 }
 
 export async function apiGet<T>(path: string): Promise<T> {
@@ -134,11 +163,27 @@ export function limitMessage(e: unknown): string | null {
   return null;
 }
 
+/**
+ * Detail about a failed turn, as a second argument rather than a new handler so
+ * the existing `(err) => …` implementations keep compiling: they simply ignore
+ * it. The message string still carries the LIMIT: prefix above, so a caller can
+ * use either — `limitMessage()` for wording, this for the code a screen needs
+ * to branch on (the plan cap opens the paywall; an abuse ceiling does not).
+ */
+export interface SseErrorInfo {
+  status?: number;
+  code?: string;
+  /** The backend's user-facing sentence, when it sent one. */
+  serverMessage?: string;
+  /** Which usage ceiling refused, when the server named one. */
+  limit?: string;
+}
+
 export interface SseHandlers {
   onChunk: (content: string) => void;
   onDone: (turnId: string) => void;
   onCrisis: (content: string) => void;
-  onError: (message: string) => void;
+  onError: (message: string, info?: SseErrorInfo) => void;
 }
 
 /**
@@ -180,9 +225,20 @@ export function streamConversation(
     // (handlers only take strings). Widen SseHandlers if chat needs to auto-route to login.
     if (res.status === 401) { setAuthToken(null); handlers.onError('UNAUTHENTICATED'); return; }
     if (!res.ok) {
-      // A limit is refused as JSON before the stream starts; pass its wording on.
-      const body = (await res.json().catch(() => null)) as { error?: string; code?: string } | null;
-      handlers.onError(body?.code && LIMIT_CODES.has(body.code) && body.error ? `${LIMIT_PREFIX}${body.error}` : `HTTP ${res.status}`);
+      // The body used to be dropped entirely, so a refusal the server had
+      // explained in words reached the screen as "HTTP 429" and was rendered as
+      // a message from the companion. Both forms go out now: the prefixed
+      // wording for callers that only take a string, and the code alongside it.
+      const body = (await res.json().catch(() => null)) as RefusalBody | null;
+      const worded = body?.code && LIMIT_CODES.has(body.code) && body.error
+        ? `${LIMIT_PREFIX}${body.error}`
+        : `HTTP ${res.status}`;
+      handlers.onError(worded, {
+        status: res.status,
+        ...(body?.code ? { code: body.code } : {}),
+        ...(body?.error ? { serverMessage: body.error } : {}),
+        ...(body?.limit ? { limit: body.limit } : {}),
+      });
       return;
     }
 

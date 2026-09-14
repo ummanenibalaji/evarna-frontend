@@ -15,15 +15,17 @@ import Svg, { Path, Circle, Defs, LinearGradient as SvgLinearGradient, Stop } fr
 import { Screen, TopBar } from '../components/Chrome';
 import { NavIcon, IconName } from '../components/NavIcon';
 import { Txt } from '../components/Txt';
-import { Card, Toggle, PrimaryButton } from '../components/Atoms';
+import { Card, Toggle, PrimaryButton, MeterBar } from '../components/Atoms';
 import { useEntrance, usePressScale, useCountUp } from '../theme/animations';
 import { W, GRAD, alpha, rgba } from '../theme/theme';
-import { ARCHETYPE_COLORS, ARCHETYPE_LABEL, MEM_TYPES, Companion, Tier, Memory, BILLING_LIVE } from '../data/config';
+// BILLING_LIVE is gone: the tier now comes from the entitlement, not a constant.
+import { ARCHETYPE_COLORS, ARCHETYPE_LABEL, MEM_TYPES, Companion, Tier, Memory } from '../data/config';
+import { Go, PaywallTrigger, ScreenName } from '../navigation/types';
+import { getMemories, deleteMemory, deleteAllMemories, ApiMemory, getUserStats, ApiUserStats, getActivity, ApiActivity, exportMyData, ApiEntitlement } from '../api';
+import { balanceLine, formatBalance, formatResetDate, minutesFrom, planFeatures, priceFor, resetLabel } from '../lib/entitlement';
 
 const PRIVACY_URL = process.env.EXPO_PUBLIC_PRIVACY_URL || undefined;
 const TERMS_URL = process.env.EXPO_PUBLIC_TERMS_URL || undefined;
-import { Go, ScreenName } from '../navigation/types';
-import { getMemories, deleteMemory, deleteAllMemories, ApiMemory, getUserStats, ApiUserStats, getActivity, ApiActivity, exportMyData } from '../api';
 
 export interface AppSettings {
   dailyCheckin: boolean;
@@ -35,7 +37,14 @@ export interface AppSettings {
 // ─── S21 SETTINGS ────────────────────────────────────────────────────────
 interface SettingsProps {
   go: Go;
-  tier: Tier;
+  /**
+   * What the account is entitled to, or null while it is still loading. Null
+   * and `entitlementFailed` are different states and must look different:
+   * "we could not read your plan" must never render as "you are on Free".
+   */
+  entitlement?: ApiEntitlement | null;
+  entitlementFailed?: boolean;
+  onRetryEntitlement?: () => void;
   companions: Companion[];
   userName: string;
   userEmail: string;
@@ -47,7 +56,15 @@ interface SettingsProps {
   onDeleteAccount?: () => void | Promise<void>;
 }
 
-export function S21_Settings({ go, tier, companions, userName, userEmail, settings, setSettings, openCompanionProfile, userId, onDeleteAccount }: SettingsProps) {
+export function S21_Settings({ go, entitlement, entitlementFailed, onRetryEntitlement, companions, userName, userEmail, settings, setSettings, openCompanionProfile, userId, onDeleteAccount }: SettingsProps) {
+  const tier: Tier = entitlement?.tier ?? 'free';
+  // Three states, three renderings: known, still loading, and failed. Failure
+  // must not borrow Free's appearance — being told you are on Free reads as a
+  // downgrade, not as a network problem.
+  const planLabel = entitlement ? entitlement.tier_label : entitlementFailed ? "Couldn't load" : '—';
+  const tierBg = !entitlement || tier === 'free' ? W.surface2 : tier === 'plus' ? W.primary : W.accent;
+  const tierFg = entitlement && tier === 'plus' ? '#fff' : entitlement && tier === 'premium' ? W.bg : W.text2;
+
   const [voiceSpeed, setVoiceSpeed] = useState(1.0);
   const [userStats, setUserStats] = useState<ApiUserStats | null>(null);
   const [activity, setActivity] = useState<ApiActivity | null>(null);
@@ -114,7 +131,9 @@ export function S21_Settings({ go, tier, companions, userName, userEmail, settin
           <View style={{ flex: 1 }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
               <Txt font="user" weight={600} style={{ fontSize: 15, color: W.cream }}>{userName.trim() || 'Your profile'}</Txt>
-              {BILLING_LIVE && tier !== 'free' ? (
+              {/* Only for a plan that is actually in force. It used to be
+                  suppressed entirely because `tier` was a constant. */}
+              {entitlement && tier !== 'free' ? (
                 <View style={{ borderRadius: 9, overflow: 'hidden', paddingVertical: 2, paddingHorizontal: 9 }}>
                   <LinearGradient colors={[...GRAD.auroraShort]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
                   <Txt font="user" weight={700} style={{ fontSize: 9.5, color: '#fff', letterSpacing: 1 }}>{tier.toUpperCase()}</Txt>
@@ -148,6 +167,7 @@ export function S21_Settings({ go, tier, companions, userName, userEmail, settin
           deltaMinutes={
             activity ? activity.week_total_minutes - activity.prev_week_total_minutes : null
           }
+          voice={entitlement ? entitlement.voice : null}
         />
 
         <Section title="My companions">
@@ -239,21 +259,29 @@ export function S21_Settings({ go, tier, companions, userName, userEmail, settin
 
         <Section title="Subscription">
           <Row
-            onPress={() => go('paywall')}
+            onPress={() => (entitlementFailed ? onRetryEntitlement?.() : go('paywall'))}
             label={
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                 <Txt font="user" style={{ fontSize: 14, color: W.text }}>Current plan</Txt>
-                <View style={{ paddingVertical: 2, paddingHorizontal: 10, borderRadius: 8, backgroundColor: !BILLING_LIVE || tier === 'free' ? W.surface2 : tier === 'plus' ? W.primary : W.accent }}>
-                  {/* "Early access" rather than a plan name, because nobody has
-                      been sold one yet. */}
-                  <Txt font="user" weight={600} style={{ fontSize: 11, color: BILLING_LIVE && tier === 'plus' ? '#fff' : BILLING_LIVE && tier === 'premium' ? W.bg : W.text2, textTransform: 'capitalize' }}>{BILLING_LIVE ? tier : 'Early access'}</Txt>
+                <View style={{ paddingVertical: 2, paddingHorizontal: 10, borderRadius: 8, backgroundColor: tierBg }}>
+                  {/* The real plan, or an honest placeholder. "Early access"
+                      used to render for every account because there was no
+                      entitlement to read. */}
+                  <Txt font="user" weight={600} style={{ fontSize: 11, color: tierFg }}>{planLabel}</Txt>
                 </View>
               </View>
             }
             right={<NavIcon name="right" color={W.text2} size={18} />}
           />
           <Row onPress={() => go('topup')} label="Buy voice minutes" right={<NavIcon name="right" color={W.text2} size={18} />} />
-          <Row label="Renews on" right={<Txt font="user" style={{ fontSize: 13, color: W.text2 }}>June 1, 2026</Txt>} />
+          {/* Hidden until it is known. A date is worse than no date if it is
+              invented — this row read "June 1, 2026" for every account. */}
+          {entitlement && formatResetDate(entitlement.period.renews_at) ? (
+            <Row
+              label={resetLabel(entitlement)}
+              right={<Txt font="user" style={{ fontSize: 13, color: W.text2 }}>{formatResetDate(entitlement.period.renews_at)}</Txt>}
+            />
+          ) : null}
         </Section>
 
         <Section title="Privacy & safety">
@@ -534,12 +562,14 @@ function InfoSheet({ title, body, onClose, danger }: { title: string; body: stri
 // conic-style arc in the app: an aurora sweep whose length *is* the progress
 // toward the personal best.
 function StatsHero({
-  streak, bestStreak, talkTimeMinutes, weekMinutes, deltaMinutes,
+  streak, bestStreak, talkTimeMinutes, weekMinutes, deltaMinutes, voice,
 }: {
   streak: number; bestStreak: number; talkTimeMinutes: number;
   /** Seven real daily totals, or null while unknown. */
   weekMinutes: number[] | null;
   deltaMinutes: number | null;
+  /** This period's voice balance, or null until the entitlement is known. */
+  voice: { allowance_seconds: number; used_seconds: number; remaining_seconds: number } | null;
 }) {
   const streakN = useCountUp(streak, 1100, 200);
   const talkN = useCountUp(talkTimeMinutes, 1500, 300);
@@ -579,9 +609,9 @@ function StatsHero({
 
         <View style={{ height: 1, backgroundColor: 'rgba(255,255,255,0.06)' }} />
 
-        {/* The "87 / 120 min" voice allowance that sat here was fiction: there
-            is no entitlement on the account and no way to buy one. It comes
-            back with the IAP lane, reading a real remaining balance. */}
+        {/* The "87 / 120 min" that sat here was fiction — there was no
+            entitlement to read. This is the real balance for this period, and
+            it stays absent rather than guessing while it is unknown. */}
         <View style={{ flexDirection: 'row', gap: 14 }}>
           <View style={{ flex: 1, gap: 7 }}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
@@ -604,6 +634,20 @@ function StatsHero({
               </Txt>
             )}
           </View>
+
+          {voice ? (
+            <View style={{ flex: 1, gap: 7 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: W.primary, shadowColor: W.primary, shadowOpacity: 0.9, shadowRadius: 6, shadowOffset: { width: 0, height: 0 } }} />
+                <Txt font="user" weight={600} style={{ fontSize: 10, color: W.text2, letterSpacing: 1.2, textTransform: 'uppercase' }}>Voice left</Txt>
+              </View>
+              <View style={{ flexDirection: 'row', alignItems: 'baseline', gap: 4 }}>
+                <Txt font="display" weight={700} style={{ fontSize: 26, color: voice.remaining_seconds <= 0 ? W.challenger : W.cream, letterSpacing: -0.8 }}>{formatBalance(voice.remaining_seconds)}</Txt>
+              </View>
+              <MeterBar pct={voice.allowance_seconds > 0 ? voice.remaining_seconds / voice.allowance_seconds : 0} />
+              <Txt font="user" style={{ fontSize: 11, color: W.text2 }}>of {minutesFrom(voice.allowance_seconds)} min this month</Txt>
+            </View>
+          ) : null}
         </View>
       </View>
     </View>
@@ -875,16 +919,26 @@ export function S22_Memories({ go, characterId, companionName }: { go: Go; chara
 }
 
 // ─── S23 PAYWALL ─────────────────────────────────────────────────────────
-const PAYWALL_HEADERS: Record<string, string> = {
+/** One honest line wherever a purchase button sits. StoreKit is the next step;
+ *  until it lands a tap cannot complete, so nothing pretends it can. */
+const PURCHASES_NOT_LIVE = "Purchases aren't live yet — they arrive with the next update.";
+
+const PAYWALL_HEADERS: Record<PaywallTrigger, string> = {
   voice: 'Unlock your voice connection',
   cap: 'Continue the conversation',
   more: 'Add more companions',
   studio: 'Practice makes perfect',
 };
 
-export function S23_Paywall({ go, trigger = 'voice', backTo = 'home' }: { go: Go; trigger?: string; currentTier?: Tier; backTo?: ScreenName }) {
+export function S23_Paywall({ go, trigger = 'voice', backTo = 'home', entitlement }: { go: Go; trigger?: PaywallTrigger; backTo?: ScreenName; entitlement?: ApiEntitlement | null }) {
   const [annual, setAnnual] = useState(true);
   const [picked, setPicked] = useState<'plus' | 'premium'>('premium');
+  // The catalog is served, not shipped, so there is nothing to fall back to:
+  // when it has not arrived the sheet says so rather than rendering a blank
+  // price list, which would be a worse regression than the wrong prices it
+  // replaced.
+  const plans = entitlement?.plans ?? [];
+  const pickedPlan = plans.find(p => p.tier === picked);
 
   return (
     <ModalSheet zIndex={40} radius={28} maxHeightPct={0.92} onClose={() => go(backTo)}>
@@ -898,7 +952,7 @@ export function S23_Paywall({ go, trigger = 'voice', backTo = 'home' }: { go: Go
         </Pressable>
       </View>
       <View style={{ height: 10 }} />
-      <Txt font="comp" weight={700} style={{ fontSize: 22, color: W.text, textAlign: 'center' }}>{PAYWALL_HEADERS[trigger] || 'Upgrade Whisper'}</Txt>
+      <Txt font="comp" weight={700} style={{ fontSize: 22, color: W.text, textAlign: 'center' }}>{PAYWALL_HEADERS[trigger] ?? 'Upgrade Whisper'}</Txt>
       <Txt font="user" style={{ marginTop: 8, fontSize: 14, color: W.text2, textAlign: 'center' }}>Start with a 7-day free trial. Cancel anytime.</Txt>
 
       <View style={{ marginTop: 20, alignItems: 'center' }}>
@@ -913,20 +967,54 @@ export function S23_Paywall({ go, trigger = 'voice', backTo = 'home' }: { go: Go
         </View>
       </View>
 
+      {/* Generated from the server's catalog, not typed here. Hand-written copy
+          is how this card came to advertise "500 voice min/mo" for a tier that
+          allows 400. */}
+      {plans.length === 0 ? (
+        <View style={{ marginTop: 24, alignItems: 'center', gap: 10 }}>
+          <Txt font="user" style={{ fontSize: 13, color: W.text2, textAlign: 'center' }}>
+            Couldn't load the plans just now.
+          </Txt>
+          <Pressable onPress={() => go(backTo)} style={{ paddingVertical: 8, paddingHorizontal: 16, borderRadius: 12, backgroundColor: W.surface2 }}>
+            <Txt font="user" weight={500} style={{ fontSize: 13, color: W.text }}>Close</Txt>
+          </Pressable>
+        </View>
+      ) : (
       <View style={{ marginTop: 20, flexDirection: 'row', gap: 10 }}>
-        <PlanCard tier="plus" accent={W.primary} secondary={W.secondary} annual={annual} price={annual ? '$12.49' : '$19.99'} features={['120 voice min/mo', 'Unlimited text', 'All companion types', 'Up to 3 companions', 'Full Studio access']} picked={picked === 'plus'} onPick={() => setPicked('plus')} />
-        <PlanCard tier="premium" accent={W.accent} secondary={W.primary} annual={annual} price={annual ? '$24.99' : '$39.99'} bestValue features={['500 voice min/mo', 'Everything in Plus', 'Up to 5 companions', 'Custom characters', 'Priority responses']} picked={picked === 'premium'} onPick={() => setPicked('premium')} />
+        {plans.map(p => (
+          <PlanCard
+            key={p.tier}
+            tier={p.label}
+            accent={p.tier === 'plus' ? W.primary : W.accent}
+            secondary={p.tier === 'plus' ? W.secondary : W.primary}
+            annual={annual}
+            price={priceFor(p, annual)}
+            features={planFeatures(p)}
+            bestValue={p.tier === 'premium'}
+            picked={picked === p.tier}
+            onPick={() => setPicked(p.tier)}
+          />
+        ))}
       </View>
+      )}
 
-      <Pressable onPress={() => go(backTo)} style={{ marginTop: 20, width: '100%', height: 48, backgroundColor: W.primary, borderRadius: 14, alignItems: 'center', justifyContent: 'center', shadowColor: W.primary, shadowOpacity: 0.4, shadowRadius: 28, shadowOffset: { width: 0, height: 8 } }}>
+      {/* Disabled rather than dismissive. Both of these used to close the sheet
+          and do nothing, which reads as a purchase that silently failed. There
+          is no StoreKit yet, and saying so is better than pretending. */}
+      {plans.length > 0 ? (
+      <>
+      <View style={{ marginTop: 20, width: '100%', height: 48, backgroundColor: W.primary, borderRadius: 14, alignItems: 'center', justifyContent: 'center', opacity: 0.45 }}>
         <Txt font="user" weight={500} style={{ fontSize: 15, color: '#fff' }}>Start free trial</Txt>
-      </Pressable>
-      <Pressable onPress={() => go(backTo)} style={{ marginTop: 6, width: '100%', height: 36, alignItems: 'center', justifyContent: 'center' }}>
+      </View>
+      <View style={{ marginTop: 6, width: '100%', height: 36, alignItems: 'center', justifyContent: 'center', opacity: 0.45 }}>
         <Txt font="user" style={{ fontSize: 12, color: W.text2 }}>Restore purchase</Txt>
-      </Pressable>
+      </View>
+      <Txt font="user" style={{ marginTop: 8, fontSize: 11, color: W.accent, textAlign: 'center' }}>{PURCHASES_NOT_LIVE}</Txt>
       <Txt font="user" style={{ marginTop: 6, fontSize: 11, color: W.text3, textAlign: 'center', lineHeight: 16 }}>
-        7-day free trial, then {annual ? '$12.49' : '$19.99'}/month. Cancel anytime in App Store settings.
+        7-day free trial, then {pickedPlan ? priceFor(pickedPlan, annual) : '—'}/month. Cancel anytime in App Store settings.
       </Txt>
+      </>
+      ) : null}
     </ModalSheet>
   );
 }
@@ -968,13 +1056,21 @@ function PlanCard({ tier, accent, secondary, annual, price, features, bestValue,
 }
 
 // ─── S24 VOICE TOP-UP ────────────────────────────────────────────────────
-export function S24_TopUp({ go, backTo = 'home' }: { go: Go; backTo?: ScreenName }) {
+export function S24_TopUp({ go, backTo = 'home', entitlement }: { go: Go; backTo?: ScreenName; entitlement?: ApiEntitlement | null }) {
   const [autoTopUp, setAutoTopUp] = useState(false);
-  const packs: { min: number; price: string; badge: string | null; accent?: string }[] = [
-    { min: 30, price: '$4.99', badge: null },
-    { min: 75, price: '$9.99', badge: 'Most popular', accent: W.primary },
-    { min: 150, price: '$14.99', badge: 'Best value', accent: W.accent },
-  ];
+  // Packs come from the server so a price can only be wrong in one place. The
+  // badges stay local: "Most popular" is a merchandising choice, not data.
+  const BADGES: Record<number, { badge: string; accent: string }> = {
+    75: { badge: 'Most popular', accent: W.primary },
+    150: { badge: 'Best value', accent: W.accent },
+  };
+  const packs = (entitlement?.topup_packs ?? []).map(p => ({
+    id: p.id,
+    min: Math.round(p.seconds / 60),
+    price: `$${p.price_usd.toFixed(2)}`,
+    ...(BADGES[Math.round(p.seconds / 60)] ?? { badge: null as string | null, accent: undefined as string | undefined }),
+  }));
+  const balance = entitlement ? balanceLine(entitlement) : null;
   return (
     <ModalSheet zIndex={40} radius={24} maxHeightPct={0.85} solid backdrop={alpha(W.bg, 'd9')} onClose={() => go(backTo)}>
       <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
@@ -987,21 +1083,32 @@ export function S24_TopUp({ go, backTo = 'home' }: { go: Go; backTo?: ScreenName
         </Pressable>
       </View>
       <Txt font="comp" weight={700} style={{ fontSize: 20, color: W.text }}>Add voice minutes</Txt>
-      <View style={{ marginTop: 6, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-        <Txt font="user" style={{ fontSize: 13, color: W.challenger }}>⚠ You have 12 minutes remaining</Txt>
-      </View>
+      {/* The real balance. This line said "12 minutes remaining" to every
+          account, including one with a full allowance and one with none. */}
+      {balance ? (
+        <View style={{ marginTop: 6, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+          <Txt font="user" style={{ fontSize: 13, color: balance.urgent ? W.challenger : W.text2 }}>{balance.text}</Txt>
+        </View>
+      ) : null}
+      {packs.length === 0 ? (
+        <Txt font="user" style={{ marginTop: 20, fontSize: 13, color: W.text2 }}>
+          Couldn't load the minute packs just now.
+        </Txt>
+      ) : null}
       <View style={{ marginTop: 20, gap: 8 }}>
         {packs.map(p => (
-          <Pressable key={p.min} style={{ backgroundColor: W.surface2, borderRadius: 12, padding: 14, borderTopWidth: 2, borderTopColor: p.accent || 'transparent', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+          <View key={p.id} style={{ backgroundColor: W.surface2, borderRadius: 12, padding: 14, borderTopWidth: 2, borderTopColor: p.accent || 'transparent', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', opacity: 0.45 }}>
             <View style={{ gap: 2, alignItems: 'flex-start' }}>
               <Txt font="comp" weight={600} style={{ fontSize: 16, color: W.text }}>{p.min} minutes</Txt>
               {p.badge && <Txt font="user" weight={600} style={{ fontSize: 10, color: p.accent }}>{p.badge}</Txt>}
             </View>
             <Txt font="user" weight={600} style={{ fontSize: 16, color: W.text }}>{p.price}</Txt>
-          </Pressable>
+          </View>
         ))}
       </View>
-      <View style={{ marginTop: 20, backgroundColor: W.surface2, borderRadius: 12, padding: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
+      <Txt font="user" style={{ marginTop: 10, fontSize: 11, color: W.accent }}>{PURCHASES_NOT_LIVE}</Txt>
+      {/* Dimmed with the packs: it promises a charge that nothing can make. */}
+      <View style={{ marginTop: 20, backgroundColor: W.surface2, borderRadius: 12, padding: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, opacity: 0.45 }}>
         <View style={{ flex: 1 }}>
           <Txt font="user" style={{ fontSize: 13, color: W.text }}>Auto top-up 30 min when low</Txt>
           <Txt font="user" style={{ marginTop: 2, fontSize: 11, color: W.text2 }}>Charges $4.99 when balance drops below 10 min.</Txt>

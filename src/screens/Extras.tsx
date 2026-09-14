@@ -499,7 +499,9 @@ function Sheet({ children, onClose }: { children: React.ReactNode; onClose?: () 
 }
 
 // State B — depleted mid-call
-export function S27_Depleted({ onTopUp, onText, resetDate = 'June 1' }: { onTopUp: () => void; onText: () => void; resetDate?: string }) {
+export function S27_Depleted({ onTopUp, onText, resetDate }: { onTopUp: () => void; onText: () => void;
+  /** Unused until the backend can end a call mid-way; no invented default. */
+  resetDate?: string }) {
   return (
     <Sheet>
       <View style={{ paddingHorizontal: 24, paddingTop: 12, paddingBottom: 28 }}>
@@ -514,7 +516,9 @@ export function S27_Depleted({ onTopUp, onText, resetDate = 'June 1' }: { onTopU
             <Txt font="user" weight={500} style={{ fontSize: 15, color: W.text }}>Continue in text</Txt>
           </Pressable>
         </View>
-        <Txt font="user" style={{ marginTop: 14, fontSize: 11, color: W.text3, textAlign: 'center' }}>Your minutes reset on {resetDate}.</Txt>
+        {resetDate ? (
+          <Txt font="user" style={{ marginTop: 14, fontSize: 11, color: W.text3, textAlign: 'center' }}>Your minutes reset on {resetDate}.</Txt>
+        ) : null}
       </View>
     </Sheet>
   );
@@ -522,8 +526,11 @@ export function S27_Depleted({ onTopUp, onText, resetDate = 'June 1' }: { onTopU
 
 // State C — already depleted, trying to start a call
 export function S27_StartCallDepleted({
-  companion, onTopUp, onUpgrade, onText, onClose, resetDate = 'June 1',
-}: { companion: Companion; onTopUp: () => void; onUpgrade: () => void; onText: () => void; onClose: () => void; resetDate?: string }) {
+  companion, onTopUp, onUpgrade, onText, onClose, resetDate,
+}: { companion: Companion; onTopUp: () => void; onUpgrade: () => void; onText: () => void; onClose: () => void;
+  /** When the allowance comes back, in the reader's own timezone. Omitted
+   *  while unknown — this used to default to "June 1" and say it out loud. */
+  resetDate?: string }) {
   return (
     <Sheet onClose={onClose}>
       <View style={{ paddingHorizontal: 24, paddingTop: 12, paddingBottom: 28 }}>
@@ -546,7 +553,9 @@ export function S27_StartCallDepleted({
             <Txt font="user" style={{ fontSize: 13, color: W.text2 }}>Text instead</Txt>
           </Pressable>
         </View>
-        <Txt font="user" style={{ marginTop: 8, fontSize: 11, color: W.text3, textAlign: 'center' }}>Minutes reset {resetDate}.</Txt>
+        {resetDate ? (
+          <Txt font="user" style={{ marginTop: 8, fontSize: 11, color: W.text3, textAlign: 'center' }}>Minutes reset {resetDate}.</Txt>
+        ) : null}
       </View>
     </Sheet>
   );

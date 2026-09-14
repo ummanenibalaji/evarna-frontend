@@ -19,6 +19,7 @@ function getAudioSession(): {
 }
 import { startVoiceSession, endVoiceSession } from '../api';
 import { limitMessage } from '../api/client';
+import { quotaCode } from '../lib/entitlement';
 import {
   AGENT_JOIN_TIMEOUT_MS,
   decodeAgentState,
@@ -26,6 +27,12 @@ import {
   type CallPhase,
   type OrbState,
 } from '../lib/voiceCall';
+
+/** The backend's user-facing sentence, when it sent one. */
+const serverMessageOf = (e: unknown): string | undefined => {
+  const m = (e as { serverMessage?: unknown } | null)?.serverMessage;
+  return typeof m === 'string' && m.length > 0 ? m : undefined;
+};
 
 interface UseVoiceCallParams {
   userId?: string;
@@ -157,12 +164,34 @@ export function useVoiceCall(params: UseVoiceCallParams): UseVoiceCallReturn {
         await room.localParticipant.setMicrophoneEnabled(true);
       } catch (e) {
         if (cancelledRef.current) return;
-        const limit = limitMessage(e);
-        if (limit) {
-          setError({ kind: 'limit', message: limit });
+
+        // The server's own refusals first. This catch covers five awaits, and
+        // classifying by message alone sent a 402 "you have no minutes left"
+        // down the network-error path — the user was told to check their
+        // connection and offered a retry that could only fail again.
+        //
+        // Two layers, because they need different offers. The plan being spent
+        // is worth a Top up; an abuse ceiling is not — no purchase lifts it.
+        if (quotaCode(e) === 'VOICE_MINUTES_EXHAUSTED') {
+          setError({
+            kind: 'quota-exhausted',
+            message: serverMessageOf(e) ?? "You've used all your voice minutes for this month.",
+          });
           setPhase('error');
           return;
         }
+
+        const limit = limitMessage(e);
+        if (limit) {
+          // Concurrency is the one ceiling a retry fixes, so it gets its own
+          // kind and keeps the Try again button. usage.service.ts owns the rule
+          // and names it in `limit`.
+          const concurrent = (e as { limit?: unknown } | null)?.limit === 'concurrent_calls';
+          setError({ kind: concurrent ? 'call-in-progress' : 'limit', message: limit });
+          setPhase('error');
+          return;
+        }
+
         const msg = e instanceof Error ? e.message : String(e);
         // Mic permission errors typically come from setMicrophoneEnabled or
         // AudioSession; everything else is more likely token/network/connect.
