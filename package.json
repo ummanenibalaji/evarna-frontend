@@ -9,7 +9,8 @@
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
     "check:store": "node scripts/check-store-config.js",
-    "check:entitlement": "tsx src/checks/entitlement.check.ts"
+    "check:entitlement": "tsx src/checks/entitlement.check.ts",
+    "check:ai-notice": "tsx src/checks/aiNotice.check.ts"
   },
   "dependencies": {
     "@config-plugins/react-native-webrtc": "^13.0.0",

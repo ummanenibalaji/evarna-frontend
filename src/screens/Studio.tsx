@@ -13,7 +13,8 @@ import { NavIcon, IconName } from '../components/NavIcon';
 import { Txt } from '../components/Txt';
 import { Pill, PrimaryButton, Toggle } from '../components/Atoms';
 import { Avatar, Waveform } from '../components/Avatar';
-import { BubbleMem, CapHitCard, ChatInput } from '../components/ChatBits';
+import { AiNotice, useAiNoticeRepeat, BubbleMem, CapHitCard, ChatInput } from '../components/ChatBits';
+import { aiNoticeText } from '../lib/aiNotice';
 import { dropRefusedTurn, restoreDraft } from '../lib/chatTurns';
 import { messageLimitOf } from './Chat';
 import { W, alpha } from '../theme/theme';
@@ -392,8 +393,10 @@ export function S16_ScenarioSetup({ go, scenario, def, apiVoices = [], onStart }
 // on unmount. A studio character is just a character, so the endpoints match.
 type SMsg = { from: string; text: string; streaming?: boolean };
 
-export function S17_StudioSession({ go, scenario, characterId, totalSessions = 0, remember, textRemainingToday = null, textDailyCap = null, textResetsAt = null, textUpsell = true, onQuotaRefused, onCapUpgrade }: {
+export function S17_StudioSession({ go, scenario, characterId, totalSessions = 0, remember, isMinor = false, textRemainingToday = null, textDailyCap = null, textResetsAt = null, textUpsell = true, onQuotaRefused, onCapUpgrade }: {
   go: Go; scenario: Scenario; characterId?: string; totalSessions?: number; remember?: boolean;
+  /** Known minors get the break reminder California requires. */
+  isMinor?: boolean;
   /** Messages left today, or null while unknown. */
   textRemainingToday?: number | null;
   textDailyCap?: number | null;
@@ -404,6 +407,7 @@ export function S17_StudioSession({ go, scenario, characterId, totalSessions = 0
   onCapUpgrade?: () => void;
 }) {
   const [msgs, setMsgs] = useState<SMsg[]>([]);
+  useAiNoticeRepeat(() => setMsgs(m => [...m, { from: 'notice', text: aiNoticeText(scenario.name, isMinor, true) }]));
   const [draft, setDraft] = useState('');
   const [capRefused, setCapRefused] = useState<{ message?: string; planCap: boolean } | null>(null);
   const capHit = capRefused != null || (textRemainingToday != null && textRemainingToday <= 0);
@@ -553,8 +557,10 @@ export function S17_StudioSession({ go, scenario, characterId, totalSessions = 0
         </Txt>
       </View>
       <ScrollView ref={scrollRef} style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 16, paddingVertical: 8, gap: 8 }}>
-        {msgs.map((m, i) => (
-          <BubbleMem key={i} from={m.from} text={m.text} accent={scenario.accent} />
+        <AiNotice text={aiNoticeText(scenario.name, isMinor, false)} />
+        {msgs.map((m, i) => (m.from === 'notice'
+          ? <AiNotice key={i} text={m.text} />
+          : <BubbleMem key={i} from={m.from} text={m.text} accent={scenario.accent} />
         ))}
         {capHit && (
           <View style={{ marginTop: 10 }}>

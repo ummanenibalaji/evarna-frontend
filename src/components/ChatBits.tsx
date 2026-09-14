@@ -11,6 +11,7 @@ import { NavIcon } from './NavIcon';
 import { MemoryRef } from './Atoms';
 import { useDotPulse } from '../theme/animations';
 import { W, GRAD, alpha, rgba } from '../theme/theme';
+import { aiNoticeDue } from '../lib/aiNotice';
 
 // ─── Bubble (simple, first-chat) ─────────────────────────────────────────
 export function Bubble({ from, text, memoryRefs = [], streaming = false }: { from: string; text: string; memoryRefs?: string[]; streaming?: boolean }) {
@@ -319,6 +320,41 @@ export function DayDivider({ label = 'Today' }: { label?: string }) {
       <Txt font="user" weight={500} style={{ fontSize: 10.5, color: W.text3, letterSpacing: 0.6 }}>{label}</Txt>
     </View>
   );
+}
+
+// ─── AiNotice ────────────────────────────────────────────────────────────
+// The legally required "you're talking with an AI" line (see lib/aiNotice).
+// Quiet like the day divider, but readable: it has to be clear, not decorative.
+export function AiNotice({ text }: { text: string }) {
+  return (
+    <View
+      accessibilityRole="text"
+      style={{ alignSelf: 'center', maxWidth: '88%', marginVertical: 6, paddingVertical: 6, paddingHorizontal: 12, borderRadius: 12, backgroundColor: 'rgba(255,255,255,0.05)', flexDirection: 'row', alignItems: 'center', gap: 6 }}
+    >
+      <NavIcon name="sparkle" color={W.text3} size={11} />
+      <Txt font="user" weight={500} style={{ fontSize: 11, color: W.text2, textAlign: 'center', flexShrink: 1 }}>{text}</Txt>
+    </View>
+  );
+}
+
+/**
+ * Calls onDue every 3 hours the screen stays open. Checked each minute rather
+ * than one long timeout, which Android can defer while the app is backgrounded.
+ */
+export function useAiNoticeRepeat(onDue: () => void): void {
+  const lastShown = useRef(Date.now());
+  const callback = useRef(onDue);
+  callback.current = onDue;
+  useEffect(() => {
+    const id = setInterval(() => {
+      const now = Date.now();
+      if (aiNoticeDue(lastShown.current, now)) {
+        lastShown.current = now;
+        callback.current();
+      }
+    }, 60_000);
+    return () => clearInterval(id);
+  }, []);
 }
 
 // ─── RecallIndicator ─────────────────────────────────────────────────────

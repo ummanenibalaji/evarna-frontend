@@ -444,7 +444,7 @@ export function S03_Disclosure({ go }: { go: Go }) {
             <View style={{ flex: 1, minWidth: 0 }}>
               <Txt font="comp" weight={600} style={{ fontSize: 15, color: W.cream, letterSpacing: -0.1 }}>This is AI</Txt>
               <Txt font="user" style={{ marginTop: 4, fontSize: 13, color: W.text2, lineHeight: 19, letterSpacing: 0.15 }}>
-                Everything is AI-generated. You're talking with artificial intelligence, not a human.
+                Everything is AI-generated. You're talking with artificial intelligence, not a human. Companion chatbots may not be suitable for some minors.
               </Txt>
             </View>
           </View>

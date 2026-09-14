@@ -21,7 +21,8 @@ import { Orb } from '../components/Orb';
 import { NavIcon, IconName } from '../components/NavIcon';
 import { Txt } from '../components/Txt';
 import { GlassPill, Pill, PrimaryButton, MemoryBadge, MinuteWarningBanner, QuickReply } from '../components/Atoms';
-import { Bubble, BubbleMem, ChatInput, TypingDots, CapHitCard, Coachmark, RecallIndicator, DayDivider } from '../components/ChatBits';
+import { AiNotice, useAiNoticeRepeat, Bubble, BubbleMem, ChatInput, TypingDots, CapHitCard, Coachmark, RecallIndicator, DayDivider } from '../components/ChatBits';
+import { aiNoticeText } from '../lib/aiNotice';
 import { Avatar } from '../components/Avatar';
 import { W, GRAD, alpha, rgba } from '../theme/theme';
 import { ARCHETYPE_LABEL, Companion, QUICK_REPLIES } from '../data/config';
@@ -60,8 +61,10 @@ type Msg = {
 };
 
 // ─── S09 FIRST CONVERSATION ──────────────────────────────────────────────
-export function S09_FirstChat({ go, companion, userId, characterId, textRemainingToday = null, textDailyCap = null, textResetsAt = null, textUpsell = true, onQuotaRefused, onCapUpgrade }: {
+export function S09_FirstChat({ go, companion, userId, characterId, isMinor = false, textRemainingToday = null, textDailyCap = null, textResetsAt = null, textUpsell = true, onQuotaRefused, onCapUpgrade }: {
   go: Go; companion: Companion; userId?: string; characterId?: string;
+  /** Known minors get the break reminder California requires. */
+  isMinor?: boolean;
   textRemainingToday?: number | null;
   textDailyCap?: number | null;
   textResetsAt?: string | null;
@@ -75,6 +78,7 @@ export function S09_FirstChat({ go, companion, userId, characterId, textRemainin
   const [draft, setDraft] = useState('');
   const [showBadge, setShowBadge] = useState(false);
   const [showContinue, setShowContinue] = useState(false);
+  useAiNoticeRepeat(() => setMsgs(m => [...m, { from: 'notice', text: aiNoticeText(companion.name, isMinor, true) }]));
   // Either the server refused this turn, or the balance we already knew about
   // says there is nothing left today.
   const [capRefused, setCapRefused] = useState<{ message?: string; planCap: boolean } | null>(null);
@@ -233,7 +237,9 @@ export function S09_FirstChat({ go, companion, userId, characterId, textRemainin
         contentContainerStyle={{ padding: 16, paddingBottom: 8, gap: 8 }}
         onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: false })}
       >
+        <AiNotice text={aiNoticeText(companion.name, isMinor, false)} />
         {msgs.map((m, i) => {
+          if (m.from === 'notice') return <AiNotice key={i} text={m.text || ''} />;
           if (m.streaming && !m.text) return <TypingDots key={i} />;
           return <Bubble key={i} from={m.from} text={m.text || ''} memoryRefs={m.memoryRefs} streaming={m.streaming} />;
         })}
@@ -368,6 +374,10 @@ export function S12_VoiceCall({ go, companion, accent = W.primary, orbIntensity 
             <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: W.primary, shadowColor: W.primary, shadowOpacity: 1, shadowRadius: 10, shadowOffset: { width: 0, height: 0 } }} />
             <Txt font="display" weight={600} style={{ fontSize: 24, color: W.cream, letterSpacing: -0.3 }}>{companion.name}</Txt>
           </View>
+          {/* Start of the call only. No 3-hour repeat: the 60-minute daily voice
+              ceiling ends any call long before, so raising that ceiling past 3
+              hours means adding the repeat here too. */}
+          <AiNotice text={aiNoticeText(companion.name, false, false)} />
         </View>
       )}
 
@@ -556,9 +566,11 @@ interface ChatProps {
   firstRun?: boolean;
   userId?: string;
   characterId?: string;
+  /** Known minors get the break reminder California requires. */
+  isMinor?: boolean;
 }
 
-export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, textRemainingToday = null, textDailyCap = null, textResetsAt = null, textUpsell = true, onQuotaRefused, onCapUpgrade, userName = '', firstRun = false, userId, characterId }: ChatProps) {
+export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, textRemainingToday = null, textDailyCap = null, textResetsAt = null, textUpsell = true, onQuotaRefused, onCapUpgrade, userName = '', firstRun = false, userId, characterId, isMinor = false }: ChatProps) {
   // firstRun → the opening line, which is the companion's own and true.
   // Otherwise empty, and real history loads from the backend.
   //
@@ -572,6 +584,7 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, t
       ? [{ from: 'comp', text: `So — what's been on your mind lately?`, t: 'today' }]
       : [],
   );
+  useAiNoticeRepeat(() => setMsgs(m => [...m, { from: 'notice', text: aiNoticeText(companion.name, isMinor, true) }]));
   const [loadingHistory, setLoadingHistory] = useState(!firstRun && !!characterId);
   const [draft, setDraft] = useState('');
   // The server refused a turn for the cap, or the known balance says there is
@@ -870,12 +883,14 @@ export function S14_Chat({ go, companion, accent = W.primary, openMemorySheet, t
         {loadingHistory
           ? <SkeletonBubbles />
           : <>
+              <AiNotice text={aiNoticeText(companion.name, isMinor, false)} />
               {msgs.length > 0 && <DayDivider />}
               {msgs.map((m, i) => {
                 // Consecutive same-sender messages group: tighter gap so a
                 // thread reads as exchanges, not an undifferentiated stack.
                 const grouped = i > 0 && msgs[i - 1].from === m.from;
                 const gap = { marginTop: grouped ? 2 : 10 };
+                if (m.from === 'notice') return <View key={i} style={gap}><AiNotice text={m.text || ''} /></View>;
                 // While a streamed reply has no text yet, show the typing indicator
                 // instead of an empty bubble; it swaps to text once tokens arrive.
                 if (m.streaming && !m.text)

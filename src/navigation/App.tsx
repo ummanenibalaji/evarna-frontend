@@ -793,7 +793,7 @@ export default function App() {
       />;
       case 'notif': return <S25_NotifPermission go={go} companion={{ id: 'new', name: companionName, archetype: archetypePick }}
         onAllow={() => { requestPushPermission().then(uploadPushToken).catch(() => {}); }} />;
-      case 'first-chat': return <S09_FirstChat go={(s) => go(s)} companion={{ id: characterId ?? 'new', name: companionName, archetype: archetypePick }} userId={userId ?? undefined} characterId={characterId ?? undefined} textRemainingToday={entitlement ? entitlement.text.remaining_today : null}
+      case 'first-chat': return <S09_FirstChat isMinor={isMinor} go={(s) => go(s)} companion={{ id: characterId ?? 'new', name: companionName, archetype: archetypePick }} userId={userId ?? undefined} characterId={characterId ?? undefined} textRemainingToday={entitlement ? entitlement.text.remaining_today : null}
         textDailyCap={entitlement ? entitlement.text.daily_cap : null}
         textResetsAt={entitlement ? entitlement.text.resets_at : null}
         textUpsell={entitlement ? entitlement.tier === 'free' : true}
@@ -829,6 +829,7 @@ export default function App() {
       case 'chat': return (
         <S14_Chat
           go={(s) => go(s)}
+          isMinor={isMinor}
           companion={currentCompanion}
           accent={t.orbHue}
           textRemainingToday={entitlement ? entitlement.text.remaining_today : null}
@@ -874,7 +875,7 @@ export default function App() {
         def={backendScenarios.find(s => s.id === (scenario || SCENARIOS[0]).id)}
         apiVoices={backendVoices}
         onStart={(id, remember) => { setStudioCharacter(null); setStudioCharacterId(id); setStudioRemember(remember); setScreen('studio-session'); }} />;
-      case 'studio-session': return <S17_StudioSession go={go} scenario={scenario || SCENARIOS[0]}
+      case 'studio-session': return <S17_StudioSession isMinor={isMinor} go={go} scenario={scenario || SCENARIOS[0]}
         characterId={studioCharacterId ?? undefined} totalSessions={studioCharacter?.total_sessions ?? 0}
         remember={studioRemember} textRemainingToday={entitlement ? entitlement.text.remaining_today : null}
         textDailyCap={entitlement ? entitlement.text.daily_cap : null}

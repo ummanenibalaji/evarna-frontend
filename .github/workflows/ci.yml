@@ -30,3 +30,4 @@ jobs:
       - run: npx expo config --type public --json > /dev/null
       - run: npm run check:store
       - run: npm run check:entitlement
+      - run: npm run check:ai-notice
