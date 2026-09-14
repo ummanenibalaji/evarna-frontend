@@ -199,7 +199,7 @@ export function useVoiceCall(params: UseVoiceCallParams): UseVoiceCallReturn {
         setError({
           kind: isMic ? 'mic-permission' : 'connect',
           message: isMic
-            ? 'Whisper needs microphone access to make a call. Enable it in Settings.'
+            ? 'Evarna needs microphone access to make a call. Enable it in Settings.'
             : "Couldn't connect to the voice service. Check your connection and try again.",
         });
         setPhase('error');

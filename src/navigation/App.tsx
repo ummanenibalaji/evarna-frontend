@@ -26,7 +26,7 @@ import {
   getInitialPushTap, PushTapData,
 } from '../lib/notifications';
 
-const SESSION_KEY = 'whisper_session';
+const SESSION_KEY = 'evarna_session';
 import { BottomNav, TabId } from '../components/BottomNav';
 
 import {
@@ -703,7 +703,7 @@ export default function App() {
       if (code === 'UNDER_MINIMUM_AGE') {
         Alert.alert(
           'You need to be 15 or older',
-          "Whisper isn't available to under-15s, so we can't finish setting up your account. If your birth date is wrong, go back and correct it.",
+          "Evarna isn't available to under-15s, so we can't finish setting up your account. If your birth date is wrong, go back and correct it.",
         );
       } else if (code === 'ALREADY_ONBOARDED') {
         // Onboarding ran twice (e.g. a retry after a dropped response). The

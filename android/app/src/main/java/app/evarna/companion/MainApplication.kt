@@ -1,4 +1,4 @@
-package app.whisper.companion
+package app.evarna.companion
 
 import android.app.Application
 import android.content.res.Configuration

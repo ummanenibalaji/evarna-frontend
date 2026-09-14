@@ -1,4 +1,4 @@
-package app.whisper.companion
+package app.evarna.companion
 import expo.modules.splashscreen.SplashScreenManager
 
 import android.os.Build

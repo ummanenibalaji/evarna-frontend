@@ -115,7 +115,7 @@ export function S21_Settings({ go, entitlement, entitlementFailed, onRetryEntitl
         left={
           <View>
             <Txt font="display" weight={700} style={{ fontSize: 27, color: W.cream, letterSpacing: -0.5 }}>Settings</Txt>
-            <Txt font="user" style={{ fontSize: 11, color: W.text2, letterSpacing: 0.4, marginTop: 1 }}>Personalize your whisper</Txt>
+            <Txt font="user" style={{ fontSize: 11, color: W.text2, letterSpacing: 0.4, marginTop: 1 }}>Personalize your experience</Txt>
           </View>
         }
       />
@@ -141,7 +141,7 @@ export function S21_Settings({ go, entitlement, entitlementFailed, onRetryEntitl
               ) : null}
             </View>
             {/* Only render an email when there actually is one. This used to
-                display a fabricated `${name}@whisper.app` address. */}
+                display a fabricated address built from their name. */}
             {userEmail ? (
               <Txt font="user" style={{ fontSize: 12, color: W.text2 }} numberOfLines={1}>{userEmail}</Txt>
             ) : (
@@ -308,8 +308,8 @@ export function S21_Settings({ go, entitlement, entitlementFailed, onRetryEntitl
 
         <Section title="About">
           <Row
-            onPress={() => setInfo({ title: 'How Whisper works', body: 'Whisper companions are powered by advanced AI. They remember what matters to you across conversations, adapt to how you like to communicate, and are always available — by text or voice.' })}
-            label="How Whisper works"
+            onPress={() => setInfo({ title: 'How Evarna works', body: 'Evarna companions are powered by advanced AI. They remember what matters to you across conversations, adapt to how you like to communicate, and are always available — by text or voice.' })}
+            label="How Evarna works"
             right={<NavIcon name="right" color={W.text2} size={18} />}
           />
           <Row
@@ -952,7 +952,7 @@ export function S23_Paywall({ go, trigger = 'voice', backTo = 'home', entitlemen
         </Pressable>
       </View>
       <View style={{ height: 10 }} />
-      <Txt font="comp" weight={700} style={{ fontSize: 22, color: W.text, textAlign: 'center' }}>{PAYWALL_HEADERS[trigger] ?? 'Upgrade Whisper'}</Txt>
+      <Txt font="comp" weight={700} style={{ fontSize: 22, color: W.text, textAlign: 'center' }}>{PAYWALL_HEADERS[trigger] ?? 'Upgrade Evarna'}</Txt>
       <Txt font="user" style={{ marginTop: 8, fontSize: 14, color: W.text2, textAlign: 'center' }}>Start with a 7-day free trial. Cancel anytime.</Txt>
 
       <View style={{ marginTop: 20, alignItems: 'center' }}>

@@ -93,7 +93,7 @@ export function S01_Splash({ go, goNew }: { go: Go; goNew?: () => void }) {
             }} />
             <Txt font="user" weight={600} style={{
               fontSize: 10, color: W.text2, letterSpacing: 3, textTransform: 'uppercase',
-            }}>Whisper · Early Access</Txt>
+            }}>Evarna</Txt>
           </View>
         </FadeIn>
 
@@ -164,7 +164,7 @@ export function S01_Splash({ go, goNew }: { go: Go; goNew?: () => void }) {
                   {/* Wordmark */}
                   <Txt font="comp" weight={500} style={{
                     fontSize: 40, color: W.cream, letterSpacing: -1.8,
-                  }}>whisper</Txt>
+                  }}>evarna</Txt>
                   {/* Teal accent dot under wordmark */}
                   <View style={{
                     marginTop: 10,

@@ -18,7 +18,7 @@ type ApiResponse<T> = { success: boolean; data: T };
 // ── Auth token ─────────────────────────────────────────────────────────────
 // Kept in memory (every request reads it synchronously) and mirrored to
 // AsyncStorage so a relaunch stays signed in. loadAuthToken() rehydrates it.
-const TOKEN_KEY = 'whisper_auth_token';
+const TOKEN_KEY = 'evarna_auth_token';
 let authToken: string | null = null;
 
 /** Non-2xx that isn't a 401. Carries the backend's `code` so callers can tell

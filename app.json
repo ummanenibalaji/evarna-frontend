@@ -1,8 +1,8 @@
 {
   "expo": {
-    "name": "Whisper",
-    "slug": "whisper-rn",
-    "scheme": "whisper",
+    "name": "Evarna",
+    "slug": "evarna",
+    "scheme": "evarna",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -14,9 +14,9 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "app.whisper.companion",
+      "bundleIdentifier": "app.evarna.companion",
       "infoPlist": {
-        "NSMicrophoneUsageDescription": "Whisper needs your microphone to let you talk to your companion during voice calls.",
+        "NSMicrophoneUsageDescription": "Evarna needs your microphone to let you talk to your companion during voice calls.",
         "UIBackgroundModes": [
           "audio"
         ],
@@ -26,7 +26,7 @@
       "bitcode": false
     },
     "android": {
-      "package": "app.whisper.companion",
+      "package": "app.evarna.companion",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#0F111A"

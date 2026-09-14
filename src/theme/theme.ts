@@ -1,4 +1,4 @@
-// theme.ts — Whisper design tokens.
+// theme.ts — Evarna design tokens.
 // Design system: "Ember Dusk" — warm obsidian surfaces, coral → rose → violet
 // aurora gradients, gold reserved for memory and streaks. Bricolage Grotesque
 // display type over the existing Manrope (companion voice) / Outfit (UI) pair.

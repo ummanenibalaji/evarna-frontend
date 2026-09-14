@@ -328,7 +328,7 @@ export function S10_Home({ go, companions, onSelectCompanion, onCallCompanion, u
               width: 7, height: 7, borderRadius: 3.5, backgroundColor: W.rose,
               shadowColor: W.primary, shadowOpacity: 0.9, shadowRadius: 10, shadowOffset: { width: 0, height: 0 },
             }} />
-            <Txt font="display" weight={700} style={{ fontSize: 18, color: W.cream, letterSpacing: -0.3 }}>whisper</Txt>
+            <Txt font="display" weight={700} style={{ fontSize: 18, color: W.cream, letterSpacing: -0.3 }}>evarna</Txt>
           </View>
         }
         right={

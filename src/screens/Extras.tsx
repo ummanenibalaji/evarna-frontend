@@ -52,7 +52,7 @@ export function S25_NotifPermission({ go, companion, onAllow, onSkip }: {
             <View style={{ width: 24, height: 24, borderRadius: 6, backgroundColor: W.primary, alignItems: 'center', justifyContent: 'center', shadowColor: W.primary, shadowOpacity: 0.4, shadowRadius: 10 }}>
               <Txt font="comp" weight={700} style={{ fontSize: 10, color: '#fff' }}>w</Txt>
             </View>
-            <Txt font="user" weight={600} style={{ flex: 1, fontSize: 12, color: W.text }}>Whisper</Txt>
+            <Txt font="user" weight={600} style={{ flex: 1, fontSize: 12, color: W.text }}>Evarna</Txt>
             <Txt font="user" style={{ fontSize: 11, color: W.text2 }}>now</Txt>
           </View>
           <Txt font="comp" weight={600} style={{ marginTop: 6, fontSize: 13, color: W.text }}>{companion.name}</Txt>
@@ -877,7 +877,7 @@ export function S30_Login({
           showsVerticalScrollIndicator={false}
         >
         <View style={{ marginTop: '18%', alignItems: 'center' }}>
-          <Txt font="display" weight={700} style={{ fontSize: 34, color: W.primary, letterSpacing: -1 }}>whisper</Txt>
+          <Txt font="display" weight={700} style={{ fontSize: 34, color: W.primary, letterSpacing: -1 }}>evarna</Txt>
           <Animated.View style={welcome}>
             <Txt font="comp" weight={600} style={{ marginTop: 14, fontSize: 20, color: W.text }}>
               {isNew ? 'Create your account' : 'Welcome back'}
