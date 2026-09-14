@@ -180,3 +180,11 @@ dependencies {
         implementation jscFlavor
     }
 }
+
+// Firebase Cloud Messaging, which Expo push uses to reach Android. android/ is
+// committed, so app.json's googleServicesFile is never applied here. Applied
+// only when the file exists, so a checkout without it still builds; push just
+// won't arrive until android/app/google-services.json is added.
+if (file('google-services.json').exists()) {
+    apply plugin: 'com.google.gms.google-services'
+}

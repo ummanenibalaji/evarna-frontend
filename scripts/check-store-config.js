@@ -34,6 +34,14 @@ for (const perm of BLOCKED) {
 }
 console.log(`  ✓ ${BLOCKED.length} unused Android permissions stay removed`);
 
+// Without POST_NOTIFICATIONS, Android 13+ never shows the notification prompt,
+// so no check-in or reply notification ever arrives.
+assert.ok(manifest.includes('<uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>'), 'AndroidManifest.xml must declare POST_NOTIFICATIONS');
+assert.ok(app.android.permissions?.includes('android.permission.POST_NOTIFICATIONS'), 'app.json must declare POST_NOTIFICATIONS for prebuild');
+const appGradle = fs.readFileSync('android/app/build.gradle', 'utf8');
+assert.ok(/apply plugin: 'com\.google\.gms\.google-services'/.test(appGradle), 'android/app/build.gradle must apply the Google services plugin (Firebase push)');
+console.log('  ✓ the notification permission and Firebase push wiring are in place');
+
 // Background VoIP without VoIP push is a common App Store rejection.
 assert.ok(!/<string>voip<\/string>/.test(plist), 'Info.plist declares the voip background mode again');
 assert.ok(!app.ios.infoPlist.UIBackgroundModes.includes('voip'), 'app.json declares the voip background mode again');
