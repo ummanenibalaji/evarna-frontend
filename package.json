@@ -10,7 +10,10 @@
     "typecheck": "tsc --noEmit",
     "check:store": "node scripts/check-store-config.js",
     "check:entitlement": "tsx src/checks/entitlement.check.ts",
-    "check:ai-notice": "tsx src/checks/aiNotice.check.ts"
+    "check:ai-notice": "tsx src/checks/aiNotice.check.ts",
+    "check:crisis": "tsx src/checks/crisis.check.ts",
+    "check:api-url": "tsx src/checks/apiUrl.check.ts",
+    "eas-build-post-install": "npm run check:api-url"
   },
   "dependencies": {
     "@config-plugins/react-native-webrtc": "^13.0.0",

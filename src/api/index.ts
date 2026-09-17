@@ -223,6 +223,11 @@ export const getStudioCharacters = async (): Promise<ApiStudioCharacter[]> => {
   return res.characters;
 };
 
+// The character disappears from GET /studio/characters.
+export const deleteStudioCharacter = async (id: string): Promise<void> => {
+  await apiDelete(`/studio/characters/${id}`);
+};
+
 // ── User stats ─────────────────────────────────────────────────────────────
 
 export interface ApiUserStats {
