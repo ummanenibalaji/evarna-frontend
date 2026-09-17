@@ -1,17 +1,33 @@
 // BottomNav.tsx — "Ember Dusk" floating tab bar. A rounded glass capsule
-// inset from the screen edges; the active tab is an aurora-filled pill that
-// carries both the icon and its label, inactive tabs are icon-only. The pill
-// slides between tabs, and because only one tab shows text the row is
-// measured per-tab rather than assuming equal widths.
+// that floats over the bottom of the screen; the selected tab is an
+// aurora-filled pill carrying its icon and label, the others are icons.
+//
+// Geometry is computed, not measured per tab: the row width comes from the
+// window and the label widths are measured once, off-screen, at the current
+// text size. A tap therefore knows where everything ends up and starts the
+// move on the UI thread straight away. One spring drives the pill and every
+// icon together, and each icon changes colour as the pill passes under it.
+//
+// The bar is an absolute overlay. Tab screens pass `tabBar` to Screen and pad
+// their scroll content by `useTabBarHeight()` so content scrolls behind the
+// glass.
 
-import React, { useEffect, useRef, useState } from 'react';
-import { View, Pressable, Animated, LayoutChangeEvent } from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Pressable, StyleSheet, View, useWindowDimensions, type LayoutChangeEvent } from 'react-native';
+import Animated, {
+  ReduceMotion, useAnimatedStyle, useSharedValue, withSpring, withTiming,
+  type SharedValue, type WithTimingConfig,
+} from 'react-native-reanimated';
+import { scheduleOnRN } from 'react-native-worklets';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Txt } from './Txt';
-import { NavIcon, IconName } from './NavIcon';
-import { W, GRAD } from '../theme/theme';
+import { NavIcon, type IconName } from './NavIcon';
+import { ELEV, GRAD, HIT, MOTION, R, SP, W, Z, rgba } from '../theme/theme';
+import { ease, spring, timing, usePressFeedback, useReducedMotion } from '../theme/motion';
+import { useReduceTransparency } from '../hooks/useAccessibilityPrefs';
+import { haptic } from '../lib/haptics';
 
 export type TabId = 'home' | 'studio' | 'sandbox' | 'settings';
 
@@ -19,109 +35,411 @@ interface BottomNavProps {
   active: TabId;
   onChange: (tab: TabId) => void;
   sandboxComingSoon?: boolean;
+  /** Tapping the tab that is already selected. Without it the tap goes to
+   *  `onChange`, which returns a screen pushed from that tab to its root. */
+  onReselect?: (tab: TabId) => void;
+  /** Slides the bar away but keeps it mounted, so it comes back in place. */
+  hidden?: boolean;
 }
 
-export function BottomNav({ active, onChange, sandboxComingSoon = true }: BottomNavProps) {
-  const insets = useSafeAreaInsets();
-  const tabs: { id: TabId; label: string; icon: IconName; badge?: string | null }[] = [
-    { id: 'home',     label: 'Home',     icon: 'chat' },
-    { id: 'studio',   label: 'Studio',   icon: 'grid' },
-    { id: 'sandbox',  label: 'Sandbox',  icon: 'mask', badge: sandboxComingSoon ? 'Soon' : null },
-    { id: 'settings', label: 'Settings', icon: 'gear' },
-  ];
+const TABS: readonly { id: TabId; label: string; icon: IconName }[] = [
+  { id: 'home', label: 'Home', icon: 'chat' },
+  { id: 'studio', label: 'Studio', icon: 'grid' },
+  { id: 'sandbox', label: 'Sandbox', icon: 'mask' },
+  { id: 'settings', label: 'Settings', icon: 'gear' },
+];
+const COUNT = TABS.length;
 
-  // Measured geometry of each tab, so the aurora pill can be placed exactly
-  // over the active one regardless of the label width it expands to.
-  const [frames, setFrames] = useState<Record<string, { x: number; w: number }>>({});
-  const slideX = useRef(new Animated.Value(0)).current;
-  const slideW = useRef(new Animated.Value(0)).current;
-  const activeFrame = frames[active];
+// ── Geometry (pt) ──────────────────────────────────────────────────────
+const EDGE = SP.lg;            // capsule inset from the screen sides
+const INSET = SP.sm;           // capsule padding around the tab row
+const ROW_H = HIT;             // every tab is a full-height touch target
+const CAPSULE_H = ROW_H + INSET * 2;
+const ICON = 20;
+const GAP = SP.sm;             // icon to label
+const PAD = SP.base;           // pill side padding at its natural width
+const PAD_MIN = SP.sm2;        // …and when a narrow screen squeezes it
+const BADGE_W = 48;
 
-  useEffect(() => {
-    if (!activeFrame) return;
-    Animated.parallel([
-      Animated.spring(slideX, { toValue: activeFrame.x, useNativeDriver: false, tension: 90, friction: 13 }),
-      Animated.spring(slideW, { toValue: activeFrame.w, useNativeDriver: false, tension: 90, friction: 13 }),
-    ]).start();
-  }, [activeFrame?.x, activeFrame?.w]);
+function useBottomGap(): number {
+  return Math.max(useSafeAreaInsets().bottom, SP.md);
+}
 
-  const onTabLayout = (id: TabId) => (e: LayoutChangeEvent) => {
-    const { x, width } = e.nativeEvent.layout;
-    setFrames(prev => (prev[id]?.x === x && prev[id]?.w === width ? prev : { ...prev, [id]: { x, w: width } }));
+/** Height of the band the floating tab bar covers at the bottom of the
+ *  screen, safe area included. Tab screens pad their scroll content by this
+ *  plus their own breathing room so the last row can scroll clear of it. */
+export function useTabBarHeight(): number {
+  return CAPSULE_H + useBottomGap();
+}
+
+interface Layout {
+  /** Touch areas, relative to the capsule, spanning its padding too. */
+  hitX: number[];
+  hitW: number[];
+  /** Animated targets relative to the row: [pillX, pillW, icon0 … iconN]. */
+  geo: number[];
+  /** Width each label may take. Only the selected one is ever seen. */
+  labelW: number[];
+}
+
+// Unselected tabs share what the pill leaves and never drop below the touch
+// minimum; on a narrow screen the pill gives way and its label truncates.
+function layoutFor(selected: number, rowW: number, natural: readonly number[]): Layout {
+  const pillW = Math.min(PAD * 2 + ICON + GAP + natural[selected], rowW - (COUNT - 1) * HIT);
+  const restW = (rowW - pillW) / (COUNT - 1);
+  const labelMax = Math.max(0, pillW - PAD_MIN * 2 - ICON - GAP);
+
+  const layout: Layout = { hitX: [], hitW: [], geo: [0, pillW], labelW: [] };
+  let x = 0;
+  for (let i = 0; i < COUNT; i++) {
+    const isSel = i === selected;
+    const w = isSel ? pillW : restW;
+    const label = isSel ? Math.min(natural[i], labelMax) : natural[i];
+    const content = isSel ? ICON + GAP + label : ICON;
+    if (isSel) layout.geo[0] = x;
+    layout.geo.push(x + (w - content) / 2);
+    layout.labelW.push(label);
+    layout.hitX.push(i === 0 ? 0 : INSET + x);
+    layout.hitW.push(w + (i === 0 ? INSET : 0) + (i === COUNT - 1 ? INSET : 0));
+    x += w;
+  }
+  return layout;
+}
+
+const labelOn = (selected: number) => TABS.map((_, i) => (i === selected ? 1 : 0));
+
+// Showing and hiding under Reduce Motion: a fade in place.
+const FADE: WithTimingConfig = { duration: MOTION.duration.fast, easing: ease.standard, reduceMotion: ReduceMotion.Never };
+
+export function BottomNav({ active, onChange, sandboxComingSoon = true, onReselect, hidden = false }: BottomNavProps) {
+  const { width } = useWindowDimensions();
+  const bottomGap = useBottomGap();
+  const reduced = useReducedMotion();
+  const reduceTransparency = useReduceTransparency();
+  const rowW = width - EDGE * 2 - INSET * 2;
+
+  // Label widths at the current text size. Remeasured when Dynamic Type
+  // changes, because the hidden labels lay out again.
+  const [natural, setNatural] = useState<readonly number[] | null>(null);
+  const measured = useRef<number[]>([]);
+  const onMeasure = (i: number) => (e: LayoutChangeEvent) => {
+    const w = Math.ceil(e.nativeEvent.layout.width);
+    if (measured.current[i] === w) return;
+    measured.current[i] = w;
+    if (TABS.every((_, j) => measured.current[j] != null)) setNatural([...measured.current]);
   };
 
+  // A tap selects at once; the router's `active` follows a frame later and
+  // wins whenever it changes on its own.
+  const activeIndex = Math.max(0, TABS.findIndex(t => t.id === active));
+  const [selected, setSelected] = useState(activeIndex);
+  const [synced, setSynced] = useState(activeIndex);
+  if (activeIndex !== synced) {
+    setSynced(activeIndex);
+    setSelected(activeIndex);
+  }
+
+  // Parked (display: none) once hidden, so the blur costs nothing offscreen.
+  const visible = !hidden && natural != null;
+  const [parked, setParked] = useState(!visible);
+  const shown = useSharedValue(visible ? 1 : 0);
+
+  const layout = useMemo(() => (natural ? layoutFor(selected, rowW, natural) : null), [selected, rowW, natural]);
+  const geo = useSharedValue<number[]>(Array.from({ length: COUNT + 2 }, () => 0));
+  const vis = useSharedValue<number[]>(labelOn(activeIndex));
+
+  // Travel only when the selection moves in view. The first placement,
+  // resizes (rotation, text size) and changes made while the bar is away all
+  // snap, so the pill never sweeps in from the edge.
+  const placed = useRef<{ index: number; key: string } | null>(null);
+  const place = (index: number) => {
+    if (!natural) return;
+    const key = `${rowW}|${natural.join(',')}`;
+    const prev = placed.current;
+    if (prev && prev.index === index && prev.key === key) return;
+    placed.current = { index, key };
+    const target = layoutFor(index, rowW, natural).geo;
+    if (!prev || prev.index === index || parked) {
+      geo.value = target;
+      vis.value = labelOn(index);
+    } else {
+      // Under Reduce Motion these configs land instantly: the pill snaps.
+      geo.value = withSpring(target, spring('snappy'));
+      vis.value = withTiming(labelOn(index), timing(MOTION.duration.fast));
+    }
+  };
+  useEffect(() => place(selected), [selected, rowW, natural]);
+
+  const select = (index: number) => {
+    const tab = TABS[index].id;
+    if (index === selected) {
+      (onReselect ?? onChange)(tab);
+      return;
+    }
+    haptic.selection();
+    place(index);
+    setSelected(index);
+    // The pill is already moving on the UI thread; the next screen mounts a
+    // frame later so its render doesn't hold up the pill's first frame.
+    requestAnimationFrame(() => onChange(tab));
+  };
+
+  // ── Presence ─────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (visible) {
+      setParked(false);
+      shown.value = withTiming(1, reduced ? FADE : timing(MOTION.duration.base, 'decel'));
+      return;
+    }
+    shown.value = withTiming(0, reduced ? FADE : timing(MOTION.duration.fast, 'accel'), finished => {
+      'worklet';
+      if (finished) scheduleOnRN(setParked, true);
+    });
+  }, [visible, reduced]);
+
+  const band = CAPSULE_H + bottomGap;
+  const presenceStyle = useAnimatedStyle(() => (reduced
+    ? { opacity: shown.value, transform: [{ translateY: 0 }] }
+    : { opacity: 1, transform: [{ translateY: (1 - shown.value) * (band + SP.xl) }] }));
+
+  const pillStyle = useAnimatedStyle(() => ({
+    width: geo.value[1],
+    transform: [{ translateX: geo.value[0] }],
+  }));
+
   return (
-    <View style={{ paddingHorizontal: 20, paddingTop: 8, paddingBottom: Math.max(insets.bottom, 12), zIndex: 5 }}>
+    <View pointerEvents="box-none" style={styles.root}>
       <View
-        style={{
-          flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-          padding: 8, borderRadius: 30,
-          borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)',
-          backgroundColor: W.glassBar,
-          overflow: 'hidden',
-          shadowColor: '#000', shadowOpacity: 0.55, shadowRadius: 44, shadowOffset: { width: 0, height: 20 },
-          elevation: 12,
-        }}
+        pointerEvents="none"
+        accessibilityElementsHidden
+        importantForAccessibility="no-hide-descendants"
+        style={styles.measure}
       >
-        <BlurView pointerEvents="none" intensity={44} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-        {/* Inset top highlight — the capsule catching light from above */}
-        <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, top: 0, height: 1, backgroundColor: 'rgba(255,255,255,0.08)' }} />
-
-        {/* Aurora pill — glides + resizes onto the active tab */}
-        {activeFrame ? (
-          <Animated.View
-            pointerEvents="none"
-            style={{
-              position: 'absolute', left: slideX, top: 8, bottom: 8, width: slideW,
-              borderRadius: 22, overflow: 'hidden',
-              shadowColor: W.rose, shadowOpacity: 0.35, shadowRadius: 22, shadowOffset: { width: 0, height: 8 },
-            }}
-          >
-            <LinearGradient
-              colors={[...GRAD.aurora]}
-              locations={[0, 0.55, 1]}
-              start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
-              style={{ flex: 1 }}
-            />
-          </Animated.View>
-        ) : null}
-
-        {tabs.map(t => {
-          const isActive = t.id === active;
-          const tint = isActive ? '#FFFFFF' : W.text2;
-          return (
-            <Pressable
-              key={t.id}
-              onPress={() => onChange(t.id)}
-              onLayout={onTabLayout(t.id)}
-              android_ripple={{ color: 'rgba(255,138,118,0.12)', borderless: true }}
-              style={{
-                height: 44,
-                paddingHorizontal: isActive ? 18 : 0,
-                width: isActive ? undefined : 58,
-                borderRadius: 22,
-                flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
-              }}
-            >
-              <NavIcon name={t.icon} color={tint} size={isActive ? 19 : 21} />
-              {isActive ? (
-                <Txt font="user" weight={700} style={{ fontSize: 11, color: '#fff', letterSpacing: 0.8, textTransform: 'uppercase' }}>
-                  {t.label}
-                </Txt>
-              ) : null}
-              {t.badge && !isActive ? (
-                <View style={{
-                  position: 'absolute', top: -2, right: 2,
-                  backgroundColor: W.gold,
-                  paddingVertical: 1, paddingHorizontal: 6, borderRadius: 7,
-                }}>
-                  <Txt font="user" weight={700} style={{ fontSize: 8, color: '#140D11', letterSpacing: 0.3 }}>{t.badge}</Txt>
-                </View>
-              ) : null}
-            </Pressable>
-          );
-        })}
+        {TABS.map((t, i) => (
+          <Txt key={t.id} {...LABEL} numberOfLines={1} onLayout={onMeasure(i)}>{t.label}</Txt>
+        ))}
       </View>
+
+      <Animated.View
+        pointerEvents={visible ? 'box-none' : 'none'}
+        accessibilityElementsHidden={!visible}
+        importantForAccessibility={visible ? 'auto' : 'no-hide-descendants'}
+        style={[styles.presence, { paddingBottom: bottomGap, display: parked ? 'none' : 'flex' }, presenceStyle]}
+      >
+        {/* Content fades out as it scrolls down behind the bar. */}
+        <LinearGradient pointerEvents="none" colors={SCROLL_EDGE} style={[styles.scrollEdge, { height: band + SP.xxl }]} />
+
+        <View
+          accessibilityRole="tabbar"
+          style={[styles.capsule, { backgroundColor: reduceTransparency ? W.surface1 : W.glass }]}
+        >
+          {!reduceTransparency && (
+            <BlurView pointerEvents="none" intensity={50} tint="dark" style={StyleSheet.absoluteFill} />
+          )}
+          {/* The capsule catching light along its top edge */}
+          <LinearGradient
+            pointerEvents="none"
+            colors={TOP_LIGHT}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 0 }}
+            style={styles.topLight}
+          />
+
+          {layout && (
+            <>
+              <Animated.View pointerEvents="none" style={[styles.pill, pillStyle]}>
+                <View style={styles.pillClip}>
+                  <LinearGradient
+                    colors={[...GRAD.aurora]}
+                    locations={[0, 0.55, 1]}
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={StyleSheet.absoluteFill}
+                  />
+                  <LinearGradient colors={GLOSS} style={styles.gloss} />
+                </View>
+              </Animated.View>
+
+              {TABS.map((t, i) => (
+                <Tab
+                  key={t.id}
+                  index={i}
+                  label={t.label}
+                  icon={t.icon}
+                  selected={i === selected}
+                  soon={t.id === 'sandbox' && sandboxComingSoon}
+                  hitX={layout.hitX[i]}
+                  hitW={layout.hitW[i]}
+                  labelW={layout.labelW[i]}
+                  geo={geo}
+                  vis={vis}
+                  onPress={select}
+                />
+              ))}
+            </>
+          )}
+
+          <View pointerEvents="none" style={styles.border} />
+        </View>
+      </Animated.View>
     </View>
   );
 }
+
+// ── Tab ────────────────────────────────────────────────────────────────
+
+interface TabProps {
+  index: number;
+  label: string;
+  icon: IconName;
+  selected: boolean;
+  soon: boolean;
+  hitX: number;
+  hitW: number;
+  labelW: number;
+  geo: SharedValue<number[]>;
+  vis: SharedValue<number[]>;
+  onPress: (index: number) => void;
+}
+
+/** How much of [from, to] the pill covers, 0…1. */
+function covered(from: number, to: number, g: number[]): number {
+  'worklet';
+  const pillL = g[0];
+  const pillR = g[0] + g[1];
+  if (to <= from) return 0;
+  return Math.min(1, Math.max(0, (Math.min(to, pillR) - Math.max(from, pillL)) / (to - from)));
+}
+
+function Tab({ index, label, icon, selected, soon, hitX, hitW, labelW, geo, vis, onPress }: TabProps) {
+  const press = usePressFeedback({ scale: MOTION.press.scaleSmall, haptic: false });
+  const slot = 2 + index;
+
+  const slotStyle = useAnimatedStyle(() => ({ transform: [{ translateX: geo.value[slot] }] }));
+  const litStyle = useAnimatedStyle(() => {
+    const x = geo.value[slot];
+    return { opacity: covered(x, x + ICON, geo.value) };
+  });
+  const restStyle = useAnimatedStyle(() => {
+    const x = geo.value[slot];
+    return { opacity: 1 - covered(x, x + ICON, geo.value) };
+  });
+  // The dark label only shows where the pill is under it.
+  const labelStyle = useAnimatedStyle(() => {
+    const x = geo.value[slot] + ICON + GAP;
+    return { opacity: vis.value[index] * covered(x, x + labelW, geo.value) };
+  });
+  const badgeStyle = useAnimatedStyle(() => ({ opacity: 1 - vis.value[index] }));
+
+  const contentW = ICON + GAP + labelW;
+  // Press feedback shrinks toward what the eye is on: the icon, or the
+  // icon and label together on the selected tab.
+  const originX = selected ? contentW / 2 : ICON / 2;
+
+  return (
+    <>
+      <Animated.View pointerEvents="none" style={[styles.slot, slotStyle]}>
+        <Animated.View
+          style={[styles.content, { width: contentW, transformOrigin: [originX, ROW_H / 2, 0] }, press.animatedStyle]}
+        >
+          <View style={styles.icon}>
+            <Animated.View style={[StyleSheet.absoluteFill, restStyle]}>
+              <NavIcon name={icon} color={W.text2} size={ICON} />
+            </Animated.View>
+            <Animated.View style={[StyleSheet.absoluteFill, litStyle]}>
+              <NavIcon name={icon} color={W.onAccent} size={ICON} />
+            </Animated.View>
+          </View>
+          <Animated.View style={labelStyle}>
+            <Txt {...LABEL} numberOfLines={1} style={[LABEL.style, styles.labelInk, { maxWidth: labelW }]}>
+              {label}
+            </Txt>
+          </Animated.View>
+        </Animated.View>
+        {soon && (
+          <Animated.View style={[styles.badgeSlot, badgeStyle]}>
+            <View style={styles.badge}>
+              <Txt variant="caption" weight={600} maxScale={1.15} style={styles.badgeText}>Soon</Txt>
+            </View>
+          </Animated.View>
+        )}
+      </Animated.View>
+
+      <Pressable
+        accessibilityRole="tab"
+        accessibilityLabel={soon ? `${label}, coming soon` : label}
+        accessibilityState={{ selected }}
+        accessibilityShowsLargeContentViewer
+        accessibilityLargeContentTitle={label}
+        onPress={() => onPress(index)}
+        onPressIn={press.onPressIn}
+        onPressOut={press.onPressOut}
+        style={[styles.hit, { left: hitX, width: hitW }]}
+      />
+    </>
+  );
+}
+
+// Shared by the visible labels and the off-screen ones they are sized from.
+const LABEL = {
+  variant: 'eyebrow',
+  weight: 700,
+  style: { letterSpacing: 0.8 },
+} as const;
+
+const SCROLL_EDGE = [rgba(W.bgDeep, 0), rgba(W.bgDeep, 0.7), rgba(W.bgDeep, 0.92)] as const;
+const TOP_LIGHT = [rgba(W.cream, 0), rgba(W.cream, 0.14), rgba(W.cream, 0)] as const;
+const GLOSS = [rgba(W.cream, 0.2), rgba(W.cream, 0)] as const;
+
+// The capsule is translucent, so its shadow is drawn around it (boxShadow)
+// rather than from its pixels, which iOS would recompute every frame.
+const HIGH = ELEV.high;
+const CAPSULE_SHADOW =
+  `0px ${HIGH.shadowOffset?.height ?? 0}px ${HIGH.shadowRadius ?? 0}px ${rgba(W.shadow, Number(HIGH.shadowOpacity ?? 0))}`;
+
+const styles = StyleSheet.create({
+  root: { position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: Z.nav },
+  measure: { position: 'absolute', left: 0, bottom: 0, opacity: 0, alignItems: 'flex-start' },
+  presence: { paddingHorizontal: EDGE },
+  scrollEdge: { position: 'absolute', left: 0, right: 0, bottom: 0 },
+  capsule: {
+    height: CAPSULE_H,
+    borderRadius: CAPSULE_H / 2,
+    overflow: 'hidden',
+    boxShadow: CAPSULE_SHADOW,
+  },
+  topLight: { position: 'absolute', left: 0, right: 0, top: 0, height: 1 },
+  border: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: CAPSULE_H / 2,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: W.hairlineStrong,
+  },
+  // The pill's solid base lets iOS draw the glow from its outline alone.
+  pill: {
+    position: 'absolute',
+    left: INSET,
+    top: INSET,
+    height: ROW_H,
+    borderRadius: ROW_H / 2,
+    backgroundColor: W.rose,
+    ...ELEV.glow(W.rose, 16, 0.35),
+    shadowOffset: { width: 0, height: 6 },
+  },
+  pillClip: { ...StyleSheet.absoluteFillObject, borderRadius: ROW_H / 2, overflow: 'hidden' },
+  gloss: { position: 'absolute', left: 0, right: 0, top: 0, height: ROW_H / 2 },
+  slot: { position: 'absolute', left: INSET, top: INSET, height: ROW_H },
+  content: { height: ROW_H, flexDirection: 'row', alignItems: 'center', gap: GAP },
+  icon: { width: ICON, height: ICON },
+  labelInk: { color: W.onAccent },
+  badgeSlot: { position: 'absolute', left: ICON - BADGE_W / 2, top: -SP.xs2, width: BADGE_W, alignItems: 'center' },
+  badge: {
+    paddingHorizontal: SP.xs2,
+    borderRadius: R.sm,
+    backgroundColor: W.surface3,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: W.hairlineStrong,
+  },
+  badgeText: { color: W.text2 },
+  hit: { position: 'absolute', top: 0, bottom: 0 },
+});
