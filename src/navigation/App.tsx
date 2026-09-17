@@ -34,7 +34,8 @@ import {
   S04_Archetype, S07_Voice, S08_Name, S_Meet,
 } from '../screens/Onboarding';
 import { S10_Home } from '../screens/Home';
-import { S09_FirstChat, S12_VoiceCall, S14_Chat } from '../screens/Chat';
+import { S09_FirstChat, S14_Chat } from '../screens/Chat';
+import { S12_VoiceCall } from '../screens/VoiceCall';
 import {
   S15_StudioHome, S16_ScenarioSetup, S17_StudioSession, S18_CharacterCreator,
 } from '../screens/Studio';
