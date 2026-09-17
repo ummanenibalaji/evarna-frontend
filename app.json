@@ -7,13 +7,13 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
-    "backgroundColor": "#0F111A",
-    "newArchEnabled": false,
+    "backgroundColor": "#0E0A0D",
+    "newArchEnabled": true,
     "assetBundlePatterns": [
       "**/*"
     ],
     "ios": {
-      "supportsTablet": true,
+      "supportsTablet": false,
       "bundleIdentifier": "app.evarna.companion",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Evarna needs your microphone to let you talk to your companion during voice calls.",
@@ -29,7 +29,7 @@
       "package": "app.evarna.companion",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#0F111A"
+        "backgroundColor": "#0E0A0D"
       },
       "blockedPermissions": [
         "android.permission.CAMERA",
@@ -59,13 +59,19 @@
         {
           "image": "./assets/splash.png",
           "resizeMode": "contain",
-          "backgroundColor": "#0F111A"
+          "backgroundColor": "#0E0A0D"
         }
       ],
       "@livekit/react-native-expo-plugin",
       "@config-plugins/react-native-webrtc",
       "@react-native-google-signin/google-signin",
-      "expo-notifications"
+      "expo-notifications",
+      [
+        "expo-audio",
+        {
+          "microphonePermission": false
+        }
+      ]
     ]
   }
 }
