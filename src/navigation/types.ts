@@ -1,11 +1,9 @@
-// types.ts — routing types mirroring app.jsx's string-based `go(screen)` router.
-
-import { Companion, Scenario, SandboxMode } from '../data/config';
+// types.ts — route names and the navigation function every screen receives.
 
 export type ScreenName =
   | 'splash' | 'age' | 'disclosure' | 'pronouns' | 'comm' | 'handoff'
   | 'archetype' | 'voice' | 'name' | 'meet' | 'notif' | 'first-chat'
-  | 'home' | 'callDepleted' | 'add-companion' | 'call' | 'chat' | 'crisis'
+  | 'home' | 'callDepleted' | 'call' | 'chat' | 'crisis'
   | 'profile' | 'user-profile' | 'recap' | 'studio' | 'scenario-setup' | 'studio-session'
   | 'character-creator' | 'sandbox' | 'sandbox-session' | 'settings'
   | 'memories' | 'paywall' | 'login';
@@ -13,18 +11,12 @@ export type ScreenName =
 /** Why the paywall opened. Chooses its headline (PAYWALL_HEADERS in Settings). */
 export type PaywallTrigger = 'voice' | 'cap' | 'more' | 'studio';
 
-// Navigation function shape used by every screen (matches prototype `go`).
+/**
+ * Navigation as screens see it. The router reads intent from history: naming
+ * a screen you came from goes back to it, naming a tab switches to it, and
+ * 'paywall', 'callDepleted' and 'recap' open as sheets over the current
+ * screen instead of replacing it.
+ */
 export type Go = (screen: ScreenName) => void;
 
-export interface NavContextValue {
-  go: Go;
-  screen: ScreenName;
-}
-
 export type Archetype = 'mentor' | 'friend' | 'partner' | 'challenger';
-
-export interface ScreenCommonProps {
-  go: Go;
-}
-
-export type { Companion, Scenario, SandboxMode };
