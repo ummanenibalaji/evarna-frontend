@@ -5,8 +5,13 @@
 // These live above every screen because what they report often outlives the
 // screen that caused it: a companion edit saves after its profile has closed,
 // a notification lands in the middle of a call.
+//
+// The toast is kept in a small store of its own (showToast / dismissToast)
+// rather than in the router's state, so showing and dismissing one redraws the
+// toast and nothing else: not the screen on top, the one beneath it or the
+// tab bar.
 
-import React, { useEffect, useState } from 'react';
+import React, { memo, useEffect, useState, useSyncExternalStore } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, View } from 'react-native';
 import Animated from 'react-native-reanimated';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -42,16 +47,45 @@ const SHOW_WITH_SCREEN_READER_MS = 10000;
 // The enter/exit getters build a fresh animation per read; take one per mount.
 const useOnMount = <T,>(read: () => T): T => useState(read)[0];
 
+// ── Toast store ─────────────────────────────────────────────────────────
+let currentToast: ToastItem | null = null;
+let toastSeq = 0;
+const toastListeners = new Set<() => void>();
+
+function setCurrentToast(next: ToastItem | null) {
+  currentToast = next;
+  toastListeners.forEach(listener => listener());
+}
+
+/** Shows `spec`, replacing any toast already up. Callable from anywhere. */
+export function showToast(spec: ToastSpec): void {
+  toastSeq += 1;
+  setCurrentToast({ ...spec, id: toastSeq });
+}
+
+/** Puts away toast `id`, if it is still the one showing. */
+export function dismissToast(id: number): void {
+  if (currentToast && currentToast.id === id) setCurrentToast(null);
+}
+
+function subscribeToast(listener: () => void): () => void {
+  toastListeners.add(listener);
+  return () => { toastListeners.delete(listener); };
+}
+
+const readToast = () => currentToast;
+
 /** One toast at a time, under the status bar. A new toast replaces the current one. */
-export function ToastHost({ toast, onDismiss }: { toast: ToastItem | null; onDismiss: (id: number) => void }) {
+export const ToastHost = memo(function ToastHost() {
   const insets = useSafeAreaInsets();
+  const toast = useSyncExternalStore(subscribeToast, readToast);
   // The layer stays mounted so a leaving toast can play its exit.
   return (
     <View pointerEvents="box-none" style={[styles.toastLayer, { top: insets.top + SP.sm }]}>
-      {toast ? <Toast key={toast.id} toast={toast} onDismiss={onDismiss} /> : null}
+      {toast ? <Toast key={toast.id} toast={toast} onDismiss={dismissToast} /> : null}
     </View>
   );
-}
+});
 
 function Toast({ toast, onDismiss }: { toast: ToastItem; onDismiss: (id: number) => void }) {
   const screenReader = useScreenReader();

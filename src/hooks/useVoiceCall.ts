@@ -1,19 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState, Platform } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import type * as ExpoAudio from 'expo-audio';
-import {
-  DisconnectReason,
-  MediaDeviceFailure,
-  Room,
-  RoomEvent,
-  Track,
-  type Participant,
-  type RemoteAudioTrack,
-  type RemoteTrack,
-} from 'livekit-client';
-import { startVoiceSession, endVoiceSession } from '../api';
+// Types only: the library itself loads with the first call (voiceRuntime).
+import type * as LiveKit from 'livekit-client';
+import { startVoiceSession, endVoiceSession, type VoiceSessionResponse } from '../api';
 import { ApiError, NetworkError, isNetworkError, limitMessage } from '../api/client';
+import { withSystemPrompt } from '../components/PrivacyShield';
 import { quotaCode } from '../lib/entitlement';
 import { startCallService, stopCallService } from '../lib/callService';
 import {
@@ -43,11 +37,35 @@ const NO_AUDIO: LiveKitAudio = {
   showAudioRoutePicker: async () => {},
 };
 
-// @livekit/react-native is a native module absent from Expo Go; importing it at
-// module scope crashes the app on launch (this hook is reachable from screens
-// that load eagerly). Resolve it lazily so it's only touched when a voice call
-// actually starts. In Expo Go this returns a no-op stub — text chat works, and
-// voice is simply inert until run in a dev/production build.
+// ── LiveKit runtime ──────────────────────────────────────────────────────
+// livekit-client (with its protocol tables and polyfills) and WebRTC are set
+// up when the first call needs them, not at launch: most launches never make
+// a call, and registerGlobals() builds WebRTC's peer connection factory on the
+// JS thread. registerGlobals() has to run before livekit-client is used, and
+// @livekit/react-native installs its own polyfills before it loads
+// livekit-client, so it is required first.
+//
+// @livekit/react-native is a native module absent from Expo Go, where this
+// returns null: voice is unavailable there, text chat still works.
+type LiveKitClient = typeof LiveKit;
+
+let liveKit: LiveKitClient | null | undefined;
+
+export function voiceRuntime(): LiveKitClient | null {
+  if (liveKit !== undefined) return liveKit;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    (require('@livekit/react-native') as { registerGlobals: () => void }).registerGlobals();
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    liveKit = require('livekit-client') as LiveKitClient;
+  } catch {
+    liveKit = null;
+  }
+  return liveKit;
+}
+
+// Lazily too; the call path asks for it only after voiceRuntime(). In Expo
+// Go this returns a no-op stub.
 function getAudioSession(): LiveKitAudio {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -94,10 +112,104 @@ async function askForMic(): Promise<MicStatus> {
   const audio = audioModule();
   if (!audio) return 'unknown';
   try {
-    return micStatusOf(await audio.requestRecordingPermissionsAsync());
+    // A system alert: the privacy cover must not hide the call screen that
+    // explains it.
+    return micStatusOf(await withSystemPrompt(() => audio.requestRecordingPermissionsAsync()));
   } catch {
     return 'unknown';
   }
+}
+
+/** A status that lets the call go ahead. With the answer unknown, LiveKit asks
+ *  as it opens the microphone. */
+const micAllowsCall = (s: MicStatus) => s === 'granted' || s === 'unknown';
+
+// ── Server session ───────────────────────────────────────────────────────
+interface StartedSession {
+  res: VoiceSessionResponse;
+  /** When the server started it, which is when billing starts. */
+  at: number;
+}
+
+const startSession = (characterId: string): Promise<StartedSession> =>
+  startVoiceSession(characterId).then(res => ({ res, at: Date.now() }));
+
+// ── Head start ───────────────────────────────────────────────────────────
+// The router calls prepareVoiceCall() as it pushes the call screen, so the
+// microphone check and the session request are already out while the screen
+// renders and slides in. The screen's hook takes both over.
+interface HeadStart {
+  characterId: string;
+  mic: Promise<MicStatus>;
+  /** Only started when the microphone lets the call go ahead. */
+  session: Promise<StartedSession | null>;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+let headStart: HeadStart | null = null;
+
+/** A head start nobody has claimed by now belongs to a screen that never came. */
+const HEAD_START_TTL_MS = 5000;
+
+function closeHeadStart(h: HeadStart): void {
+  clearTimeout(h.timer);
+  // Opened for nobody: close it, or it stays open (and billed) until the
+  // stale-session sweep.
+  h.session.then(s => { if (s) endVoiceSession(s.res.session_id).catch(() => {}); }, () => {});
+}
+
+/**
+ * Starts a call's first steps for `characterId` ahead of its screen: the
+ * microphone check and, when that allows the call, the server session. Call
+ * it right before pushing the call screen, whose useVoiceCall takes them
+ * over; if none does, the session is closed again.
+ */
+export function prepareVoiceCall(characterId: string): void {
+  if (headStart) closeHeadStart(headStart);
+  const mic = micStatus();
+  const session = mic.then(s => (micAllowsCall(s) ? startSession(characterId) : null));
+  // Observed by the hook that claims it; this only keeps an unclaimed failure quiet.
+  session.catch(() => {});
+  const h: HeadStart = {
+    characterId,
+    mic,
+    session,
+    timer: setTimeout(() => {
+      if (headStart !== h) return;
+      headStart = null;
+      closeHeadStart(h);
+    }, HEAD_START_TTL_MS),
+  };
+  headStart = h;
+}
+
+function takeHeadStart(characterId: string | undefined): HeadStart | null {
+  const h = headStart;
+  headStart = null;
+  if (!h) return null;
+  clearTimeout(h.timer);
+  if (h.characterId === characterId) return h;
+  closeHeadStart(h);
+  return null;
+}
+
+// ── Call server address ──────────────────────────────────────────────────
+// Remembered from the last call, so the next one can look the server up
+// while its session request is still out.
+const LIVEKIT_URL_KEY = 'evarna_livekit_url';
+let livekitUrl: Promise<string | null> | null = null;
+
+function knownLivekitUrl(): Promise<string | null> {
+  if (!livekitUrl) livekitUrl = AsyncStorage.getItem(LIVEKIT_URL_KEY).catch(() => null);
+  return livekitUrl;
+}
+
+function rememberLivekitUrl(url: string): void {
+  void knownLivekitUrl().then(known => {
+    if (known === url) return;
+    livekitUrl = Promise.resolve(url);
+    AsyncStorage.setItem(LIVEKIT_URL_KEY, url).catch(() => {});
+  });
 }
 
 // ── Audio output ─────────────────────────────────────────────────────────
@@ -168,18 +280,20 @@ async function errorFor(e: unknown): Promise<CallError> {
   if (e instanceof NetworkError && e.timedOut) return { kind: 'connect' };
   if (isNetworkError(e)) return { kind: 'offline' };
   // A refused microphone, told apart by the error's name (NotAllowedError) or
-  // by the permission itself — never by matching words in the message.
-  if (MediaDeviceFailure.getFailure(e) === MediaDeviceFailure.PermissionDenied || (await micStatus()) === 'denied') {
+  // by the permission itself — never by matching words in the message. Only
+  // an error from LiveKit can name it, so LiveKit isn't loaded just to ask.
+  const lk = liveKit ?? null;
+  if ((lk && lk.MediaDeviceFailure.getFailure(e) === lk.MediaDeviceFailure.PermissionDenied) || (await micStatus()) === 'denied') {
     return { kind: 'mic-permission' };
   }
   return { kind: 'connect' };
 }
 
-function errorForDisconnect(reason?: DisconnectReason): CallError {
+function errorForDisconnect(lk: LiveKitClient, reason?: LiveKit.DisconnectReason): CallError {
   // The only room the server deletes mid-call is one that reached the daily
   // voice ceiling, right after the companion says goodbye (voice.service.ts).
   // Everything else that ends a room under us is a dropped call.
-  return reason === DisconnectReason.ROOM_DELETED ? { kind: 'daily-limit' } : { kind: 'lost' };
+  return reason === lk.DisconnectReason.ROOM_DELETED ? { kind: 'daily-limit' } : { kind: 'lost' };
 }
 
 // ── Keep awake ───────────────────────────────────────────────────────────
@@ -221,7 +335,7 @@ export interface VoiceCall {
   /** When the user hung up. */
   endedAt: number | null;
   /** The companion's voice, for level metering. */
-  agentTrack: RemoteAudioTrack | null;
+  agentTrack: LiveKit.RemoteAudioTrack | null;
   toggleMute: () => void;
   /** Ends the call; resolves once the room is closed. */
   hangUp: () => Promise<void>;
@@ -241,6 +355,11 @@ interface Attempt {
 // orb from the backend's "ui" DataChannel topic (falling back to
 // ActiveSpeakersChanged until the first hint arrives). Mute hits the real mic;
 // hangUp tears down the Room, the audio session and the server session.
+//
+// Setup is as parallel as its steps allow, because every step of it is time
+// between tapping Call and hearing the companion. After the microphone check,
+// the session request, the audio session, LiveKit itself and the room start
+// together; the microphone opens while the room connects.
 export function useVoiceCall({ userId, characterId, callTitle }: UseVoiceCallParams): VoiceCall {
   const callTitleRef = useRef(callTitle);
   callTitleRef.current = callTitle;
@@ -252,12 +371,12 @@ export function useVoiceCall({ userId, characterId, callTitle }: UseVoiceCallPar
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
   const [billedSince, setBilledSince] = useState<number | null>(null);
   const [endedAt, setEndedAt] = useState<number | null>(null);
-  const [agentTrack, setAgentTrack] = useState<RemoteAudioTrack | null>(null);
+  const [agentTrack, setAgentTrack] = useState<LiveKit.RemoteAudioTrack | null>(null);
   const [billedEarlier, setBilledEarlier] = useState(0);
   const [micReady, setMicReady] = useState(false);
   const [attempt, setAttempt] = useState(0);
 
-  const roomRef = useRef<Room | null>(null);
+  const roomRef = useRef<LiveKit.Room | null>(null);
   const mutedRef = useRef(false);
   const billedEarlierRef = useRef(0);
   const attemptRef = useRef<Attempt | null>(null);
@@ -280,14 +399,20 @@ export function useVoiceCall({ userId, characterId, callTitle }: UseVoiceCallPar
     setMicReady(false);
     setOrbState('thinking');
 
+    // Only the first attempt after the push finds one; retries start afresh.
+    const head = takeHeadStart(characterId);
     if (!userId || !characterId) {
+      if (head) closeHeadStart(head);
       setError({ kind: 'unavailable' });
       setPhase('error');
       return;
     }
     setPhase('connecting');
 
-    let room: Room | null = null;
+    let room: LiveKit.Room | null = null;
+    // The microphone, from when it is opened until the room has published it.
+    let micTracks: Promise<LiveKit.LocalTrack[]> | null = null;
+    let micPublished = false;
     // Per attempt, so closing an old attempt can never end a newer one's session.
     let sessionId: string | null = null;
     // When this attempt's session started charging; null once it has closed.
@@ -300,9 +425,13 @@ export function useVoiceCall({ userId, characterId, callTitle }: UseVoiceCallPar
       if (!run.cancelled) setOrbState(next);
     });
 
+    // Set once this attempt has asked for the audio session.
+    let audioAsked = false;
     // The audio session is shared by every attempt. Stop it unless a newer
-    // attempt is already live and relying on it.
+    // attempt is already live and relying on it, or this one never started
+    // it (which would load LiveKit just to stop nothing).
     const releaseAudio = () => {
+      if (!audioAsked) return;
       const current = attemptRef.current;
       if (current && current !== run && !current.cancelled) return;
       getAudioSession().stopAudioSession().catch(() => {});
@@ -328,8 +457,11 @@ export function useVoiceCall({ userId, characterId, callTitle }: UseVoiceCallPar
         billedAt = null;
         setBilledEarlier(billedEarlierRef.current);
       }
+      // Opened for a room that never got it: disconnecting won't close it.
+      const unpublishedMic = micPublished ? null : micTracks;
       closing = (async () => {
         if (r) await r.disconnect().catch(() => {});
+        if (unpublishedMic) unpublishedMic.then(tracks => tracks.forEach(t => t.stop()), () => {});
         releaseAudio();
         // The backend also closes the session when the participant leaves the
         // room, but that needs the voice worker to be up. The endpoint is
@@ -360,9 +492,29 @@ export function useVoiceCall({ userId, characterId, callTitle }: UseVoiceCallPar
       setPhase('connected');
     };
 
+    // Takes a server session over once it exists. One that arrives after this
+    // attempt was left (hung up while the server was starting it) is closed at
+    // once, or it stays open (and billed) until the stale-session sweep.
+    const claim = (started: Promise<StartedSession | null>): Promise<VoiceSessionResponse | null> =>
+      started.then(s => {
+        if (!s) return null;
+        if (run.cancelled) {
+          endVoiceSession(s.res.session_id).catch(() => {});
+          return null;
+        }
+        sessionId = s.res.session_id;
+        billedAt = s.at;
+        setBilledSince(s.at);
+        return s.res;
+      });
+    // Claimed at once, so a head start is closed even if this attempt is left
+    // before it gets that far.
+    const headSession = head ? claim(head.session) : null;
+    headSession?.catch(() => {});
+
     (async () => {
       try {
-        const mic = await micStatus();
+        const mic = await (head ? head.mic : micStatus());
         if (run.cancelled) return;
         if (mic === 'ask') {
           setPhase('permission');
@@ -373,27 +525,29 @@ export function useVoiceCall({ userId, characterId, callTitle }: UseVoiceCallPar
           return;
         }
 
-        const res = await startVoiceSession(characterId);
-        if (run.cancelled) {
-          // Hung up while the server was starting it: close it now, or it stays
-          // open (and billed) until the stale-session sweep.
-          endVoiceSession(res.session_id).catch(() => {});
+        // None of these waits for another: the session request, LiveKit
+        // itself (set up on the JS thread while the request is out), the
+        // audio session (activated on its own native queue) and the room.
+        const session = headSession ?? claim(startSession(characterId));
+        session.catch(() => {});
+        const lk = voiceRuntime();
+        if (!lk) {
+          fail({ kind: 'unavailable' });
           return;
         }
-        sessionId = res.session_id;
-        billedAt = Date.now();
-        setBilledSince(billedAt);
-
-        await getAudioSession().startAudioSession();
-        if (run.cancelled) {
+        audioAsked = true;
+        const audioReady = getAudioSession().startAudioSession().then(() => {
           // abandon() may have released the session before it had started.
-          releaseAudio();
-          return;
-        }
+          if (run.cancelled) releaseAudio();
+        });
 
-        const r = new Room();
+        const r = new lk.Room();
         room = r;
         roomRef.current = r;
+        // Looks the call server up (DNS) while the session request is out.
+        void knownLivekitUrl().then(url => {
+          if (url && !run.cancelled) void r.prepareConnection(url);
+        });
 
         // Up from the room's Connected event. Before it, a Disconnected is only
         // connect() failing: its rejection reaches errorFor below, which can
@@ -423,18 +577,18 @@ export function useVoiceCall({ userId, characterId, callTitle }: UseVoiceCallPar
         };
 
         r
-          .on(RoomEvent.Connected, () => {
+          .on(lk.RoomEvent.Connected, () => {
             if (run.cancelled) return;
             roomUp = true;
             if (r.remoteParticipants.size > 0) companionJoined();
             else waitForCompanion();
           })
-          .on(RoomEvent.ParticipantConnected, companionJoined)
-          .on(RoomEvent.ParticipantDisconnected, () => {
+          .on(lk.RoomEvent.ParticipantConnected, companionJoined)
+          .on(lk.RoomEvent.ParticipantDisconnected, () => {
             if (run.cancelled || reconnecting || r.remoteParticipants.size > 0) return;
             companionMayHaveLeft();
           })
-          .on(RoomEvent.Reconnecting, () => {
+          .on(lk.RoomEvent.Reconnecting, () => {
             if (run.cancelled) return;
             reconnecting = true;
             // The unwinding just before this armed the companion-left timer.
@@ -443,7 +597,7 @@ export function useVoiceCall({ userId, characterId, callTitle }: UseVoiceCallPar
             clearTimeout(leftTimer);
             setPhase('reconnecting');
           })
-          .on(RoomEvent.Reconnected, () => {
+          .on(lk.RoomEvent.Reconnected, () => {
             if (run.cancelled) return;
             const wasReconnecting = reconnecting;
             reconnecting = false;
@@ -467,18 +621,18 @@ export function useVoiceCall({ userId, characterId, callTitle }: UseVoiceCallPar
               }
             }, 0);
           })
-          .on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
+          .on(lk.RoomEvent.Disconnected, (reason?: LiveKit.DisconnectReason) => {
             if (!roomUp) return;
             // Our own hang-up or teardown has already cancelled the attempt.
-            fail(errorForDisconnect(reason));
+            fail(errorForDisconnect(lk, reason));
           })
-          .on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
-            if (!run.cancelled && track.kind === Track.Kind.Audio) setAgentTrack(track as RemoteAudioTrack);
+          .on(lk.RoomEvent.TrackSubscribed, (track: LiveKit.RemoteTrack) => {
+            if (!run.cancelled && track.kind === lk.Track.Kind.Audio) setAgentTrack(track as LiveKit.RemoteAudioTrack);
           })
-          .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => {
+          .on(lk.RoomEvent.TrackUnsubscribed, (track: LiveKit.RemoteTrack) => {
             setAgentTrack(current => (current === track ? null : current));
           })
-          .on(RoomEvent.DataReceived, (payload, _participant, _kind, topic) => {
+          .on(lk.RoomEvent.DataReceived, (payload, _participant, _kind, topic) => {
             if (run.cancelled || (topic && topic !== 'ui')) return;
             const next = decodeAgentState(payload);
             if (!next) return;
@@ -487,16 +641,34 @@ export function useVoiceCall({ userId, characterId, callTitle }: UseVoiceCallPar
             hintSeen = true;
             settler.propose(next);
           })
-          .on(RoomEvent.ActiveSpeakersChanged, (speakers: Participant[]) => {
+          .on(lk.RoomEvent.ActiveSpeakersChanged, (speakers: LiveKit.Participant[]) => {
             if (run.cancelled || hintSeen) return;
             const me = r.localParticipant.identity;
             settler.propose(orbFromSpeakers(speakers.some(s => s.identity !== me)));
           });
 
+        const [res] = await Promise.all([session, audioReady]);
+        // No session only when this attempt was left while it was starting.
+        if (run.cancelled || !res) return;
+        rememberLivekitUrl(res.livekit_url);
+
+        // The microphone opens while the room connects, and is published once
+        // it is up. The same track setMicrophoneEnabled(true) would make
+        // (the room's capture defaults, source Microphone), so Mute and the
+        // reconnect handling above treat it exactly the same.
+        micTracks = r.localParticipant.createTracks({ audio: true });
+        micTracks.catch(() => {});
         await r.connect(res.livekit_url, res.livekit_token);
         if (run.cancelled) return;
-        await r.localParticipant.setMicrophoneEnabled(true);
+        const [track] = await micTracks;
         if (run.cancelled) return;
+        if (track) {
+          await r.localParticipant.publishTrack(track);
+          micPublished = true;
+        }
+        if (run.cancelled) return;
+        // Mute pressed before the microphone was published still counts.
+        if (mutedRef.current) r.localParticipant.setMicrophoneEnabled(false).catch(() => {});
         // The mic is live from here, companion or not, so Mute works from here.
         setMicReady(true);
         // Only now: Android allows a microphone service once the mic permission

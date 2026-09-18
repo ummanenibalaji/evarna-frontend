@@ -15,9 +15,17 @@
 // the background; only a session the server has actually ended goes back to
 // the login screen. Being offline, or the server having a bad moment, is not a
 // reason to sign anyone out.
+//
+// Rendering is kept cheap, because this component re-renders on every change
+// to what the app knows: every screen is memoised and gets props that keep
+// their identity (stable handlers, one per route where they need the route),
+// so a router update only redraws the screens whose own props changed. The
+// toast lives in its own store (Feedback.tsx). Screen modules load the first
+// time one of their screens is drawn, and work Home doesn't need in its first
+// second waits until the launch has settled.
 
-import React, { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { Alert, AppState, BackHandler, StyleSheet, View } from 'react-native';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { Alert, AppState, BackHandler, Keyboard, StyleSheet, View } from 'react-native';
 import Animated from 'react-native-reanimated';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Sentry from '@sentry/react-native';
@@ -31,8 +39,13 @@ import {
   type NavState, type Route, type RouteParams,
 } from './history';
 import { ScreenStack, TabRoots } from './ScreenStack';
-import { BusyOverlay, FullScreenState, ToastHost, type ToastItem, type ToastSpec } from './Feedback';
+import { BusyOverlay, FullScreenState, ToastHost, showToast } from './Feedback';
 import { emitTabReselect } from './tabEvents';
+import { runAfterTransitions } from './sceneContext';
+import {
+  CACHE, SESSION_KEY, SIGNED_IN_KEY, appRevealed, canOpenFromBlob, readCachedData, revealApp, takeLaunchReads,
+  type CachedData, type SessionBlob,
+} from './launch';
 import {
   CONFIG, SCENARIOS, SANDBOX_MODES, ARCHETYPE_COLORS, type Companion, type Scenario, type SandboxMode,
 } from '../data/config';
@@ -48,7 +61,7 @@ import {
   API_MISCONFIGURED, ApiError, AuthExpiredError, getAuthToken, isNetworkError, limitMessage,
   loadAuthToken, setAuthToken, streamConversation, subscribeAuthExpired,
 } from '../api/client';
-import { readCache, writeCache, clearUserCache } from '../lib/cache';
+import { writeCache, clearUserCache } from '../lib/cache';
 import { getGoogleIdToken, googleSignOut, GoogleSignInUnavailable } from '../lib/googleSignIn';
 import { formatResetDate } from '../lib/entitlement';
 import { purchasesSignIn, purchasesSignOut } from '../lib/purchases';
@@ -59,38 +72,58 @@ import {
 } from '../lib/notifications';
 import { haptic } from '../lib/haptics';
 import { announce, useScreenReader } from '../hooks/useAccessibilityPrefs';
+import { prepareVoiceCall } from '../hooks/useVoiceCall';
 import { BottomNav, type TabId } from '../components/BottomNav';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 
-import {
-  S01_Splash, S02_Age, S03_Disclosure, S05_Pronouns, S06_Comm, S_Handoff,
-  S04_Archetype, S07_Voice, S08_Name, S_Meet, type PickNameResult,
-} from '../screens/Onboarding';
+import type { PickNameResult } from '../screens/Onboarding';
 import { S10_Home } from '../screens/Home';
-import { S09_FirstChat, S14_Chat } from '../screens/Chat';
-import { S12_VoiceCall } from '../screens/VoiceCall';
-import {
-  S15_StudioHome, S16_ScenarioSetup, S17_StudioSession, S18_CharacterCreator,
-} from '../screens/Studio';
-import { S19_SandboxHome, S20_SandboxSession } from '../screens/Sandbox';
-import { S21_Settings, S22_Memories, S23_Paywall, S_UserProfile } from '../screens/Settings';
-import {
-  S25_NotifPermission, S26_CompanionEdit, S27_StartCallDepleted,
-  S28_CrisisChat, S29_Recap, S30_Login,
-} from '../screens/Extras';
 
-// ── Storage keys ───────────────────────────────────────────────────────
-const SESSION_KEY = 'evarna_session';
-// Set at the first sign-in and kept through sign-out, so the login screen can
-// tell a first visit from a return. A reinstall clears it.
-const SIGNED_IN_KEY = 'evarna_signed_in_before';
-// Per-user stale-while-revalidate entries (lib/cache.ts).
-const CACHE = {
-  characters: 'characters',
-  entitlement: 'entitlement',
-  studio: 'studio-characters',
-  studioMemory: 'studio-memory',
-} as const;
+// ── Screens ────────────────────────────────────────────────────────────
+const REACT_MEMO = Symbol.for('react.memo');
+
+/** `component` wrapped in memo, unless its module already did that. */
+function memoOnce<C>(component: C): C {
+  if ((component as { $$typeof?: symbol }).$$typeof === REACT_MEMO) return component;
+  return memo(component as unknown as React.ComponentType<object>) as unknown as C;
+}
+
+/**
+ * A screen module that loads the first time one of its screens is drawn.
+ * Metro runs a module's code at its first require, so the screens (and the
+ * libraries they pull in) that a launch never opens cost that launch nothing.
+ * Each screen is memoised once, for the router's frequent re-renders.
+ */
+function lazyScreens<M extends object>(load: () => M) {
+  let loaded: M | undefined;
+  const made = new Map<keyof M, unknown>();
+  return function screen<K extends keyof M>(name: K): M[K] {
+    loaded ??= load();
+    if (!made.has(name)) made.set(name, memoOnce(loaded[name]));
+    return made.get(name) as M[K];
+  };
+}
+
+/* eslint-disable @typescript-eslint/no-var-requires */
+const onboardingScreens = lazyScreens(() => require('../screens/Onboarding') as typeof import('../screens/Onboarding'));
+// Kept once loaded, so sign-out can clear chat's per-account memory without
+// loading the module just to do it.
+let chatModule: typeof import('../screens/Chat') | undefined;
+const chatScreens = lazyScreens(() => (chatModule = require('../screens/Chat') as typeof import('../screens/Chat')));
+const callScreens = lazyScreens(() => require('../screens/VoiceCall') as typeof import('../screens/VoiceCall'));
+const studioScreens = lazyScreens(() => require('../screens/Studio') as typeof import('../screens/Studio'));
+const sandboxScreens = lazyScreens(() => require('../screens/Sandbox') as typeof import('../screens/Sandbox'));
+const settingsScreens = lazyScreens(() => require('../screens/Settings') as typeof import('../screens/Settings'));
+const extraScreens = lazyScreens(() => require('../screens/Extras') as typeof import('../screens/Extras'));
+/* eslint-enable @typescript-eslint/no-var-requires */
+
+// Home is the first screen of almost every launch, so it loads with the router.
+const Home = memoOnce(S10_Home);
+const TabBar = memoOnce(BottomNav);
+
+// Shared empties, so a memoised screen sees the same "nothing" every render.
+const NO_COMPANIONS: Companion[] = [];
+const NO_STUDIO_CHARACTERS: ApiStudioCharacter[] = [];
 
 // ── Timing ─────────────────────────────────────────────────────────────
 /** Coming back to the app refreshes lists at most this often. */
@@ -101,6 +134,18 @@ const FOCUS_REFRESH_MS = 3_000;
  *  long before carrying on locally. */
 const SIGN_OUT_GRACE_MS = 4_000;
 const SDK_SIGN_OUT_GRACE_MS = 1_500;
+/** A notification tap that launched the app is normally known at once; Home
+ *  waits no longer than this for one, and a later answer still opens its chat. */
+const PUSH_TAP_WAIT_MS = 50;
+/** Launch work Home doesn't draw from (the session check, the plan) waits
+ *  until the splash has faded and Home has had its first moments. */
+const LAUNCH_SETTLE_MS = 700;
+/** Work nobody is waiting for yet (voices, the store) waits for a quiet spell. */
+const LAUNCH_IDLE_MS = 2_500;
+/** The push token is sent again at most this often when nothing about it changed. */
+const PUSH_RESYNC_MS = 24 * 60 * 60 * 1000;
+/** The last push token upload: whose, from which zone, and when. */
+const PUSH_SYNC_KEY = 'evarna_push_synced';
 
 // Phase 1 cap until the paywall sells more companions.
 const MAX_COMPANIONS = 5;
@@ -130,6 +175,19 @@ const NO_SWIPE_BACK: ReadonlySet<ScreenName> = new Set<ScreenName>([
   'meet', 'notif', 'first-chat',
 ]);
 
+/** Screens that show the voice catalog: arriving on one loads it if needed. */
+const NEEDS_VOICES: ReadonlySet<ScreenName> = new Set<ScreenName>([
+  'archetype', 'voice', 'name', 'profile', 'scenario-setup', 'character-creator',
+]);
+
+/** Screens that move VoiceOver to their own title as they open (TopBar's
+ *  focusTitleOnMount). The router doesn't also announce them on arrival, or
+ *  the two would talk over each other; coming back to one still says where
+ *  the user is. */
+const FOCUSES_OWN_TITLE: ReadonlySet<ScreenName> = new Set<ScreenName>([
+  'crisis', 'user-profile', 'memories', 'studio-session',
+]);
+
 // ── Types ──────────────────────────────────────────────────────────────
 type LoadStatus = 'loading' | 'ready' | 'error';
 
@@ -149,17 +207,6 @@ type Launch =
   /** Signed in with nothing saved here, and the server can't be reached. */
   | { kind: 'unreachable'; reason: 'offline' | 'server'; retrying: boolean }
   | { kind: 'misconfigured' };
-
-/** What survives a relaunch so Home can paint before the network answers. */
-interface SessionBlob {
-  userId: string;
-  onboarded?: boolean;
-  /** The first companion, from sessions saved before `onboarded` existed. */
-  characterId?: string;
-  companion?: Companion;
-  isMinor?: boolean;
-  userName?: string;
-}
 
 /** The screen a go() call came from. Tab roots share the tab layer's key. */
 type Caller = { key: string; tab?: TabId };
@@ -197,16 +244,6 @@ const idOf = (c: Companion) => String(c.id);
 
 /** What a companion screen needs to find its companion again. */
 const companionParams = (c: Companion): RouteParams => ({ companionId: idOf(c), companion: c });
-
-function parseBlob(raw: string | null): SessionBlob | null {
-  if (!raw) return null;
-  try {
-    const b = JSON.parse(raw) as SessionBlob | null;
-    return b && typeof b.userId === 'string' && b.userId ? b : null;
-  } catch {
-    return null;
-  }
-}
 
 /** The headline for a paywall a screen opened without naming a reason.
  *  None is honest when nothing specific prompted it (Settings' plan row). */
@@ -324,6 +361,19 @@ function Redirect({ to, report }: { to: () => void; report?: string }) {
   return null;
 }
 
+/** Draws a screen unless its route was left through its error screen. The
+ *  error boundary remounts the screen as it lets go, and a screen that just
+ *  crashed would only crash again (and report again) while it slides away.
+ *  Read at render time, because a leaving screen is frozen and gets no new
+ *  props. */
+function UnlessDropped({ dropped, routeKey, children }: {
+  dropped: { readonly current: ReadonlySet<string> };
+  routeKey: string;
+  children: ReactNode;
+}) {
+  return dropped.current.has(routeKey) ? null : <>{children}</>;
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 export default function App() {
   const reduced = useReducedMotion();
@@ -335,8 +385,15 @@ export default function App() {
   const [nav, setNavState] = useState<NavState>(() => ({ tab: 'home', routes: [route('splash')] }));
   const navRef = useRef(nav);
   const setNav = useCallback((update: (s: NavState) => NavState) => {
-    const next = update(navRef.current);
-    if (next === navRef.current) return;
+    const prev = navRef.current;
+    const next = update(prev);
+    if (next === prev) return;
+    // The screen being covered or left stays mounted for a while, and its
+    // input would stay first responder: the next screen would open under a
+    // keyboard nothing on it can close, typing into a draft nobody can see.
+    // Dismissed before the next screen mounts, so one that focuses its own
+    // input on arrival keeps it.
+    if (top(next).key !== top(prev).key || next.tab !== prev.tab) Keyboard.dismiss();
     navRef.current = next;
     setNavState(next);
   }, []);
@@ -344,6 +401,8 @@ export default function App() {
   const [overlay, setOverlayState] = useState<Overlay | null>(null);
   const overlayRef = useRef<Overlay | null>(null);
   const setOverlay = useCallback((o: Overlay | null) => {
+    // A sheet opens over the screen, whose keyboard would otherwise cover it.
+    if (o) Keyboard.dismiss();
     overlayRef.current = o;
     setOverlayState(o);
   }, []);
@@ -351,25 +410,24 @@ export default function App() {
   const pendingTrigger = useRef<PaywallTrigger | null>(null);
 
   const [launch, setLaunch] = useState<Launch>(() => (API_MISCONFIGURED ? { kind: 'misconfigured' } : { kind: 'reading' }));
+  const launchRef = useRef(launch);
+  launchRef.current = launch;
   // A notification tap that launched the app, opened once Home is up.
   const initialPush = useRef<PushTapData | null>(null);
 
   // ── Feedback ────────────────────────────────────────────────────────
-  const [toast, setToast] = useState<ToastItem | null>(null);
-  const toastSeq = useRef(0);
-  const showToast = useCallback((spec: ToastSpec) => {
-    toastSeq.current += 1;
-    setToast({ ...spec, id: toastSeq.current });
-  }, []);
-  const dismissToast = useCallback((id: number) => {
-    setToast(current => (current && current.id === id ? null : current));
-  }, []);
+  // Toasts go through Feedback's own store (showToast), not this component.
+  // Busy stays here: it also hides the screens from VoiceOver and holds the
+  // swipe, and only signing out sets it.
   const [busy, setBusyState] = useState<string | null>(null);
   const busyRef = useRef<string | null>(null);
   const setBusy = useCallback((label: string | null) => {
     busyRef.current = label;
     setBusyState(label);
   }, []);
+  // Set for the whole of signOut(), which finishes the job itself if the
+  // server turns out to have ended the session already.
+  const signingOut = useRef(false);
 
   // ── Sign-in screen ──────────────────────────────────────────────────
   const [isNewUser, setIsNewUser] = useState(false);
@@ -453,13 +511,30 @@ export default function App() {
   const [sandboxMode, setSandboxMode] = useState<SandboxMode | null>(null);
 
   // ── Derived ─────────────────────────────────────────────────────────
-  const companions: Companion[] = characters ?? (savedCompanion ? [savedCompanion] : []);
+  // Same array until the list itself changes, so memoised screens skip.
+  const companions = useMemo(
+    () => characters ?? (savedCompanion ? [savedCompanion] : NO_COMPANIONS),
+    [characters, savedCompanion],
+  );
   const companionsRef = useRef(companions);
   companionsRef.current = companions;
   const companionById = (id?: string) => (id ? companions.find(c => idOf(c) === id) : undefined);
   /** The live copy of a route's companion, or its last known copy while the list catches up. */
   const companionFor = (r: Route): Companion | null =>
     companionById(r.params?.companionId) ?? r.params?.companion ?? null;
+
+  /** The live companion of the route with `key`, read when a handler runs. */
+  const companionOfRoute = useCallback((key: string): Companion | null => {
+    const r = navRef.current.routes.find(x => x.key === key);
+    if (!r) return null;
+    const id = r.params?.companionId;
+    return (id ? companionsRef.current.find(c => idOf(c) === id) : undefined) ?? r.params?.companion ?? null;
+  }, []);
+  /** The live copy of `c`, for a sheet opened with an older one. */
+  const liveCompanion = useCallback(
+    (c: Companion): Companion => companionsRef.current.find(x => idOf(x) === idOf(c)) ?? c,
+    [],
+  );
 
   const displayName = userName.trim();
   const homeStatus: LoadStatus = charactersFailed ? 'error' : characters === null ? 'loading' : 'ready';
@@ -529,19 +604,31 @@ export default function App() {
   }, [applyEntitlement]);
 
   // ── Data: voices (a public route, so they can load before sign-in) ──
-  const loadVoices = useCallback(async (): Promise<ApiVoice[]> => {
+  // Loaded when a screen that shows them comes up (NEEDS_VOICES), or in a
+  // quiet moment after launch, not with Home: Home never shows them.
+  const voicesInFlight = useRef<Promise<ApiVoice[]> | null>(null);
+  const loadVoices = useCallback((): Promise<ApiVoice[]> => {
+    if (voicesInFlight.current) return voicesInFlight.current;
     if (!voicesRef.current.length) setVoicesStatus('loading');
-    try {
-      const list = await getVoices();
-      voicesRef.current = list;
-      setVoices(list);
-      setVoicesStatus('ready');
-      return list;
-    } catch {
-      setVoicesStatus(voicesRef.current.length ? 'ready' : 'error');
-      return voicesRef.current;
-    }
+    const request = getVoices()
+      .then(list => {
+        voicesRef.current = list;
+        setVoices(list);
+        setVoicesStatus('ready');
+        return list;
+      })
+      .catch(() => {
+        setVoicesStatus(voicesRef.current.length ? 'ready' : 'error');
+        return voicesRef.current;
+      })
+      .finally(() => { voicesInFlight.current = null; });
+    voicesInFlight.current = request;
+    return request;
   }, []);
+  /** The catalog, unless it is already here or on its way. */
+  const ensureVoices = useCallback(() => {
+    if (!voicesRef.current.length) void loadVoices();
+  }, [loadVoices]);
 
   // ── Data: Studio (token-scoped, so never asked for without a session) ─
   const loadScenarios = useCallback(async () => {
@@ -579,11 +666,30 @@ export default function App() {
   // with the token so check-ins respect quiet hours where the user is now.
   const uploadPushToken = useCallback((token: string | null) => {
     if (!token) return;
-    setPushToken(token, getDeviceTimezone()).catch(() => {});
+    const uid = userIdRef.current;
+    const tz = getDeviceTimezone();
+    setPushToken(token, tz)
+      .then(() => {
+        if (uid) AsyncStorage.setItem(PUSH_SYNC_KEY, JSON.stringify({ uid, tz, at: Date.now() })).catch(() => {});
+      })
+      .catch(() => {});
   }, []);
   // Launch and sign-in refresh. Never prompts: the ask belongs to S25.
+  // Fetching the token asks Expo's push service over the network, so it and
+  // the upload are skipped while the last upload, for this account and time
+  // zone, is less than a day old. Sign-out forgets that upload.
   const refreshPushToken = useCallback(() => {
-    getPushTokenIfGranted().then(uploadPushToken).catch(() => {});
+    const uid = userIdRef.current;
+    void (async () => {
+      if ((await getPushPermissionStatus()) !== 'granted') return;
+      const raw = await AsyncStorage.getItem(PUSH_SYNC_KEY).catch(() => null);
+      let last: { uid?: string; tz?: string; at?: number } | null = null;
+      try { last = raw ? JSON.parse(raw) : null; } catch { last = null; }
+      const fresh = !!uid && last?.uid === uid && last.tz === getDeviceTimezone()
+        && typeof last.at === 'number' && Date.now() - last.at < PUSH_RESYNC_MS;
+      if (fresh) return;
+      uploadPushToken(await getPushTokenIfGranted());
+    })().catch(() => {});
   }, [uploadPushToken]);
   const prefetchPushStatus = useCallback(() => {
     getPushPermissionStatus().then(s => { pushStatus.current = s; }).catch(() => {});
@@ -601,23 +707,22 @@ export default function App() {
   /** Paints what this phone last saw for `uid`, without overwriting anything
    *  newer. Returns the saved companions, which the first screen may need
    *  before React has rendered them. */
-  const hydrateFromCache = useCallback(async (uid: string): Promise<Companion[] | null> => {
-    const [cachedCharacters, cachedEntitlement, cachedStudio, cachedMemory] = await Promise.all([
-      readCache<Companion[]>(uid, CACHE.characters),
-      readCache<ApiEntitlement>(uid, CACHE.entitlement),
-      readCache<ApiStudioCharacter[]>(uid, CACHE.studio),
-      readCache<Record<string, boolean>>(uid, CACHE.studioMemory),
-    ]);
+  const applyCached = useCallback((uid: string, cached: CachedData): Companion[] | null => {
     if (userIdRef.current !== uid) return null;
-    if (cachedCharacters) setCharacters(prev => prev ?? cachedCharacters);
-    if (cachedEntitlement && !entitlementRef.current) {
-      entitlementRef.current = cachedEntitlement;
-      setEntitlementState(cachedEntitlement);
+    const { characters: savedList, entitlement: savedPlan, studio, studioMemory: memory } = cached;
+    if (savedList) setCharacters(prev => prev ?? savedList);
+    if (savedPlan && !entitlementRef.current) {
+      entitlementRef.current = savedPlan;
+      setEntitlementState(savedPlan);
     }
-    if (cachedStudio) setStudioCharacters(prev => prev ?? cachedStudio);
-    if (cachedMemory) setStudioMemory(prev => ({ ...cachedMemory, ...prev }));
-    return cachedCharacters;
+    if (studio) setStudioCharacters(prev => prev ?? studio);
+    if (memory) setStudioMemory(prev => ({ ...memory, ...prev }));
+    return savedList;
   }, []);
+  const hydrateFromCache = useCallback(
+    async (uid: string): Promise<Companion[] | null> => applyCached(uid, await readCachedData(uid)),
+    [applyCached],
+  );
 
   /** Everything a signed-in, onboarded session keeps fresh. */
   const refreshAll = useCallback(() => {
@@ -629,11 +734,14 @@ export default function App() {
   /** Local sign-out: forget this account on this phone. Makes no requests. */
   const teardownLocal = useEvent(() => {
     sessionEpoch.current += 1;
+    // Chat keeps threads and drafts in memory per account.
+    chatModule?.clearChatMemory();
     charactersSeq.current += 1;
     studioSeq.current += 1;
     setAuthToken(null);
-    AsyncStorage.removeItem(SESSION_KEY).catch(() => {});
+    AsyncStorage.multiRemove([SESSION_KEY, PUSH_SYNC_KEY]).catch(() => {});
     void clearUserCache();
+    purchasesUser.current = null;
     purchasesSignOut().catch(() => {});
     setUserId(null);
     setOnboarded(false);
@@ -669,6 +777,9 @@ export default function App() {
   // another device). The client has already dropped the token; tidy up and
   // say what happened.
   useEffect(() => subscribeAuthExpired(() => {
+    // Mid sign-out (its last request can be the one that finds the session
+    // already over): signOut() tears down and goes to login itself, once.
+    if (signingOut.current) return;
     teardownLocal();
     setBusy(null);
     setIsNewUser(false);
@@ -689,8 +800,21 @@ export default function App() {
   // Only the screen that was swiped leaves, even if something else arrived mid-swipe.
   const swipedBack = useEvent((key: string) => setNav(s => (top(s).key === key ? pop(s) : s)));
 
+  // ── Store ───────────────────────────────────────────────────────────
+  // RevenueCat's setup runs on the main thread, so it waits for a quiet
+  // moment after launch (see below) instead of landing on Home's first
+  // second, and the paywall does it on the spot if it comes first.
+  const purchasesUser = useRef<string | null>(null);
+  const ensurePurchases = useEvent(() => {
+    const uid = userIdRef.current;
+    if (!uid || purchasesUser.current === uid) return;
+    purchasesUser.current = uid;
+    void purchasesSignIn(uid);
+  });
+
   const openPaywall = useEvent((trigger?: PaywallTrigger) => {
     pendingTrigger.current = null;
+    ensurePurchases();
     // The sheet shows the balance and the catalog, so re-read on the way in.
     void refreshEntitlement();
     setOverlay({ kind: 'paywall', trigger });
@@ -721,6 +845,10 @@ export default function App() {
       return;
     }
     setOverlay(null);
+    if (top(navRef.current).name === 'call') return;
+    // The microphone check and the session request start now, while the
+    // call screen renders and slides in; its hook takes them over.
+    prepareVoiceCall(idOf(c));
     setNav(s => (top(s).name === 'call' ? s : push(s, route('call', companionParams(c)))));
   });
 
@@ -759,18 +887,23 @@ export default function App() {
    */
   const signOut = useEvent(async () => {
     if (busyRef.current) return;
+    signingOut.current = true;
     setBusy('Signing out…');
-    // While the token still works: a signed-out phone must stop receiving
-    // this account's messages. Best effort, and never for long.
-    await Promise.race([setPushToken(null).catch(() => {}), delay(SIGN_OUT_GRACE_MS)]);
-    // Clear the native Google session too, so the next sign-in shows the
-    // account picker instead of silently resuming the same account.
-    await Promise.race([googleSignOut().catch(() => {}), delay(SDK_SIGN_OUT_GRACE_MS)]);
-    teardownLocal();
-    setIsNewUser(false);
-    setAuthError(null);
-    setNav(s => resetToFlow(s, route('login')));
-    setBusy(null);
+    try {
+      // While the token still works: a signed-out phone must stop receiving
+      // this account's messages. Best effort, and never for long.
+      await Promise.race([setPushToken(null).catch(() => {}), delay(SIGN_OUT_GRACE_MS)]);
+      // Clear the native Google session too, so the next sign-in shows the
+      // account picker instead of silently resuming the same account.
+      await Promise.race([googleSignOut().catch(() => {}), delay(SDK_SIGN_OUT_GRACE_MS)]);
+      teardownLocal();
+      setIsNewUser(false);
+      setAuthError(null);
+      setNav(s => resetToFlow(s, route('login')));
+    } finally {
+      signingOut.current = false;
+      setBusy(null);
+    }
   });
 
   /**
@@ -944,11 +1077,16 @@ export default function App() {
         // made it are done with.
         setNav(x => (addMode === 'add' && inTabs(x) ? replaceAbove(x, 0, route('meet')) : resetToFlow(x, route('meet'))));
         return;
-      case 'first-chat':
+      case 'first-chat': {
         if (t.name === 'meet') { void continueFromMeet(t); return; }
+        // Back to the first chat this was opened from (crisis support), with
+        // its conversation, rather than a new, empty one on top.
+        const open = indexBelowTop(s, 'first-chat');
+        if (open >= 0) { setNav(x => popTo(x, open)); return; }
         if (addMode === 'add') { finishAddCompanion(); return; }
         if (t.name !== 'first-chat') setNav(x => push(x, route('first-chat')));
         return;
+      }
       default:
         break;
     }
@@ -982,23 +1120,28 @@ export default function App() {
     setNav(x => (t.name === 'call' ? replaceTop(x, next) : push(x, next)));
   });
 
-  // One stable go per route, so a screen can keep it in effect dependencies.
-  const goCache = useRef(new Map<string, (s: ScreenName) => void>());
-  const goFor = (key: string, tab?: TabId) => {
-    const id = tab ? `${key}|${tab}` : key;
-    let go = goCache.current.get(id);
-    if (!go) {
-      go = (target: ScreenName) => navigate({ key, tab }, target);
-      goCache.current.set(id, go);
+  // One function per route and role (its go, its call button…), made once
+  // and kept while the route lives. A memoised screen then sees the same
+  // props on every render, and a screen can keep them in effect dependencies.
+  // They read the route's companion when they run, never a stale copy.
+  const routeFns = useRef(new Map<string, unknown>());
+  const forRoute = <F,>(key: string, role: string, make: () => F): F => {
+    const id = `${key}|${role}`;
+    let fn = routeFns.current.get(id) as F | undefined;
+    if (fn === undefined) {
+      fn = make();
+      routeFns.current.set(id, fn);
     }
-    return go;
+    return fn;
   };
   useEffect(() => {
     const live = new Set(nav.routes.map(r => r.key));
-    for (const id of goCache.current.keys()) {
-      if (!live.has(id.split('|')[0])) goCache.current.delete(id);
+    for (const id of routeFns.current.keys()) {
+      if (!live.has(id.split('|')[0])) routeFns.current.delete(id);
     }
   }, [nav.routes]);
+  const goFor = (key: string, tab?: TabId) =>
+    forRoute(key, tab ? `go:${tab}` : 'go', () => (target: ScreenName) => navigate({ key, tab }, target));
 
   /** go() for the sheets. Closing one names the screen beneath it. */
   const overlayGo = useEvent((target: ScreenName) => {
@@ -1024,11 +1167,14 @@ export default function App() {
   });
 
   /** Removes a crashed pushed screen, back to the one it was opened from. */
+  const droppedRoutes = useRef(new Set<string>());
   const dropRoute = useEvent((key: string) => {
-    setNav(s => {
-      const i = s.routes.findIndex(r => r.key === key);
-      return i > 0 ? popTo(s, i - 1) : s;
-    });
+    const i = navRef.current.routes.findIndex(r => r.key === key);
+    // Only a screen that actually leaves stays blank on its way out; one
+    // that can't leave keeps its error screen and its "Try again".
+    if (i <= 0) return;
+    droppedRoutes.current.add(key);
+    setNav(s => popTo(s, i - 1));
   });
 
   const redirectHome = useEvent(() => {
@@ -1101,7 +1247,9 @@ export default function App() {
    * beneath it for Back; otherwise the chat opens once the list arrives.
    * Arriving on Home refreshes the list (see the focus effect below).
    */
+  const entered = useRef(false);
   const enterApp = useEvent(async (known: Companion[] | null) => {
+    entered.current = true;
     const tap = initialPush.current;
     initialPush.current = null;
     const c = tap?.character_id ? (known ?? companionsRef.current).find(x => idOf(x) === tap.character_id) : undefined;
@@ -1133,14 +1281,22 @@ export default function App() {
       setOnboarded(true);
       if (blocking) {
         await enterApp(await hydrateFromCache(me.user_id));
-        void refreshEntitlement();
+        afterLaunch(() => { void refreshEntitlement(); });
       }
     } catch (e) {
       // A session the server ended is handled by the auth-expired listener.
       if (e instanceof AuthExpiredError) return;
       const unreachable = isNetworkError(e) || (e instanceof ApiError && (e.status >= 500 || e.status === 429));
       if (blocking && unreachable) {
-        setLaunch({ kind: 'unreachable', reason: isNetworkError(e) ? 'offline' : 'server', retrying: false });
+        const reason = isNetworkError(e) ? 'offline' : 'server';
+        // A retry that fails the same way changes nothing on screen but the
+        // button's spinner, so say so: otherwise VoiceOver users can't tell
+        // the retry ran at all. A new reason is read out by the screen itself.
+        const was = launchRef.current;
+        if (was.kind === 'unreachable' && was.reason === reason) {
+          announce(reason === 'offline' ? "Still can't reach Evarna." : 'Evarna is still having trouble.');
+        }
+        setLaunch({ kind: 'unreachable', reason, retrying: false });
       } else if (blocking) {
         // The server answered, but not for this account: start over cleanly.
         teardownLocal();
@@ -1161,20 +1317,36 @@ export default function App() {
     }
   });
 
+  // What Home doesn't draw from waits until the launch has settled: the
+  // splash has faded, Home has had its first moments and nothing is moving.
+  // Each answer re-renders the router, and during Home's entrance that costs
+  // frames.
+  const afterLaunch = useCallback((fn: () => void, ms = LAUNCH_SETTLE_MS) => {
+    setTimeout(() => runAfterTransitions(fn), ms);
+  }, []);
+
   const launched = useRef(false);
   useEffect(() => {
     if (API_MISCONFIGURED || launched.current) return;
     launched.current = true;
     (async () => {
-      const [raw, token, signedInBefore, tap] = await Promise.all([
-        AsyncStorage.getItem(SESSION_KEY).catch(() => null),
-        loadAuthToken(),
-        AsyncStorage.getItem(SIGNED_IN_KEY).catch(() => null),
-        // Read before the first screen is chosen, so a tap that launched the
-        // app opens its chat without flashing Home first.
-        getInitialPushTap(),
-      ]);
-      initialPush.current = tap;
+      // Read before the first screen is chosen, so a tap that launched the
+      // app opens its chat without flashing Home first; usually known at
+      // once, and never waited on for long.
+      const tapRead = getInitialPushTap().catch(() => null);
+      // Started as the app's JS loaded (launch.ts), so usually done by now.
+      const { token, signedInBefore, blob, cached } = await takeLaunchReads();
+      const tap = await Promise.race([tapRead, delay(PUSH_TAP_WAIT_MS).then(() => undefined)]);
+      if (tap !== undefined) {
+        initialPush.current = tap;
+      } else {
+        // Late: open it once Home is up, or hand it to the entry still to come.
+        void tapRead.then(late => {
+          if (!late) return;
+          if (entered.current) void openFromPush(late);
+          else initialPush.current = late;
+        });
+      }
 
       if (!token) {
         // The splash leads to sign-in.
@@ -1183,35 +1355,46 @@ export default function App() {
         return;
       }
 
-      const blob = parseBlob(raw);
-      if (blob && (blob.onboarded || blob.characterId)) {
+      if (canOpenFromBlob(blob)) {
         setUserId(blob.userId);
         setOnboarded(true);
         if (blob.isMinor !== undefined) setIsMinor(blob.isMinor);
         if (blob.userName) setUserName(blob.userName);
         if (blob.companion) setSavedCompanion(blob.companion);
-        const saved = await hydrateFromCache(blob.userId);
+        const saved = cached ? applyCached(blob.userId, cached) : null;
         await enterApp(saved ?? (blob.companion ? [blob.companion] : null));
-        void refreshEntitlement();
-        void confirmSession(false);
+        afterLaunch(() => {
+          void refreshEntitlement();
+          void confirmSession(false);
+        });
         return;
       }
       // Signed in, but nothing saved here: the splash waits for the server.
       setLaunch({ kind: 'confirming' });
       await confirmSession(true);
     })();
-  }, [confirmSession, enterApp, hydrateFromCache, refreshEntitlement, setUserId]);
+  }, [afterLaunch, applyCached, confirmSession, enterApp, openFromPush, refreshEntitlement, setUserId]);
 
   const retryLaunch = useEvent(() => {
     setLaunch(l => (l.kind === 'unreachable' ? { ...l, retrying: true } : l));
     void confirmSession(true);
   });
 
-  // Voices are public: load them at once so the voice step never waits.
-  useEffect(() => { void loadVoices(); }, [loadVoices]);
-
-  // Purchases belong to the signed-in account, so RevenueCat follows it.
-  useEffect(() => { if (userId) void purchasesSignIn(userId); }, [userId]);
+  // Signed in: the voice catalog (for a companion's profile, Studio setup)
+  // and the store (for the paywall) are set up in a quiet moment, not with
+  // Home. Both are also fetched on the spot by whatever needs them first.
+  useEffect(() => {
+    if (!userId) return;
+    let cancelled = false;
+    afterLaunch(() => {
+      if (cancelled) return;
+      ensureVoices();
+      ensurePurchases();
+      // The chat screen's code, so the first companion tapped opens at once.
+      chatScreens('S14_Chat');
+    }, LAUNCH_IDLE_MS);
+    return () => { cancelled = true; };
+  }, [userId, afterLaunch, ensureVoices, ensurePurchases]);
 
   // Persist what the next launch needs to paint Home at once. Only for an
   // account that has finished onboarding: a half-made account goes back
@@ -1318,7 +1501,15 @@ export default function App() {
   // on something that failed. Some refusals move the user on themselves:
   // under 15 goes back to the birthday, an account that's already set up goes
   // home, and one that never finished onboarding goes back to it.
-  const handlePickName = useEvent(async (name: string): Promise<PickNameResult> => {
+  //
+  // One request at a time, and nothing goes back while it is out: S08 only
+  // moves on to Meet if it is still there when the answer lands, so leaving
+  // mid-request (an edge swipe, Android back) would strand a companion that
+  // exists, and asking again would make a second one, or in onboarding hit
+  // "already onboarded" and skip Meet and the first chat.
+  const nameRequest = useRef<Promise<PickNameResult> | null>(null);
+  const [creatingCompanion, setCreatingCompanion] = useState(false);
+  const createCompanion = useEvent(async (name: string): Promise<PickNameResult> => {
     setCompanionName(name);
     const apiArchetype = ARCHETYPE_MAP[archetypePick] ?? archetypePick;
     // The backend's gender enum is strict (male/female/nonbinary/undisclosed).
@@ -1412,6 +1603,17 @@ export default function App() {
     }
   });
 
+  const handlePickName = useEvent((name: string): Promise<PickNameResult> => {
+    if (nameRequest.current) return nameRequest.current;
+    setCreatingCompanion(true);
+    const request = createCompanion(name).finally(() => {
+      nameRequest.current = null;
+      setCreatingCompanion(false);
+    });
+    nameRequest.current = request;
+    return request;
+  });
+
   // ── Keeping things fresh ────────────────────────────────────────────
   const t = top(nav);
   const tabsBase = inTabs(nav);
@@ -1421,27 +1623,47 @@ export default function App() {
   // Arriving on a list refreshes it, so Home shows the latest message and
   // order after a chat or a call. Coming back from a pushed screen always
   // refreshes; flicking between tabs is throttled so it doesn't refetch on
-  // every tap.
+  // every tap. The request goes out once the screen has stopped moving: an
+  // answer landing mid-slide would re-render and reflow the list being
+  // uncovered while the UI thread animates it.
   const lastFocusFetch = useRef<Partial<Record<ScreenName, number>>>({});
   const lastTopKey = useRef(topKey);
   useEffect(() => {
     const returned = lastTopKey.current !== topKey;
     lastTopKey.current = topKey;
+    // A screen that shows the voice catalog loads it if nothing else has.
+    if (NEEDS_VOICES.has(topName)) ensureVoices();
     if (!tabsBase || launch.kind !== 'ready') return;
-    const due = (name: ScreenName) => {
-      const now = Date.now();
-      if (!returned && now - (lastFocusFetch.current[name] ?? 0) < FOCUS_REFRESH_MS) return false;
-      lastFocusFetch.current[name] = now;
-      return true;
-    };
-    if (topName === 'home' && due('home')) void refreshUserCharacters();
-    if (topName === 'studio' && due('studio')) {
-      void refreshStudio();
-      if (!scenariosRef.current) void loadScenarios();
+    const due = (name: ScreenName) =>
+      returned || Date.now() - (lastFocusFetch.current[name] ?? 0) >= FOCUS_REFRESH_MS;
+    // Stamped when the request actually goes, so one cancelled by a quick
+    // move on doesn't count as done.
+    const fetched = (name: ScreenName) => { lastFocusFetch.current[name] = Date.now(); };
+    let work: (() => void) | null = null;
+    if (topName === 'home' && due('home')) {
+      work = () => { fetched('home'); void refreshUserCharacters(); };
+    } else if (topName === 'studio' && due('studio')) {
+      work = () => {
+        fetched('studio');
+        void refreshStudio();
+        if (!scenariosRef.current) void loadScenarios();
+      };
+    } else if (topName === 'scenario-setup' && !scenariosRef.current) {
+      work = () => { void loadScenarios(); };
+    } else if (topName === 'settings' && due('settings')) {
+      work = () => { fetched('settings'); void refreshEntitlement(); };
     }
-    if (topName === 'scenario-setup' && !scenariosRef.current) void loadScenarios();
-    if (topName === 'settings' && due('settings')) void refreshEntitlement();
-  }, [topKey, topName, tabsBase, launch.kind, refreshUserCharacters, refreshStudio, loadScenarios, refreshEntitlement]);
+    return work ? runAfterTransitions(work) : undefined;
+  }, [topKey, topName, tabsBase, launch.kind, ensureVoices, refreshUserCharacters, refreshStudio, loadScenarios, refreshEntitlement]);
+
+  // A tab drawn ahead of its first visit (TabRoots) fetches what it shows,
+  // so it opens complete instead of on a skeleton.
+  const prewarmedTab = useEvent((tab: TabId) => {
+    if (tab !== 'studio') return;
+    lastFocusFetch.current.studio = Date.now();
+    void refreshStudio();
+    if (!scenariosRef.current) void loadScenarios();
+  });
 
   // A call spends minutes, however it was left: its own buttons, the Android
   // back button, or the chat button inside it.
@@ -1473,7 +1695,8 @@ export default function App() {
   // Sheets inside screens register their own handler, which runs first.
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (busyRef.current) return true;
+      // Nothing leaves while signing out or while a companion is being made.
+      if (busyRef.current || nameRequest.current) return true;
       if (overlayRef.current) { setOverlay(null); return true; }
       const s = navRef.current;
       if (top(s).name === 'call') {
@@ -1493,9 +1716,19 @@ export default function App() {
   // ── VoiceOver: say where the user has arrived ───────────────────────
   // Keyed on arrivals, not re-renders. Tab switches aren't announced: the
   // selected tab already says its own name.
+  const lastArrival = useRef<string | null>(null);
+  const beenOnTop = useRef<ReadonlySet<string>>(new Set());
   useEffect(() => {
+    const s = navRef.current;
+    const r = top(s);
+    // Back on a screen that was on top before: it is already mounted, so it
+    // won't move focus to its title again.
+    const returned = lastArrival.current !== r.key && beenOnTop.current.has(r.key);
+    lastArrival.current = r.key;
+    const live = new Set(s.routes.map(x => x.key));
+    beenOnTop.current = new Set([...beenOnTop.current, r.key].filter(k => live.has(k)));
     if (!screenReader || launch.kind !== 'ready') return;
-    const r = top(navRef.current);
+    if (FOCUSES_OWN_TITLE.has(r.name) && !returned) return;
     const title = spokenTitle(r, companionFor(r), { scenario: scenario?.name, mode: sandboxMode?.name, meet: companionName || undefined });
     if (!title) return;
     // After the transition, so the tap that caused it doesn't talk over it.
@@ -1541,13 +1774,21 @@ export default function App() {
     setSandboxMode(m);
     setNav(x => push(x, route('sandbox-session')));
   });
-  const startStudioSession = useEvent((id: string, remember: boolean) => {
+  /** S16 calls this once its character exists, after a request the user may
+   *  not have waited for. `from` is the setup screen that asked. */
+  const startStudioSession = useEvent((from: string, id: string, remember: boolean) => {
     rememberStudioChoice(id, remember);
+    if (top(navRef.current).key !== from) {
+      // They left setup before it finished: the character is made, so it
+      // shows up in Studio to resume, but nothing opens over where they are now.
+      void refreshStudio();
+      return;
+    }
     setStudioCharacter(null);
     setStudioCharacterId(id);
     setStudioRemember(remember);
     // The setup form is spent once the session starts, so Back returns to Studio.
-    setNav(x => replaceTop(x, route('studio-session')));
+    setNav(x => (top(x).key === from ? replaceTop(x, route('studio-session')) : x));
   });
   const capUpgrade = useEvent(() => { pendingTrigger.current = 'cap'; });
   // Returned, so the ask stays on screen until the system dialog is answered.
@@ -1556,6 +1797,36 @@ export default function App() {
     return requestPushPermission().then(uploadPushToken).catch(() => {});
   });
   const recapAfterCall = useEvent((c: Companion) => leaveCall(() => setOverlay({ kind: 'recap', companion: c })));
+  // The call has hung up by now: it leaves, and the plans open over whatever
+  // it was started from, so closing them can't redial.
+  const callOutOfMinutes = useEvent(() => leaveCall(() => openPaywall('voice')));
+  // Returned, not voided: each button shows its own spinner until they settle.
+  const signInWithGoogleTap = useEvent(() => handleOAuth('google'));
+  const signInWithAppleTap = useEvent(() => handleOAuth('apple'));
+  const signOutTap = useEvent(() => { void signOut(); });
+  const depletedUpgrade = useEvent(() => openPaywall('voice'));
+  const depletedText = useEvent(() => {
+    const o = overlayRef.current;
+    if (o?.kind === 'callDepleted') void openChat(liveCompanion(o.companion));
+  });
+
+  // Each keeps its identity while its inputs do, for the memoised screens.
+  const meetCompanion = useMemo(() => ({ name: companionName, archetype: archetypePick }), [companionName, archetypePick]);
+  const notifCompanion = useMemo(
+    () => created ?? { id: 'new', name: companionName, archetype: archetypePick },
+    [created, companionName, archetypePick],
+  );
+  const companionLimitReason = companions.length >= MAX_COMPANIONS
+    ? `You can have up to ${MAX_COMPANIONS} companions for now.`
+    : serverLimitReason ?? undefined;
+  const [overlayExit] = useState(() => exit.fade);
+
+  // The first screen is drawn under the native launch screen, which then
+  // fades straight onto it; a launch that can't go anywhere shows its own
+  // screen instead.
+  useEffect(() => {
+    if (launch.kind === 'misconfigured' || launch.kind === 'unreachable') revealApp();
+  }, [launch.kind]);
 
   // ── Rendering ───────────────────────────────────────────────────────
   const renderTabRoot = (tab: TabId): ReactNode => {
@@ -1563,7 +1834,7 @@ export default function App() {
     switch (tab) {
       case 'home':
         return (
-          <S10_Home
+          <Home
             go={go}
             companions={companions}
             userName={displayName}
@@ -1575,18 +1846,15 @@ export default function App() {
             onCallCompanion={startCall}
             onMood={moodCompanion}
             onAddCompanion={addCompanion}
-            companionLimitReason={
-              companions.length >= MAX_COMPANIONS
-                ? `You can have up to ${MAX_COMPANIONS} companions for now.`
-                : serverLimitReason ?? undefined
-            }
+            companionLimitReason={companionLimitReason}
           />
         );
-      case 'studio':
+      case 'studio': {
+        const StudioHome = studioScreens('S15_StudioHome');
         return (
-          <S15_StudioHome
+          <StudioHome
             go={go}
-            characters={studioCharacters ?? []}
+            characters={studioCharacters ?? NO_STUDIO_CHARACTERS}
             status={studioStatus}
             onRetry={refreshStudio}
             onRefresh={refreshStudio}
@@ -1596,11 +1864,15 @@ export default function App() {
             openCreator={openCreator}
           />
         );
-      case 'sandbox':
-        return <S19_SandboxHome go={go} comingSoon={CONFIG.sandboxComingSoon} isMinor={isMinor} openMode={openSandboxMode} />;
-      case 'settings':
+      }
+      case 'sandbox': {
+        const SandboxHome = sandboxScreens('S19_SandboxHome');
+        return <SandboxHome go={go} comingSoon={CONFIG.sandboxComingSoon} isMinor={isMinor} openMode={openSandboxMode} />;
+      }
+      case 'settings': {
+        const Settings = settingsScreens('S21_Settings');
         return (
-          <S21_Settings
+          <Settings
             go={go}
             entitlement={entitlement}
             entitlementFailed={entitlementFailed}
@@ -1615,6 +1887,7 @@ export default function App() {
             onDeleteAccount={deleteAccount}
           />
         );
+      }
     }
   };
 
@@ -1626,16 +1899,18 @@ export default function App() {
     const nameBelow = index > 0 ? nav.routes[index - 1].name : undefined;
 
     switch (r.name) {
-      case 'splash':
-        return <S01_Splash go={go} booting={launch.kind !== 'ready'} />;
-      case 'login':
+      case 'splash': {
+        const Splash = onboardingScreens('S01_Splash');
+        return <Splash go={go} booting={launch.kind !== 'ready'} />;
+      }
+      case 'login': {
+        const Login = extraScreens('S30_Login');
         return (
-          <S30_Login
+          <Login
             isNew={isNewUser}
             appleAvailable={false}
-            // Returned, not voided: each button shows its own spinner until they settle.
-            onGoogle={() => handleOAuth('google')}
-            onApple={() => handleOAuth('apple')}
+            onGoogle={signInWithGoogleTap}
+            onApple={signInWithAppleTap}
             onEmailRequest={handleEmailRequest}
             onEmailVerify={handleEmailVerify}
             devCode={devCode}
@@ -1643,53 +1918,75 @@ export default function App() {
             error={authError}
           />
         );
-      case 'age':
+      }
+      case 'age': {
+        const Age = onboardingScreens('S02_Age');
         return (
-          <S02_Age
+          <Age
             go={go}
             onDob={setDateOfBirth}
             onBack={nameBelow ? back : undefined}
-            onSignOut={() => { void signOut(); }}
+            onSignOut={signOutTap}
             initialDob={dateOfBirth || undefined}
           />
         );
-      case 'disclosure':
-        return <S03_Disclosure go={go} />;
-      case 'pronouns':
-        return <S05_Pronouns go={go} onGender={setUserGender} onName={setUserName} initialName={userName || undefined} />;
-      case 'comm':
-        return <S06_Comm go={go} onCommStyle={setCommStyle} />;
-      case 'handoff':
-        return <S_Handoff go={go} />;
-      case 'archetype':
-        return <S04_Archetype go={go} onPick={setArchetypePick} backTo={nameBelow ?? 'handoff'} />;
-      case 'voice':
-        return <S07_Voice go={go} onPickVoice={setVoicePick} apiVoices={voices} voicesStatus={voicesStatus} onRetryVoices={loadVoices} />;
-      case 'name':
-        return <S08_Name go={go} archetype={archetypePick} onPickName={handlePickName} />;
-      case 'meet':
+      }
+      case 'disclosure': {
+        const Disclosure = onboardingScreens('S03_Disclosure');
+        return <Disclosure go={go} />;
+      }
+      case 'pronouns': {
+        const Pronouns = onboardingScreens('S05_Pronouns');
+        return <Pronouns go={go} onGender={setUserGender} onName={setUserName} initialName={userName || undefined} />;
+      }
+      case 'comm': {
+        const Comm = onboardingScreens('S06_Comm');
+        return <Comm go={go} onCommStyle={setCommStyle} />;
+      }
+      case 'handoff': {
+        const Handoff = onboardingScreens('S_Handoff');
+        return <Handoff go={go} />;
+      }
+      case 'archetype': {
+        const Archetype = onboardingScreens('S04_Archetype');
+        return <Archetype go={go} onPick={setArchetypePick} backTo={nameBelow ?? 'handoff'} />;
+      }
+      case 'voice': {
+        const Voice = onboardingScreens('S07_Voice');
+        return <Voice go={go} onPickVoice={setVoicePick} apiVoices={voices} voicesStatus={voicesStatus} onRetryVoices={loadVoices} />;
+      }
+      case 'name': {
+        const Name = onboardingScreens('S08_Name');
+        return <Name go={go} archetype={archetypePick} onPickName={handlePickName} />;
+      }
+      case 'meet': {
+        const Meet = onboardingScreens('S_Meet');
         return (
-          <S_Meet
+          <Meet
             go={go}
-            companion={{ name: companionName, archetype: archetypePick }}
+            companion={meetCompanion}
             accent={ARCHETYPE_COLORS[archetypePick] ?? W.primary}
             voiceId={chosenVoiceId ?? undefined}
           />
         );
-      case 'notif':
+      }
+      case 'notif': {
+        const NotifPermission = extraScreens('S25_NotifPermission');
         return (
-          <S25_NotifPermission
+          <NotifPermission
             go={go}
-            companion={created ?? { id: 'new', name: companionName, archetype: archetypePick }}
+            companion={notifCompanion}
             onAllow={allowNotifications}
             next={r.params?.next}
           />
         );
-      case 'first-chat':
+      }
+      case 'first-chat': {
         // Only ever with a real companion: without one there is nobody to talk to.
         if (!created) return missing;
+        const FirstChat = chatScreens('S09_FirstChat');
         return (
-          <S09_FirstChat
+          <FirstChat
             go={go}
             isMinor={isMinor}
             companion={created}
@@ -1700,10 +1997,13 @@ export default function App() {
             onCapUpgrade={capUpgrade}
           />
         );
-      case 'chat':
+      }
+      case 'chat': {
         if (!companion) return missing;
+        const Chat = chatScreens('S14_Chat');
+        const key = r.key;
         return (
-          <S14_Chat
+          <Chat
             key={idOf(companion)}
             go={go}
             isMinor={isMinor}
@@ -1715,13 +2015,19 @@ export default function App() {
             userId={userId ?? undefined}
             characterId={idOf(companion)}
             initialDraft={r.params?.draft}
-            onCall={() => startCall(companion)}
+            onCall={forRoute(key, 'call', () => () => {
+              const c = companionOfRoute(key);
+              if (c) startCall(c);
+            })}
           />
         );
-      case 'call':
+      }
+      case 'call': {
         if (!companion) return missing;
+        const VoiceCall = callScreens('S12_VoiceCall');
+        const key = r.key;
         return (
-          <S12_VoiceCall
+          <VoiceCall
             go={go}
             companion={companion}
             accent={CONFIG.orbHue}
@@ -1729,32 +2035,41 @@ export default function App() {
             voiceSecondsRemaining={entitlement ? entitlement.voice.remaining_seconds : null}
             userId={userId ?? undefined}
             characterId={idOf(companion)}
-            // The call has hung up by now: it leaves, and the plans open
-            // over whatever it was started from, so closing them can't redial.
-            onOutOfMinutes={() => leaveCall(() => openPaywall('voice'))}
+            onOutOfMinutes={callOutOfMinutes}
             onCallEnded={refreshEntitlement}
-            onRecap={() => recapAfterCall(companion)}
+            onRecap={forRoute(key, 'recap', () => () => {
+              const c = companionOfRoute(key);
+              if (c) recapAfterCall(c);
+            })}
             returnTo={nameBelow === 'chat' ? 'chat' : 'home'}
           />
         );
-      case 'crisis':
-        return <S28_CrisisChat go={go} backTo={nameBelow ?? 'home'} />;
-      case 'profile':
+      }
+      case 'crisis': {
+        const Crisis = extraScreens('S28_CrisisChat');
+        return <Crisis go={go} backTo={nameBelow ?? 'home'} />;
+      }
+      case 'profile': {
         if (!companion) return missing;
+        const CompanionEdit = extraScreens('S26_CompanionEdit');
+        // A profile route belongs to one companion for its whole life.
+        const id = idOf(companion);
         return (
-          <S26_CompanionEdit
+          <CompanionEdit
             go={go}
             companion={companion}
-            onSave={p => saveCompanion(idOf(companion), p)}
+            onSave={forRoute(r.key, 'save', () => (p: UpdateCharacterPayload) => saveCompanion(id, p))}
             onRefresh={refreshUserCharacters}
-            onDelete={() => deleteCompanion(idOf(companion))}
+            onDelete={forRoute(r.key, 'delete', () => () => deleteCompanion(id))}
             backTo={nameBelow ?? 'home'}
             apiVoices={voices}
           />
         );
-      case 'user-profile':
+      }
+      case 'user-profile': {
+        const UserProfile = settingsScreens('S_UserProfile');
         return (
-          <S_UserProfile
+          <UserProfile
             go={go}
             userName={displayName}
             userEmail={userEmail}
@@ -1763,15 +2078,19 @@ export default function App() {
             backTo={nameBelow ?? 'settings'}
           />
         );
+      }
       case 'memories': {
         // From Settings there is no particular companion: the most recent one.
         const c = companion ?? companions[0] ?? null;
-        return <S22_Memories go={go} characterId={c ? idOf(c) : undefined} companionName={c?.name} />;
+        const Memories = settingsScreens('S22_Memories');
+        return <Memories go={go} characterId={c ? idOf(c) : undefined} companionName={c?.name} />;
       }
       case 'scenario-setup': {
         const sc = scenario ?? SCENARIOS[0];
+        const ScenarioSetup = studioScreens('S16_ScenarioSetup');
+        const key = r.key;
         return (
-          <S16_ScenarioSetup
+          <ScenarioSetup
             go={go}
             scenario={sc}
             def={scenarios?.find(d => d.id === sc.id)}
@@ -1780,13 +2099,14 @@ export default function App() {
             apiVoices={voices}
             voicesStatus={voicesStatus}
             onRetryVoices={loadVoices}
-            onStart={startStudioSession}
+            onStart={forRoute(key, 'start', () => (id: string, remember: boolean) => startStudioSession(key, id, remember))}
           />
         );
       }
-      case 'studio-session':
+      case 'studio-session': {
+        const StudioSession = studioScreens('S17_StudioSession');
         return (
-          <S17_StudioSession
+          <StudioSession
             go={go}
             isMinor={isMinor}
             scenario={scenario ?? SCENARIOS[0]}
@@ -1798,17 +2118,22 @@ export default function App() {
             onCapUpgrade={capUpgrade}
           />
         );
-      case 'character-creator':
-        return <S18_CharacterCreator go={go} apiVoices={voices} voicesStatus={voicesStatus} onRetryVoices={loadVoices} />;
-      case 'sandbox-session':
+      }
+      case 'character-creator': {
+        const CharacterCreator = studioScreens('S18_CharacterCreator');
+        return <CharacterCreator go={go} apiVoices={voices} voicesStatus={voicesStatus} onRetryVoices={loadVoices} />;
+      }
+      case 'sandbox-session': {
+        const SandboxSession = sandboxScreens('S20_SandboxSession');
         return (
-          <S20_SandboxSession
+          <SandboxSession
             go={go}
             mode={sandboxMode ?? SANDBOX_MODES[0]}
             isMinor={isMinor}
             companionName={companions[0]?.name}
           />
         );
+      }
       case 'home':
       case 'studio':
       case 'sandbox':
@@ -1836,25 +2161,47 @@ export default function App() {
   const renderScene = (r: Route): ReactNode => {
     if (isTabsBase(r)) {
       return (
-        <TabRoots
-          active={nav.tab}
-          renderTab={tab => <ErrorBoundary name={`tab:${tab}`}>{renderTabRoot(tab)}</ErrorBoundary>}
-        />
+        <>
+          <TabRoots
+            active={nav.tab}
+            renderTab={tab => <ErrorBoundary name={`tab:${tab}`}>{renderTabRoot(tab)}</ErrorBoundary>}
+            // Not under a sheet: its touches don't reach the stack, so the
+            // stack can't tell whether the user is busy with it.
+            prewarm={launch.kind === 'ready' && !overlay && !busy}
+            onPrewarm={prewarmedTab}
+          />
+          {/* The bar belongs to the tab layer and moves with it: a pushed
+              screen slides in over it, and it is uncovered as that screen
+              slides back out, never drawn over a screen that is leaving. */}
+          <TabBar
+            active={nav.tab}
+            onChange={onTabChange}
+            onReselect={onTabReselect}
+            sandboxComingSoon={CONFIG.sandboxComingSoon}
+            hidden={launch.kind !== 'ready'}
+          />
+        </>
       );
     }
     const pushed = nav.routes.findIndex(x => x.key === r.key) > 0;
+    const key = r.key;
     return (
-      <ErrorBoundary name={`screen:${r.name}`} resetKey={r.key} onReset={pushed ? () => dropRoute(r.key) : undefined}>
-        {renderRoute(r)}
+      <ErrorBoundary
+        name={`screen:${r.name}`}
+        resetKey={key}
+        onReset={pushed ? forRoute(key, 'drop', () => () => dropRoute(key)) : undefined}
+      >
+        <UnlessDropped dropped={droppedRoutes} routeKey={key}>{renderRoute(r)}</UnlessDropped>
       </ErrorBoundary>
     );
   };
 
   const renderOverlay = (o: Overlay): ReactNode => {
     switch (o.kind) {
-      case 'paywall':
+      case 'paywall': {
+        const Paywall = settingsScreens('S23_Paywall');
         return (
-          <S23_Paywall
+          <Paywall
             go={overlayGo}
             trigger={o.trigger}
             backTo={topName}
@@ -1866,21 +2213,24 @@ export default function App() {
             onClose={closePaywall}
           />
         );
+      }
       case 'callDepleted': {
         const c = companionById(idOf(o.companion)) ?? o.companion;
+        const StartCallDepleted = extraScreens('S27_StartCallDepleted');
         return (
-          <S27_StartCallDepleted
+          <StartCallDepleted
             companion={c}
             onClose={closeOverlay}
-            onUpgrade={() => openPaywall('voice')}
-            onText={() => { void openChat(c); }}
+            onUpgrade={depletedUpgrade}
+            onText={depletedText}
             resetDate={entitlement ? formatResetDate(entitlement.period.renews_at) : undefined}
           />
         );
       }
       case 'recap': {
         const c = companionById(idOf(o.companion)) ?? o.companion;
-        return <S29_Recap go={overlayGo} companion={c} characterId={idOf(c)} />;
+        const Recap = extraScreens('S29_Recap');
+        return <Recap go={overlayGo} companion={c} characterId={idOf(c)} />;
       }
     }
   };
@@ -1903,11 +2253,10 @@ export default function App() {
       />
     );
   }
-  // A few milliseconds while this phone's saved session is read, so the
-  // first screen drawn is the right one instead of the splash flashing past.
+  // A few milliseconds while this phone's saved session is read, still under
+  // the native launch screen, so the first screen drawn is the right one.
   if (launch.kind === 'reading') return <View style={styles.root} />;
 
-  const showNav = tabsBase && nav.routes.length === 1 && launch.kind === 'ready';
   const covered = !!overlay || !!busy;
 
   return (
@@ -1920,26 +2269,23 @@ export default function App() {
         <ScreenStack
           routes={nav.routes}
           renderScene={renderScene}
-          canSwipeBack={!covered && !NO_SWIPE_BACK.has(topName)}
+          canSwipeBack={!covered && !creatingCompanion && !NO_SWIPE_BACK.has(topName)}
           onSwipeBack={swipedBack}
-        />
-        <BottomNav
-          active={nav.tab}
-          onChange={onTabChange}
-          onReselect={onTabReselect}
-          sandboxComingSoon={CONFIG.sandboxComingSoon}
-          hidden={!showNav}
+          // Under the launch screen the first screen is simply there; its
+          // fade-out is the only transition.
+          initialEnter={appRevealed() ? 'fade' : 'none'}
+          onFirstFrame={revealApp}
         />
       </View>
 
       {overlay ? (
         // Each sheet animates itself in; this carries it out as it closes.
-        <Animated.View key={overlay.kind} exiting={exit.fade} pointerEvents="box-none" style={styles.overlay}>
+        <Animated.View key={overlay.kind} exiting={overlayExit} pointerEvents="box-none" style={styles.overlay}>
           {renderOverlay(overlay)}
         </Animated.View>
       ) : null}
 
-      <ToastHost toast={toast} onDismiss={dismissToast} />
+      <ToastHost />
       {busy ? <BusyOverlay label={busy} /> : null}
     </View>
   );
