@@ -1,65 +1,237 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Room, RoomEvent, type RemoteParticipant } from 'livekit-client';
-
-// @livekit/react-native is a native module absent from Expo Go; importing it at
-// module scope crashes the app on launch (this hook is reachable from the Chat
-// screen, which loads eagerly). Resolve it lazily so it's only touched when a
-// voice call actually starts. In Expo Go this returns a no-op stub — text chat
-// works, and voice is simply inert until run in a dev/production build.
-function getAudioSession(): {
-  startAudioSession: () => Promise<void>;
-  stopAudioSession: () => Promise<void>;
-} {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    return require('@livekit/react-native').AudioSession;
-  } catch {
-    return { startAudioSession: async () => {}, stopAudioSession: async () => {} };
-  }
-}
+import { AppState, Platform } from 'react-native';
+import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
+import type * as ExpoAudio from 'expo-audio';
+import {
+  DisconnectReason,
+  MediaDeviceFailure,
+  Room,
+  RoomEvent,
+  Track,
+  type Participant,
+  type RemoteAudioTrack,
+  type RemoteTrack,
+} from 'livekit-client';
 import { startVoiceSession, endVoiceSession } from '../api';
-import { limitMessage } from '../api/client';
+import { ApiError, isNetworkError, limitMessage } from '../api/client';
 import { quotaCode } from '../lib/entitlement';
 import { startCallService, stopCallService } from '../lib/callService';
 import {
   AGENT_JOIN_TIMEOUT_MS,
+  AGENT_LEFT_GRACE_MS,
+  createOrbSettler,
   decodeAgentState,
+  orbFromSpeakers,
   type CallError,
   type CallPhase,
   type OrbState,
 } from '../lib/voiceCall';
 
+interface LiveKitAudio {
+  startAudioSession(): Promise<void>;
+  stopAudioSession(): Promise<void>;
+  getAudioOutputs(): Promise<string[]>;
+  selectAudioOutput(deviceId: string): Promise<void>;
+  showAudioRoutePicker(): Promise<void>;
+}
+
+const NO_AUDIO: LiveKitAudio = {
+  startAudioSession: async () => {},
+  stopAudioSession: async () => {},
+  getAudioOutputs: async () => [],
+  selectAudioOutput: async () => {},
+  showAudioRoutePicker: async () => {},
+};
+
+// @livekit/react-native is a native module absent from Expo Go; importing it at
+// module scope crashes the app on launch (this hook is reachable from screens
+// that load eagerly). Resolve it lazily so it's only touched when a voice call
+// actually starts. In Expo Go this returns a no-op stub — text chat works, and
+// voice is simply inert until run in a dev/production build.
+function getAudioSession(): LiveKitAudio {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    return require('@livekit/react-native').AudioSession as LiveKitAudio;
+  } catch {
+    return NO_AUDIO;
+  }
+}
+
+// ── Microphone permission ────────────────────────────────────────────────
+// Read through expo-audio (lazily, like voicePreview.ts) so the app knows the
+// answer before it starts a billed session, instead of finding out from
+// LiveKit's error halfway through connecting.
+type MicStatus = 'granted' | 'ask' | 'denied' | 'unknown';
+
+let expoAudio: typeof ExpoAudio | null | undefined;
+function audioModule(): typeof ExpoAudio | null {
+  if (expoAudio === undefined) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      expoAudio = require('expo-audio') as typeof ExpoAudio;
+    } catch {
+      expoAudio = null;
+    }
+  }
+  return expoAudio;
+}
+
+const micStatusOf = (p: { granted: boolean; canAskAgain: boolean }): MicStatus =>
+  p.granted ? 'granted' : p.canAskAgain ? 'ask' : 'denied';
+
+/** The permission as it stands, without prompting. 'ask' means a prompt can still be shown. */
+async function micStatus(): Promise<MicStatus> {
+  const audio = audioModule();
+  if (!audio) return 'unknown';
+  try {
+    return micStatusOf(await audio.getRecordingPermissionsAsync());
+  } catch {
+    return 'unknown';
+  }
+}
+
+async function askForMic(): Promise<MicStatus> {
+  const audio = audioModule();
+  if (!audio) return 'unknown';
+  try {
+    return micStatusOf(await audio.requestRecordingPermissionsAsync());
+  } catch {
+    return 'unknown';
+  }
+}
+
+// ── Audio output ─────────────────────────────────────────────────────────
+/** Where call audio plays. iOS has a system route picker; Android lists its outputs. */
+export const callAudioOutput = {
+  /** iOS: shows the system picker (iPhone, speaker, AirPods…). False where there is none. */
+  async showPicker(): Promise<boolean> {
+    if (Platform.OS !== 'ios') return false;
+    const session = getAudioSession();
+    if (session === NO_AUDIO) return false;
+    try {
+      await session.showAudioRoutePicker();
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  /** Android: 'speaker' | 'earpiece' | 'headset' | 'bluetooth', whichever are present. */
+  async list(): Promise<string[]> {
+    try {
+      return await getAudioSession().getAudioOutputs();
+    } catch {
+      return [];
+    }
+  },
+  async select(id: string): Promise<boolean> {
+    try {
+      await getAudioSession().selectAudioOutput(id);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+};
+
+// ── Errors ───────────────────────────────────────────────────────────────
 /** The backend's user-facing sentence, when it sent one. */
 const serverMessageOf = (e: unknown): string | undefined => {
   const m = (e as { serverMessage?: unknown } | null)?.serverMessage;
   return typeof m === 'string' && m.length > 0 ? m : undefined;
 };
 
+async function errorFor(e: unknown): Promise<CallError> {
+  // The server's own refusals first. This covers every await of the start, and
+  // classifying by message alone sent a 402 "you have no minutes left" down the
+  // network-error path — the user was told to check their connection and
+  // offered a retry that could only fail again.
+  //
+  // Two layers, because they need different offers. The plan being spent is
+  // worth offering plans; an abuse ceiling is not — no purchase lifts it.
+  const quota = quotaCode(e);
+  if (quota === 'VOICE_MINUTES_EXHAUSTED') return { kind: 'quota-exhausted', message: serverMessageOf(e) };
+  if (quota === 'CALL_IN_PROGRESS') return { kind: 'call-in-progress', message: serverMessageOf(e) };
+
+  const limit = limitMessage(e);
+  if (limit) {
+    // Concurrency is the one ceiling a retry fixes, so it gets its own kind
+    // and keeps the Try again button. usage.service.ts owns the rule and names
+    // it in `limit`.
+    const concurrent = (e as { limit?: unknown } | null)?.limit === 'concurrent_calls';
+    return { kind: concurrent ? 'call-in-progress' : 'limit', message: limit };
+  }
+  // A generic rate limiter's message is written for developers, so only its
+  // wait is kept.
+  if (e instanceof ApiError && e.status === 429) return { kind: 'rate-limited', retryAfter: e.retryAfter };
+  if (isNetworkError(e)) return { kind: 'offline' };
+  // A refused microphone, told apart by the error's name (NotAllowedError) or
+  // by the permission itself — never by matching words in the message.
+  if (MediaDeviceFailure.getFailure(e) === MediaDeviceFailure.PermissionDenied || (await micStatus()) === 'denied') {
+    return { kind: 'mic-permission' };
+  }
+  return { kind: 'connect' };
+}
+
+function errorForDisconnect(reason?: DisconnectReason): CallError {
+  // The only room the server deletes mid-call is one that reached the daily
+  // voice ceiling, right after the companion says goodbye (voice.service.ts).
+  // Everything else that ends a room under us is a dropped call.
+  return reason === DisconnectReason.ROOM_DELETED ? { kind: 'daily-limit' } : { kind: 'lost' };
+}
+
+// ── Keep awake ───────────────────────────────────────────────────────────
+const KEEP_AWAKE_TAG = 'evarna-voice-call';
+
+function keepAwake(on: boolean): void {
+  try {
+    (on ? activateKeepAwakeAsync(KEEP_AWAKE_TAG) : deactivateKeepAwake(KEEP_AWAKE_TAG)).catch(() => {});
+  } catch {
+    // Module missing from this build: the screen may dim, the call carries on.
+  }
+}
+
+// ── Hook ─────────────────────────────────────────────────────────────────
 interface UseVoiceCallParams {
   userId?: string;
   characterId?: string;
-  enabled: boolean;
-  onEnded?: () => void;
   /** Shown in Android's ongoing call notification. */
   callTitle?: string;
 }
 
-interface UseVoiceCallReturn {
+export interface VoiceCall {
   phase: CallPhase;
+  /** The companion's turn, from the backend (debounced). Meaningful while connected. */
   orbState: OrbState;
   muted: boolean;
   error: CallError | null;
+  /** When the companion joined: the start of the conversation, for the call clock. */
+  connectedAt: number | null;
+  /** When the server session started, which is what the balance is charged from. */
+  billedSince: number | null;
+  /** When the user hung up. */
+  endedAt: number | null;
+  /** The companion's voice, for level metering. */
+  agentTrack: RemoteAudioTrack | null;
   toggleMute: () => void;
+  /** Ends the call; resolves once the room is closed. */
   hangUp: () => Promise<void>;
   retry: () => void;
+  /** From the permission step: ask the OS for the microphone, then call. */
+  allowMic: () => Promise<void>;
 }
 
-// Real LiveKit-driven voice call. Fetches a session token from the backend,
-// joins the Room, publishes the mic, and drives orb state from the backend's
-// "ui" DataChannel topic (falling back to ActiveSpeakersChanged when no hint
-// arrives). Mute hits the real mic; hangUp tears down the Room + audio session.
-export function useVoiceCall(params: UseVoiceCallParams): UseVoiceCallReturn {
-  const { userId, characterId, enabled, onEnded, callTitle } = params;
+/** One try at a call. Retrying starts a new one; anything still in flight
+ *  from the old one sees `cancelled` and stops. */
+interface Attempt {
+  cancelled: boolean;
+}
+
+// Real LiveKit-driven voice call. Checks the mic permission, fetches a session
+// token from the backend, joins the Room, publishes the mic, and drives the
+// orb from the backend's "ui" DataChannel topic (falling back to
+// ActiveSpeakersChanged until the first hint arrives). Mute hits the real mic;
+// hangUp tears down the Room, the audio session and the server session.
+export function useVoiceCall({ userId, characterId, callTitle }: UseVoiceCallParams): VoiceCall {
   const callTitleRef = useRef(callTitle);
   callTitleRef.current = callTitle;
 
@@ -67,195 +239,264 @@ export function useVoiceCall(params: UseVoiceCallParams): UseVoiceCallReturn {
   const [orbState, setOrbState] = useState<OrbState>('thinking');
   const [muted, setMuted] = useState(false);
   const [error, setError] = useState<CallError | null>(null);
+  const [connectedAt, setConnectedAt] = useState<number | null>(null);
+  const [billedSince, setBilledSince] = useState<number | null>(null);
+  const [endedAt, setEndedAt] = useState<number | null>(null);
+  const [agentTrack, setAgentTrack] = useState<RemoteAudioTrack | null>(null);
   const [attempt, setAttempt] = useState(0);
 
   const roomRef = useRef<Room | null>(null);
-  const cancelledRef = useRef(false);
-  const onEndedRef = useRef(onEnded);
-  onEndedRef.current = onEnded;
-
-  // The backend now closes the session itself when the participant leaves the
-  // LiveKit room, but we also tell it explicitly on hang-up. Belt and braces:
-  // covers the case where the voice worker is down, so nothing server-side is
-  // watching the room. The endpoint is idempotent, so a double call is safe.
-  const sessionIdRef = useRef<string | null>(null);
-
-  const finalizeSession = useCallback(() => {
-    const sid = sessionIdRef.current;
-    sessionIdRef.current = null;
-    if (sid) endVoiceSession(sid).catch(() => { /* fire and forget */ });
-  }, []);
-
-  // Skip the live connection unless we have real ids; the screen still mounts
-  // (e.g. demo path) so we just sit in "connecting" forever in that case —
-  // callers should pass enabled=false when they want the screen demoed.
-  const shouldConnect = enabled && !!userId && !!characterId;
+  const mutedRef = useRef(false);
+  const attemptRef = useRef<Attempt | null>(null);
+  const abandonRef = useRef<(() => Promise<void>) | null>(null);
 
   useEffect(() => {
-    if (!shouldConnect) return;
+    const run: Attempt = { cancelled: false };
+    attemptRef.current = run;
 
-    cancelledRef.current = false;
-    setPhase('connecting');
-    setOrbState('thinking');
+    // Every attempt starts clean. The mute flag especially: a retry after
+    // muting used to leave the button saying muted while the new room
+    // published a live mic.
+    mutedRef.current = false;
+    setMuted(false);
     setError(null);
+    setConnectedAt(null);
+    setBilledSince(null);
+    setEndedAt(null);
+    setAgentTrack(null);
+    setOrbState('thinking');
+
+    if (!userId || !characterId) {
+      setError({ kind: 'unavailable' });
+      setPhase('error');
+      return;
+    }
+    setPhase('connecting');
 
     let room: Room | null = null;
-    let agentJoinTimer: ReturnType<typeof setTimeout> | null = null;
+    // Per attempt, so closing an old attempt can never end a newer one's session.
+    let sessionId: string | null = null;
+    let joinTimer: ReturnType<typeof setTimeout> | undefined;
+    let leftTimer: ReturnType<typeof setTimeout> | undefined;
+    let hintSeen = false;
+    const settler = createOrbSettler('thinking', next => {
+      if (!run.cancelled) setOrbState(next);
+    });
+
+    // The audio session is shared by every attempt. Stop it unless a newer
+    // attempt is already live and relying on it.
+    const releaseAudio = () => {
+      const current = attemptRef.current;
+      if (current && current !== run && !current.cancelled) return;
+      getAudioSession().stopAudioSession().catch(() => {});
+    };
+
+    // Leave this attempt: stop listening to it, close the room, release the
+    // audio session and end the server session. Safe to call more than once.
+    let closing: Promise<void> | null = null;
+    const abandon = (): Promise<void> => {
+      if (closing) return closing;
+      run.cancelled = true;
+      clearTimeout(joinTimer);
+      clearTimeout(leftTimer);
+      settler.dispose();
+      stopCallService();
+      const r = room;
+      room = null;
+      if (roomRef.current === r) roomRef.current = null;
+      const sid = sessionId;
+      sessionId = null;
+      closing = (async () => {
+        if (r) await r.disconnect().catch(() => {});
+        releaseAudio();
+        // The backend also closes the session when the participant leaves the
+        // room, but that needs the voice worker to be up. The endpoint is
+        // idempotent, so saying so explicitly is safe.
+        if (sid) endVoiceSession(sid).catch(() => {});
+      })();
+      return closing;
+    };
+    abandonRef.current = abandon;
+
+    // Every failure closes the call before it shows. An error screen over a
+    // live room kept billing, and a companion joining late talked over it.
+    const fail = (e: CallError) => {
+      if (run.cancelled) return;
+      void abandon();
+      setAgentTrack(null);
+      setError(e);
+      setPhase('error');
+    };
+
+    const companionJoined = () => {
+      if (run.cancelled) return;
+      clearTimeout(joinTimer);
+      clearTimeout(leftTimer);
+      // The clock starts when the companion picks up, not when the room opens.
+      setConnectedAt(at => at ?? Date.now());
+      setPhase('connected');
+    };
 
     (async () => {
       try {
-        const res = await startVoiceSession(characterId!);
-        sessionIdRef.current = res.session_id;
-        if (cancelledRef.current) return;
+        const mic = await micStatus();
+        if (run.cancelled) return;
+        if (mic === 'ask') {
+          setPhase('permission');
+          return;
+        }
+        if (mic === 'denied') {
+          fail({ kind: 'mic-permission' });
+          return;
+        }
+
+        const res = await startVoiceSession(characterId);
+        if (run.cancelled) {
+          // Hung up while the server was starting it: close it now, or it stays
+          // open (and billed) until the stale-session sweep.
+          endVoiceSession(res.session_id).catch(() => {});
+          return;
+        }
+        sessionId = res.session_id;
+        setBilledSince(Date.now());
 
         await getAudioSession().startAudioSession();
+        if (run.cancelled) {
+          // abandon() may have released the session before it had started.
+          releaseAudio();
+          return;
+        }
 
-        room = new Room();
-        roomRef.current = room;
+        const r = new Room();
+        room = r;
+        roomRef.current = r;
 
-        room
+        r
           .on(RoomEvent.Connected, () => {
-            if (cancelledRef.current) return;
-            setPhase('connected');
-            // Wait for the agent participant; if it doesn't show up, surface an error.
-            agentJoinTimer = setTimeout(() => {
-              if (cancelledRef.current || !room) return;
-              const hasRemote = room.remoteParticipants.size > 0;
-              if (!hasRemote) {
-                setError({ kind: 'agent-timeout', message: "Your companion didn't pick up. The voice worker may be offline." });
-                setPhase('error');
-              }
-            }, AGENT_JOIN_TIMEOUT_MS);
+            if (run.cancelled) return;
+            if (r.remoteParticipants.size > 0) companionJoined();
+            else joinTimer = setTimeout(() => fail({ kind: 'agent-timeout' }), AGENT_JOIN_TIMEOUT_MS);
+          })
+          .on(RoomEvent.ParticipantConnected, companionJoined)
+          .on(RoomEvent.ParticipantDisconnected, () => {
+            if (run.cancelled || r.remoteParticipants.size > 0) return;
+            clearTimeout(leftTimer);
+            leftTimer = setTimeout(() => fail({ kind: 'lost' }), AGENT_LEFT_GRACE_MS);
           })
           .on(RoomEvent.Reconnecting, () => {
-            if (cancelledRef.current) return;
-            setPhase('reconnecting');
+            if (!run.cancelled) setPhase('reconnecting');
           })
           .on(RoomEvent.Reconnected, () => {
-            if (cancelledRef.current) return;
-            setPhase('connected');
+            if (!run.cancelled) setPhase(r.remoteParticipants.size > 0 ? 'connected' : 'connecting');
           })
-          .on(RoomEvent.Disconnected, () => {
-            stopCallService();
-            if (cancelledRef.current) return;
-            setPhase('ended');
-            onEndedRef.current?.();
+          .on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
+            // Our own hang-up or teardown has already cancelled the attempt.
+            fail(errorForDisconnect(reason));
           })
-          .on(RoomEvent.ParticipantConnected, () => {
-            if (agentJoinTimer) {
-              clearTimeout(agentJoinTimer);
-              agentJoinTimer = null;
-            }
+          .on(RoomEvent.TrackSubscribed, (track: RemoteTrack) => {
+            if (!run.cancelled && track.kind === Track.Kind.Audio) setAgentTrack(track as RemoteAudioTrack);
           })
-          .on(RoomEvent.DataReceived, (payload: Uint8Array, _participant?: RemoteParticipant, _kind?: unknown, topic?: string) => {
-            if (cancelledRef.current) return;
-            if (topic && topic !== 'ui') return;
+          .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => {
+            setAgentTrack(current => (current === track ? null : current));
+          })
+          .on(RoomEvent.DataReceived, (payload, _participant, _kind, topic) => {
+            if (run.cancelled || (topic && topic !== 'ui')) return;
             const next = decodeAgentState(payload);
-            if (next) setOrbState(next);
+            if (!next) return;
+            // The backend reports the real pipeline state. Once it has spoken,
+            // the speaker-list guess below stands down for the rest of the call.
+            hintSeen = true;
+            settler.propose(next);
           })
-          .on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
-            if (cancelledRef.current || !room) return;
-            const localId = room.localParticipant.identity;
-            const agentSpeaking = speakers.some(s => s.identity !== localId);
-            const userSpeaking = speakers.some(s => s.identity === localId);
-            // Only nudge orb state when the backend hasn't published an explicit hint.
-            // (DataReceived above takes precedence.)
-            if (agentSpeaking) setOrbState('speaking');
-            else if (userSpeaking) setOrbState('listening');
-            else setOrbState('thinking');
+          .on(RoomEvent.ActiveSpeakersChanged, (speakers: Participant[]) => {
+            if (run.cancelled || hintSeen) return;
+            const me = r.localParticipant.identity;
+            settler.propose(orbFromSpeakers(speakers.some(s => s.identity !== me)));
           });
 
-        await room.connect(res.livekit_url, res.livekit_token);
-        if (cancelledRef.current) return;
-        await room.localParticipant.setMicrophoneEnabled(true);
+        await r.connect(res.livekit_url, res.livekit_token);
+        if (run.cancelled) return;
+        await r.localParticipant.setMicrophoneEnabled(true);
         // Only now: Android allows a microphone service once the mic permission
         // is granted, and only while the app is on screen.
-        if (!cancelledRef.current) startCallService(callTitleRef.current ?? 'your companion');
+        if (!run.cancelled) startCallService(callTitleRef.current ?? 'your companion');
       } catch (e) {
-        if (cancelledRef.current) return;
-
-        // The server's own refusals first. This catch covers five awaits, and
-        // classifying by message alone sent a 402 "you have no minutes left"
-        // down the network-error path — the user was told to check their
-        // connection and offered a retry that could only fail again.
-        //
-        // Two layers, because they need different offers. The plan being spent
-        // is worth offering plans; an abuse ceiling is not — no purchase lifts it.
-        if (quotaCode(e) === 'VOICE_MINUTES_EXHAUSTED') {
-          setError({
-            kind: 'quota-exhausted',
-            message: serverMessageOf(e) ?? "You've used all your voice minutes for this month.",
-          });
-          setPhase('error');
-          return;
-        }
-
-        const limit = limitMessage(e);
-        if (limit) {
-          // Concurrency is the one ceiling a retry fixes, so it gets its own
-          // kind and keeps the Try again button. usage.service.ts owns the rule
-          // and names it in `limit`.
-          const concurrent = (e as { limit?: unknown } | null)?.limit === 'concurrent_calls';
-          setError({ kind: concurrent ? 'call-in-progress' : 'limit', message: limit });
-          setPhase('error');
-          return;
-        }
-
-        const msg = e instanceof Error ? e.message : String(e);
-        // Mic permission errors typically come from setMicrophoneEnabled or
-        // AudioSession; everything else is more likely token/network/connect.
-        const isMic = /permission|denied|microphone/i.test(msg);
-        setError({
-          kind: isMic ? 'mic-permission' : 'connect',
-          message: isMic
-            ? 'Evarna needs microphone access to make a call. Enable it in Settings.'
-            : "Couldn't connect to the voice service. Check your connection and try again.",
-        });
-        setPhase('error');
+        if (run.cancelled) return;
+        const failure = await errorFor(e);
+        fail(failure);
       }
     })();
 
+    // Covers navigating away / unmount without pressing hang up, and retries.
     return () => {
-      cancelledRef.current = true;
-      stopCallService();
-      if (agentJoinTimer) clearTimeout(agentJoinTimer);
-      const r = roomRef.current;
-      roomRef.current = null;
-      if (r) r.disconnect().catch(() => {});
-      getAudioSession().stopAudioSession().catch(() => {});
-      // Covers navigating away / unmount without pressing hang up.
-      finalizeSession();
+      void abandon();
     };
-  }, [shouldConnect, userId, characterId, attempt, finalizeSession]);
+  }, [userId, characterId, attempt]);
+
+  // The screen stays on for the whole call; it used to auto-lock mid-sentence.
+  const live = phase === 'connecting' || phase === 'connected' || phase === 'reconnecting';
+  useEffect(() => {
+    if (!live) return;
+    keepAwake(true);
+    return () => keepAwake(false);
+  }, [live]);
+
+  // Back from Settings with the microphone allowed: carry on with the call
+  // the user was trying to make.
+  const micBlocked = error?.kind === 'mic-permission';
+  useEffect(() => {
+    if (!micBlocked) return;
+    const sub = AppState.addEventListener('change', state => {
+      if (state !== 'active') return;
+      void micStatus().then(s => {
+        if (s === 'granted' || s === 'ask') setAttempt(a => a + 1);
+      });
+    });
+    return () => sub.remove();
+  }, [micBlocked]);
 
   const toggleMute = useCallback(() => {
-    setMuted(prev => {
-      const next = !prev;
-      roomRef.current?.localParticipant.setMicrophoneEnabled(!next).catch(() => {});
-      return next;
+    const room = roomRef.current;
+    if (!room) return;
+    const next = !mutedRef.current;
+    mutedRef.current = next;
+    setMuted(next);
+    room.localParticipant.setMicrophoneEnabled(!next).catch(() => {
+      // The mic didn't follow, so neither does the button.
+      if (mutedRef.current !== next) return;
+      mutedRef.current = !next;
+      setMuted(!next);
     });
   }, []);
 
   const hangUp = useCallback(async () => {
-    const r = roomRef.current;
-    roomRef.current = null;
-    cancelledRef.current = true;
-    if (r) {
-      try { await r.disconnect(); } catch { /* swallow */ }
-    }
-    try { await getAudioSession().stopAudioSession(); } catch { /* swallow */ }
-    stopCallService();
-    finalizeSession();
+    setEndedAt(Date.now());
     setPhase('ended');
-  }, [finalizeSession]);
+    await abandonRef.current?.();
+  }, []);
 
   const retry = useCallback(() => {
-    setError(null);
+    setAttempt(a => a + 1);
+  }, []);
+
+  const allowMic = useCallback(async () => {
+    const status = await askForMic();
+    if (status === 'denied') {
+      setError({ kind: 'mic-permission' });
+      setPhase('error');
+      return;
+    }
+    // Android's "Don't allow" can be asked again, so the explainer stays up.
+    if (status === 'ask') return;
+    // Granted — or unknown, in which case LiveKit asks when it opens the mic.
     setAttempt(a => a + 1);
   }, []);
 
   return useMemo(
-    () => ({ phase, orbState, muted, error, toggleMute, hangUp, retry }),
-    [phase, orbState, muted, error, toggleMute, hangUp, retry],
+    () => ({
+      phase, orbState, muted, error, connectedAt, billedSince, endedAt, agentTrack,
+      toggleMute, hangUp, retry, allowMic,
+    }),
+    [phase, orbState, muted, error, connectedAt, billedSince, endedAt, agentTrack, toggleMute, hangUp, retry, allowMic],
   );
 }

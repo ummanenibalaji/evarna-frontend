@@ -13,6 +13,7 @@
     "check:ai-notice": "tsx src/checks/aiNotice.check.ts",
     "check:crisis": "tsx src/checks/crisis.check.ts",
     "check:api-url": "tsx src/checks/apiUrl.check.ts",
+    "check:voice-call": "tsx src/checks/voiceCall.check.ts",
     "eas-build-post-install": "npm run check:api-url"
   },
   "dependencies": {
