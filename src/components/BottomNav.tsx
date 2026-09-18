@@ -10,9 +10,13 @@
 //
 // The bar is an absolute overlay. Tab screens pass `tabBar` to Screen and pad
 // their scroll content by `useTabBarHeight()` so content scrolls behind the
-// glass.
+// glass. Content really does move under it, so its blur stays live.
+//
+// The router re-renders on every app-level state change; the bar and each
+// tab are memoized with stable props, so those renders stop here. Only a
+// selection (which moves every tab's slot) or a resize re-renders the tabs.
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, StyleSheet, View, useWindowDimensions, type LayoutChangeEvent } from 'react-native';
 import Animated, {
   ReduceMotion, useAnimatedStyle, useSharedValue, withSpring, withTiming,
@@ -111,7 +115,7 @@ const labelOn = (selected: number) => TABS.map((_, i) => (i === selected ? 1 : 0
 // Showing and hiding under Reduce Motion: a fade in place.
 const FADE: WithTimingConfig = { duration: MOTION.duration.fast, easing: ease.standard, reduceMotion: ReduceMotion.Never };
 
-export function BottomNav({ active, onChange, sandboxComingSoon = true, onReselect, hidden = false }: BottomNavProps) {
+function BottomNavImpl({ active, onChange, sandboxComingSoon = true, onReselect, hidden = false }: BottomNavProps) {
   const { width } = useWindowDimensions();
   const bottomGap = useBottomGap();
   const reduced = useReducedMotion();
@@ -122,12 +126,13 @@ export function BottomNav({ active, onChange, sandboxComingSoon = true, onResele
   // changes, because the hidden labels lay out again.
   const [natural, setNatural] = useState<readonly number[] | null>(null);
   const measured = useRef<number[]>([]);
-  const onMeasure = (i: number) => (e: LayoutChangeEvent) => {
+  // One stable handler per label, so the measuring labels never re-render.
+  const onMeasure = useMemo(() => TABS.map((_, i) => (e: LayoutChangeEvent) => {
     const w = Math.ceil(e.nativeEvent.layout.width);
     if (measured.current[i] === w) return;
     measured.current[i] = w;
     if (TABS.every((_, j) => measured.current[j] != null)) setNatural([...measured.current]);
-  };
+  }), []);
 
   // A tap selects at once; the router's `active` follows a frame later and
   // wins whenever it changes on its own.
@@ -183,6 +188,11 @@ export function BottomNav({ active, onChange, sandboxComingSoon = true, onResele
     // frame later so its render doesn't hold up the pill's first frame.
     requestAnimationFrame(() => onChange(tab));
   };
+  // Tabs get one handler for the bar's lifetime, which always runs the
+  // latest `select`, so a render of the bar doesn't re-render every tab.
+  const latestSelect = useRef(select);
+  latestSelect.current = select;
+  const onTabPress = useCallback((index: number) => latestSelect.current(index), []);
 
   // ── Presence ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -216,7 +226,7 @@ export function BottomNav({ active, onChange, sandboxComingSoon = true, onResele
         style={styles.measure}
       >
         {TABS.map((t, i) => (
-          <Txt key={t.id} {...LABEL} numberOfLines={1} onLayout={onMeasure(i)}>{t.label}</Txt>
+          <Txt key={t.id} {...LABEL} numberOfLines={1} onLayout={onMeasure[i]}>{t.label}</Txt>
         ))}
       </View>
 
@@ -273,7 +283,7 @@ export function BottomNav({ active, onChange, sandboxComingSoon = true, onResele
                   labelW={layout.labelW[i]}
                   geo={geo}
                   vis={vis}
-                  onPress={select}
+                  onPress={onTabPress}
                 />
               ))}
             </>
@@ -311,7 +321,7 @@ function covered(from: number, to: number, g: number[]): number {
   return Math.min(1, Math.max(0, (Math.min(to, pillR) - Math.max(from, pillL)) / (to - from)));
 }
 
-function Tab({ index, label, icon, selected, soon, hitX, hitW, labelW, geo, vis, onPress }: TabProps) {
+const Tab = memo(function Tab({ index, label, icon, selected, soon, hitX, hitW, labelW, geo, vis, onPress }: TabProps) {
   const press = usePressFeedback({ scale: MOTION.press.scaleSmall, haptic: false });
   const slot = 2 + index;
 
@@ -329,7 +339,6 @@ function Tab({ index, label, icon, selected, soon, hitX, hitW, labelW, geo, vis,
     const x = geo.value[slot] + ICON + GAP;
     return { opacity: vis.value[index] * covered(x, x + labelW, geo.value) };
   });
-  const badgeStyle = useAnimatedStyle(() => ({ opacity: 1 - vis.value[index] }));
 
   const contentW = ICON + GAP + labelW;
   // Press feedback shrinks toward what the eye is on: the icon, or the
@@ -364,13 +373,7 @@ function Tab({ index, label, icon, selected, soon, hitX, hitW, labelW, geo, vis,
             </Txt>
           </Animated.View>
         </Animated.View>
-        {soon && (
-          <Animated.View style={[styles.badgeSlot, badgeStyle]}>
-            <View style={styles.badge}>
-              <Txt variant="caption" weight={600} maxScale={1.15} style={styles.badgeText}>Soon</Txt>
-            </View>
-          </Animated.View>
-        )}
+        {soon ? <SoonBadge index={index} vis={vis} /> : null}
       </Animated.View>
 
       <Pressable
@@ -386,7 +389,23 @@ function Tab({ index, label, icon, selected, soon, hitX, hitW, labelW, geo, vis,
       />
     </>
   );
+});
+
+/** "Soon" over a tab that isn't open yet; it gives way to the label when the
+ *  tab is selected. Its own component, so only that tab pays for the style. */
+function SoonBadge({ index, vis }: { index: number; vis: SharedValue<number[]> }) {
+  const badgeStyle = useAnimatedStyle(() => ({ opacity: 1 - vis.value[index] }));
+  return (
+    <Animated.View style={[styles.badgeSlot, badgeStyle]}>
+      <View style={styles.badge}>
+        <Txt variant="caption" weight={600} maxScale={1.15} style={styles.badgeText}>Soon</Txt>
+      </View>
+    </Animated.View>
+  );
 }
+
+export const BottomNav = memo(BottomNavImpl);
+BottomNav.displayName = 'BottomNav';
 
 // Shared by the visible labels and the off-screen ones they are sized from.
 const LABEL = {

@@ -5,8 +5,8 @@
 // switch flipped mid-session would be ignored; the configs below carry an
 // explicit mode that tracks the system setting instead.
 
-import { useCallback, useEffect, useSyncExternalStore } from 'react';
-import { AppState } from 'react-native';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { AppState, type AppStateStatus, type GestureResponderEvent } from 'react-native';
 import {
   cancelAnimation,
   Easing,
@@ -37,6 +37,7 @@ import { getRuntimeKind, RuntimeKind, scheduleOnUI } from 'react-native-worklets
 
 import { reduceMotionPref } from '../hooks/useAccessibilityPrefs';
 import { haptic, type HapticKind } from '../lib/haptics';
+import { useSceneFocused } from '../navigation/sceneContext';
 import { MOTION } from './theme';
 
 type Curve = keyof typeof MOTION.easing;
@@ -68,7 +69,9 @@ function motionMode(): ReduceMotion {
 /** True when the system asks for reduced motion. Re-renders when it changes. */
 export function useReducedMotion(): boolean {
   const atLaunch = useReducedMotionAtLaunch();
-  return useSyncExternalStore(reduceMotionPref.subscribe, reduceMotionPref.get) ?? atLaunch;
+  // The snapshot is the answer itself, so the platform confirming what was
+  // already assumed at launch re-renders nobody.
+  return useSyncExternalStore(reduceMotionPref.subscribe, () => reduceMotionPref.get() ?? atLaunch);
 }
 
 /** withTiming config on the shared curves. Safe to call inside worklets. */
@@ -158,7 +161,33 @@ reduceMotionPref.subscribe(() => {
 const PRESS_IN: WithSpringConfig = { ...MOTION.spring.snappy, reduceMotion: ReduceMotion.Never };
 const PRESS_OUT: WithSpringConfig = { ...MOTION.spring.bouncy, reduceMotion: ReduceMotion.Never };
 
-/** Press feedback: scale (and optional haptic) on the UI thread. */
+/**
+ * Pass as `unstable_pressDelay` on a Pressable that sits in scrolling content.
+ * A drag that starts on the control hands the touch to the scroll view within
+ * this time, so the control never shrinks or ticks for it; a quick tap still
+ * gets its press-in, on release.
+ */
+export const PRESS_DELAY = 80;
+
+/**
+ * True when Pressability ended the press because the finger lifted on the
+ * control — a real press. It passes onPressOut the responder event that ended
+ * the press: a "release", or a "terminate" when a scroll view or gesture took
+ * the touch over (or a move, when the finger slid off). The name is read off
+ * the event React hands every responder handler.
+ */
+export function isPressRelease(e: unknown): boolean {
+  const config = (e as { dispatchConfig?: { registrationName?: string } } | null | undefined)?.dispatchConfig;
+  return config?.registrationName === 'onResponderRelease';
+}
+
+/**
+ * Press feedback: a scale on the UI thread, plus a haptic when the press
+ * lands. The haptic plays on release (as iOS buttons do), never on
+ * touch-down, so a scroll or pull-to-refresh that starts on the control
+ * doesn't tick. Components that own their `onPress` can pass `haptic: false`
+ * and play it there instead.
+ */
 export function usePressFeedback(opts?: { scale?: number; haptic?: HapticKind | false }) {
   const to = opts?.scale ?? MOTION.press.scale;
   const kind = opts?.haptic ?? 'light';
@@ -167,45 +196,107 @@ export function usePressFeedback(opts?: { scale?: number; haptic?: HapticKind | 
 
   const onPressIn = useCallback(() => {
     scale.value = withSpring(to, PRESS_IN);
-    if (kind) haptic[kind]();
-  }, [scale, to, kind]);
+  }, [scale, to]);
 
-  const onPressOut = useCallback(() => {
+  const onPressOut = useCallback((e?: GestureResponderEvent) => {
     scale.value = withSpring(1, PRESS_OUT);
-  }, [scale]);
+    if (kind && isPressRelease(e)) haptic[kind]();
+  }, [scale, kind]);
 
   return { animatedStyle, onPressIn, onPressOut };
 }
 
-const appState = {
-  subscribe(onChange: () => void) {
-    const sub = AppState.addEventListener('change', onChange);
-    return () => sub.remove();
-  },
-  get: () => AppState.currentState,
-};
+// ── App state ──────────────────────────────────────────────────────────
+// One AppState listener for the whole app. Subscribers hear only a change of
+// the answer (active or not), so active → inactive → background is one
+// notification, not two.
+const isActiveState = (s: AppStateStatus | null | undefined) => s !== 'background' && s !== 'inactive';
+let appActive = isActiveState(AppState.currentState);
+const appActiveListeners = new Set<() => void>();
+try {
+  AppState.addEventListener('change', next => {
+    const active = isActiveState(next);
+    if (active === appActive) return;
+    appActive = active;
+    appActiveListeners.forEach(notify => notify());
+  });
+} catch {
+  // No AppState module (tests).
+}
 
-/** True while the app is active (pause ambient loops otherwise). */
+function subscribeAppActive(onChange: () => void) {
+  appActiveListeners.add(onChange);
+  return () => { appActiveListeners.delete(onChange); };
+}
+
+/** Whether the app is in front right now, without subscribing. */
+export const isAppActive = (): boolean => appActive;
+
+/** True while the app is active. Re-renders only when that flips. */
 export function useAppActive(): boolean {
-  const state = useSyncExternalStore(appState.subscribe, appState.get);
-  return state !== 'background' && state !== 'inactive';
+  return useSyncExternalStore(subscribeAppActive, isAppActive);
+}
+
+// ── Scene focus ────────────────────────────────────────────────────────
+// How long a covered screen keeps its loops running. A push or tab switch
+// takes D.slow (380ms); pausing only after it has finished means nothing on
+// either screen changes, or re-renders, while the move is on screen.
+const UNFOCUS_GRACE = 600;
+
+const noSubscribe = () => () => {};
+const alwaysActive = () => true;
+
+/**
+ * True while this screen is in front (useSceneFocused) and the app is
+ * active. Stays true for a short grace after the screen is covered or its
+ * tab hidden, and turns true again at once when it comes back. Ambient loops
+ * run only while this is true.
+ */
+export function useSceneActive(): boolean {
+  const focused = useSceneFocused();
+  const [lingering, setLingering] = useState(focused);
+  useEffect(() => {
+    if (focused) {
+      setLingering(true);
+      return;
+    }
+    const id = setTimeout(() => setLingering(false), UNFOCUS_GRACE);
+    return () => clearTimeout(id);
+  }, [focused]);
+  const inFront = focused || lingering;
+  // Only a screen in front listens for the app going inactive, so covered
+  // screens (already still) don't re-render when Control Center comes down.
+  const appActive = useSyncExternalStore(
+    inFront ? subscribeAppActive : noSubscribe,
+    inFront ? isAppActive : alwaysActive,
+  );
+  return inFront && appActive;
 }
 
 const RISE = Easing.out(Easing.sin);
 const SWING = Easing.inOut(Easing.sin);
 
-/** A 0→1→0 breathing value on the UI thread; holds at `rest` when Reduce
- *  Motion is on or `paused`, and freezes in place while the app is inactive. */
+/**
+ * A 0→1→0 breathing value on the UI thread. Holds at `rest` when Reduce
+ * Motion is on or `paused`, and freezes where it is once its screen has been
+ * covered or its tab hidden for a moment, or the app goes inactive (see
+ * useSceneActive), picking up from there as soon as it is back in front.
+ */
 export function useBreath(periodMs: number, opts?: { rest?: number; paused?: boolean }): SharedValue<number> {
   const rest = opts?.rest ?? 0;
   const paused = opts?.paused ?? false;
   const reduced = useReducedMotion();
-  const active = useAppActive();
+  const focused = useSceneActive();
   const v = useSharedValue(rest);
-  const running = active && !paused && !reduced;
+  const running = focused && !paused && !reduced;
+  // Where the value was last sent to rest, so returning to a screen whose
+  // breath is paused doesn't replay a no-op ease (each of its frames would
+  // still redraw the views that read it).
+  const restedAt = useRef<number | null>(rest);
 
   useEffect(() => {
     if (running) {
+      restedAt.current = null;
       const half = periodMs / 2;
       scheduleOnUI(() => {
         'worklet';
@@ -219,10 +310,11 @@ export function useBreath(periodMs: number, opts?: { rest?: number; paused?: boo
       });
       return () => cancelAnimation(v);
     }
-    // In the background the cancelled breath simply stays where it stopped.
-    if (!active) return;
+    // Covered or inactive: the cancelled breath simply stays where it stopped.
+    if (!focused || restedAt.current === rest) return;
+    restedAt.current = rest;
     v.value = reduced ? rest : withTiming(rest, timing(D.slow));
-  }, [running, active, reduced, periodMs, rest, v]);
+  }, [running, focused, reduced, periodMs, rest, v]);
 
   return v;
 }

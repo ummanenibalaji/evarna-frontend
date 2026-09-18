@@ -1,14 +1,21 @@
 // Atoms.tsx — the shared controls and surfaces: buttons, pills, cards,
 // switches, status atoms and the loading / empty / error states.
-// Ported from system.jsx; backdrop-filter: blur() → expo-blur via GlassFill.
+// Ported from system.jsx; backdrop-filter: blur() → GlassFill (a static
+// frost by default, a live expo-blur only where content moves beneath).
 //
 // Depth: iOS drops the shadow of a layer that clips its own bounds, so every
 // atom with a shadow puts it on an unclipped outer view (opaque, so UIKit can
-// use a shadow path) and clips the blur and gradients on an inner view.
+// use a shadow path) and clips the fills and gradients on an inner view.
 // Translucent glass gets no shadow: it would be re-rendered per pixel on
 // every frame the backdrop moves, and black on near-black doesn't read.
+//
+// Cost: these atoms appear dozens of times per screen, so each is memoized
+// (props that are strings, numbers and stable handlers skip the re-render),
+// haptics play when a press lands rather than on touch-down, and controls
+// that usually sit in scrolling content wait PRESS_DELAY before reacting, so
+// a drag that starts on one neither shrinks it nor ticks.
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { memo, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -41,7 +48,9 @@ import { LinearGradient } from 'expo-linear-gradient';
 
 import { announce, useReduceTransparency } from '../hooks/useAccessibilityPrefs';
 import { haptic, type HapticKind } from '../lib/haptics';
-import { ease, enter, exit, spring, timing, useAppActive, useBreath, usePressFeedback, useReducedMotion } from '../theme/motion';
+import {
+  ease, enter, exit, PRESS_DELAY, spring, timing, useBreath, usePressFeedback, useReducedMotion, useSceneActive,
+} from '../theme/motion';
 import { ELEV, GRAD, HIT, MOTION, R, rgba, SP, W } from '../theme/theme';
 import { NavIcon, type IconName } from './NavIcon';
 import { RadialGlow } from './RadialGlow';
@@ -80,6 +89,11 @@ function splitStyle(style: StyleProp<ViewStyle>): { outer: ViewStyle; inner: Vie
   return { outer: outer as ViewStyle, inner: inner as ViewStyle };
 }
 
+/** Plays `kind` (or `fallback` when it is undefined); false plays nothing. */
+function playHaptic(kind: HapticKind | false | undefined, fallback: HapticKind): void {
+  if (kind !== false) haptic[kind ?? fallback]();
+}
+
 // Warm-white light for glossy highlights, fading out downwards or at both ends.
 const SPECULAR = [rgba(W.text, 0.22), rgba(W.text, 0)] as const;
 const EDGE_LIGHT = [rgba(W.text, 0), rgba(W.text, 0.12), rgba(W.text, 0)] as const;
@@ -88,13 +102,61 @@ const DIAGONAL = { start: { x: 0, y: 0 }, end: { x: 1, y: 1 } } as const;
 const ACROSS = { start: { x: 0, y: 0 }, end: { x: 1, y: 0 } } as const;
 
 // ─── GlassFill ──────────────────────────────────────────────────────────
-/** The frosted backdrop of a glass surface: a live blur, or an opaque fill
- *  when the user has turned on Reduce Transparency. Fills its clipping parent. */
-export function GlassFill({ intensity = 30, solid = W.surface2, style }: { intensity?: number; solid?: string; style?: StyleProp<ViewStyle> }) {
+// A live blur (a UIVisualEffectView) re-samples and re-blurs whatever is
+// behind it on every frame it moves relative to it — every scroll frame and
+// every frame of a push, pop or tab slide — plus an offscreen pass for its
+// rounded clip. Behind cards, tiles and buttons that backdrop is the still
+// AmbientBg: smooth gradients and faint glows a blur can't change. What the
+// dark blur added there was a slight lift from its tint, so glass is a static
+// frost by default: that lift as a flat translucent fill the glow still shows
+// through, which looks the same on this background and costs nothing to move.
+// `live` keeps a real blur for surfaces that content really moves under (the
+// tab bar and top bar draw their own).
+const FROST = W.surface2;
+
+// The dark blur's tint grew with its intensity; so does the frost.
+const frostAlpha = (intensity: number) => Math.min(0.4, Math.max(0.06, intensity * 0.006));
+
+const FROST_STYLES = new Map<number, ViewStyle>();
+function frostStyle(intensity: number): ViewStyle {
+  let style = FROST_STYLES.get(intensity);
+  if (!style) {
+    style = { ...FILL, backgroundColor: rgba(FROST, frostAlpha(intensity)) };
+    FROST_STYLES.set(intensity, style);
+  }
+  return style;
+}
+
+/** `top` (a hex token at `topA`) laid over `under` (at `underA`), as one rgba(). */
+function layered(top: string, topA: number, under: string, underA: number): string {
+  const a = topA + underA * (1 - topA);
+  const t = parseInt(top.slice(1, 7), 16);
+  const u = parseInt(under.slice(1, 7), 16);
+  const ch = (shift: number) =>
+    Math.round((((t >> shift) & 255) * topA + ((u >> shift) & 255) * underA * (1 - topA)) / a);
+  return `rgba(${ch(16)},${ch(8)},${ch(0)},${Math.round(a * 1000) / 1000})`;
+}
+
+interface GlassFillProps {
+  /** How frosted the glass reads (the old blur intensity, 0–100). */
+  intensity?: number;
+  /** The opaque fill used under Reduce Transparency. */
+  solid?: string;
+  /** A real backdrop blur. Only for glass that content scrolls or moves
+   *  under, such as a chip floating over a thread; never nest two. */
+  live?: boolean;
+  style?: StyleProp<ViewStyle>;
+}
+
+/** The frosted backdrop of a glass surface: a static frost (or, with `live`,
+ *  a real blur), or an opaque fill when the user has turned on Reduce
+ *  Transparency. Fills its clipping parent. */
+export const GlassFill = memo(function GlassFill({ intensity = 30, solid = W.surface2, live = false, style }: GlassFillProps) {
   const reduce = useReduceTransparency();
   if (reduce) return <View pointerEvents="none" style={[FILL, { backgroundColor: solid }, style]} />;
-  return <BlurView pointerEvents="none" intensity={intensity} tint="dark" style={[FILL, style]} />;
-}
+  if (live) return <BlurView pointerEvents="none" intensity={intensity} tint="dark" style={[FILL, style]} />;
+  return <View pointerEvents="none" style={style ? [frostStyle(intensity), style] : frostStyle(intensity)} />;
+});
 
 // ─── IconButton ─────────────────────────────────────────────────────────
 type IconButtonVariant = 'plain' | 'glass' | 'tinted' | 'danger';
@@ -133,11 +195,11 @@ function iconSurface(variant: IconButtonVariant, color: string, selected: boolea
   }
 }
 
-export function IconButton({
+export const IconButton = memo(function IconButton({
   icon, label, onPress, size = 40, iconSize = 22, tint, variant = 'plain',
   disabled = false, selected, haptic: hapticKind, accessibilityHint, style, testID,
 }: IconButtonProps) {
-  const press = usePressFeedback({ scale: MOTION.press.scaleSmall, haptic: hapticKind });
+  const press = usePressFeedback({ scale: MOTION.press.scaleSmall, haptic: false });
   const color = tint ?? (variant === 'tinted' ? W.primary : W.text);
   const surface = iconSurface(variant, variant === 'danger' ? W.danger : color, !!selected);
   const round = size / 2;
@@ -153,9 +215,13 @@ export function IconButton({
       ]}
     >
       <Pressable
-        onPress={onPress}
+        onPress={() => {
+          playHaptic(hapticKind, 'light');
+          onPress();
+        }}
         onPressIn={press.onPressIn}
         onPressOut={press.onPressOut}
+        unstable_pressDelay={PRESS_DELAY}
         disabled={disabled}
         hitSlop={minTarget(size)}
         accessibilityRole="button"
@@ -179,27 +245,29 @@ export function IconButton({
       </Pressable>
     </Animated.View>
   );
-}
+});
 
 // ─── BackButton ─────────────────────────────────────────────────────────
 const BACK_LABEL = { back: 'Back', down: 'Close', close: 'Close' } as const;
 
 /** The top-bar back / dismiss control. A full 44pt target, pulled left so the
- *  glyph lines up with the screen gutter. Navigation gets no haptic, as in iOS. */
-export function BackButton({ onPress, label, icon = 'back', style }: {
+ *  glyph lines up with the screen gutter. Navigation gets no haptic, as in iOS.
+ *  `disabled` dims it, says so to VoiceOver and ignores presses. */
+export const BackButton = memo(function BackButton({ onPress, label, icon = 'back', disabled = false, style }: {
   onPress: () => void;
   label?: string;
   icon?: 'back' | 'down' | 'close';
+  disabled?: boolean;
   style?: StyleProp<ViewStyle>;
 }) {
   return (
     <IconButton
       icon={icon} label={label ?? BACK_LABEL[icon]} onPress={onPress}
-      size={HIT} iconSize={24} haptic={false}
-      style={[styles.backButton, style]}
+      size={HIT} iconSize={24} haptic={false} disabled={disabled}
+      style={style ? [styles.backButton, style] : styles.backButton}
     />
   );
-}
+});
 
 // ─── Pill ───────────────────────────────────────────────────────────────
 type PillSize = 'sm' | 'md';
@@ -226,7 +294,7 @@ interface PillProps {
   textStyle?: StyleProp<TextStyle>;
 }
 
-export function Pill({
+export const Pill = memo(function Pill({
   children, active, selected, accent, color, onPress, size = 'md', disabled = false,
   accessibilityRole, accessibilityLabel, accessibilityHint, style, textStyle,
 }: PillProps) {
@@ -257,6 +325,7 @@ export function Pill({
         onPress={onPress ? handlePress : undefined}
         onPressIn={onPress ? press.onPressIn : undefined}
         onPressOut={onPress ? press.onPressOut : undefined}
+        unstable_pressDelay={PRESS_DELAY}
         disabled={disabled}
         hitSlop={minTarget(HIT, height)}
         accessibilityRole={role}
@@ -291,7 +360,7 @@ export function Pill({
       </Pressable>
     </Animated.View>
   );
-}
+});
 
 // ─── PrimaryButton ──────────────────────────────────────────────────────
 // Aurora fill on the diagonal, a gloss highlight, a settled bottom edge and a
@@ -310,7 +379,7 @@ interface PrimaryButtonProps {
   accent?: string;
   /** Show a subtle trailing arrow indicator (filled variants only) */
   trailingArrow?: boolean;
-  /** Press-in haptic; a light tap by default. */
+  /** Haptic when the press lands; a light tap by default. */
   haptic?: HapticKind | false;
   accessibilityLabel?: string;
   accessibilityHint?: string;
@@ -319,11 +388,11 @@ interface PrimaryButtonProps {
 
 const BUTTON_HEIGHT = 56;
 
-export function PrimaryButton({
+export const PrimaryButton = memo(function PrimaryButton({
   children, onPress, disabled = false, loading = false, style, variant = 'primary', accent,
   trailingArrow = false, haptic: hapticKind, accessibilityLabel, accessibilityHint, testID,
 }: PrimaryButtonProps) {
-  const press = usePressFeedback({ haptic: hapticKind });
+  const press = usePressFeedback({ haptic: false });
   const isFilled = variant === 'primary' || variant === 'danger';
   const isGlass = variant === 'secondary';
   const fill = accent ?? (variant === 'danger' ? W.danger : W.rose);
@@ -343,9 +412,13 @@ export function PrimaryButton({
       ]}
     >
       <Pressable
-        onPress={onPress}
+        onPress={onPress ? () => {
+          playHaptic(hapticKind, 'light');
+          onPress();
+        } : undefined}
         onPressIn={press.onPressIn}
         onPressOut={press.onPressOut}
+        unstable_pressDelay={PRESS_DELAY}
         disabled={disabled || loading}
         accessibilityRole="button"
         accessibilityLabel={accessibilityLabel ?? (typeof children === 'string' ? children : undefined)}
@@ -384,11 +457,15 @@ export function PrimaryButton({
       </Pressable>
     </Animated.View>
   );
-}
+});
 
 // ─── Card (frosted glass) ───────────────────────────────────────────────
-// Layers: blur, a top-bright / bottom-dark shade, a 1px light on the top edge
-// (the aurora line for 'live' cards) and a 1px settled bottom edge.
+// Layers: the frost with a top-bright / bottom-dark shade (one gradient), a
+// 1px light on the top edge (the aurora line for 'live' cards) and a 1px
+// settled bottom edge. Cards sit in scrolling lists, so the frost is static
+// (see GlassFill) and a press is a plain pressed style rather than an
+// animated one: at 1.5% a spring can't be told from a step, and it keeps
+// long lists free of per-card animation machinery.
 type CardTone = 'glass' | 'raised' | 'live';
 
 interface CardProps {
@@ -405,15 +482,26 @@ interface CardProps {
   tone?: CardTone;
   /** R.card (20) for hero cards; R.lg (16) for rows and nested tiles. */
   borderRadius?: number;
+  /** Haptic when a pressable card is pressed; a light tap by default. */
+  haptic?: HapticKind | false;
   accessibilityLabel?: string;
   accessibilityHint?: string;
 }
 
-export function Card({
+// The frost a card's old blur (intensity 40) left, with CARD_SHADE baked in.
+const CARD_FROST = frostAlpha(40);
+const CARD_GLASS = [
+  layered(W.text, 0.04, FROST, CARD_FROST),
+  rgba(FROST, CARD_FROST),
+  layered(W.shadow, 0.1, FROST, CARD_FROST),
+] as const;
+const CARD_GLASS_AT = [0, 0.5, 1] as const;
+
+export const Card = memo(function Card({
   children, onPress, style, padding = SP.base2, border, bg, glass = true,
-  tone = glass ? 'glass' : 'raised', borderRadius = R.card, accessibilityLabel, accessibilityHint,
+  tone = glass ? 'glass' : 'raised', borderRadius = R.card, haptic: hapticKind, accessibilityLabel, accessibilityHint,
 }: CardProps) {
-  const press = usePressFeedback({ scale: MOTION.press.scaleSubtle });
+  const reduceTransparency = useReduceTransparency();
   const { outer, inner } = splitStyle(style);
   const isGlass = tone !== 'raised';
   const depth = isGlass ? null : [{ borderRadius, backgroundColor: bg || W.surface1 }, ELEV.mid];
@@ -431,10 +519,14 @@ export function Card({
       ]}
     >
       {isGlass ? (
-        <>
-          <GlassFill intensity={40} />
-          <LinearGradient pointerEvents="none" colors={CARD_SHADE} locations={[0, 0.5, 1]} style={FILL} />
-        </>
+        reduceTransparency ? (
+          <>
+            <View pointerEvents="none" style={styles.cardSolid} />
+            <LinearGradient pointerEvents="none" colors={CARD_SHADE} locations={CARD_GLASS_AT} style={FILL} />
+          </>
+        ) : (
+          <LinearGradient pointerEvents="none" colors={CARD_GLASS} locations={CARD_GLASS_AT} style={FILL} />
+        )
       ) : null}
       {tone === 'live'
         ? <AuroraLine />
@@ -452,24 +544,24 @@ export function Card({
     );
   }
   return (
-    <Animated.View style={[depth, outer, press.animatedStyle]}>
-      <Pressable
-        onPress={onPress}
-        onPressIn={press.onPressIn}
-        onPressOut={press.onPressOut}
-        accessibilityRole="button"
-        accessibilityLabel={accessibilityLabel}
-        accessibilityHint={accessibilityHint}
-        style={styles.grow}
-      >
-        {surface}
-      </Pressable>
-    </Animated.View>
+    <Pressable
+      onPress={() => {
+        playHaptic(hapticKind, 'light');
+        onPress();
+      }}
+      unstable_pressDelay={PRESS_DELAY}
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel}
+      accessibilityHint={accessibilityHint}
+      style={({ pressed }) => [depth, outer, pressed ? styles.cardPressed : null]}
+    >
+      {surface}
+    </Pressable>
   );
-}
+});
 
 // ─── GlassPill ──────────────────────────────────────────────────────────
-export function GlassPill({ children, style }: { children: React.ReactNode; style?: StyleProp<ViewStyle> }) {
+export const GlassPill = memo(function GlassPill({ children, style }: { children: React.ReactNode; style?: StyleProp<ViewStyle> }) {
   return (
     <View
       style={[
@@ -486,7 +578,7 @@ export function GlassPill({ children, style }: { children: React.ReactNode; styl
       {children}
     </View>
   );
-}
+});
 
 // ─── Toggle ─────────────────────────────────────────────────────────────
 // iOS-style switch. The thumb springs (and jumps under Reduce Motion); the
@@ -511,7 +603,7 @@ interface ToggleProps {
   disabled?: boolean;
 }
 
-export function Toggle({ value, onChange, label, disabled = false }: ToggleProps) {
+export const Toggle = memo(function Toggle({ value, onChange, label, disabled = false }: ToggleProps) {
   const pos = useSharedValue(value ? 1 : 0);
   const lit = useSharedValue(value ? 1 : 0);
   const held = useSharedValue(0);
@@ -538,6 +630,7 @@ export function Toggle({ value, onChange, label, disabled = false }: ToggleProps
       }}
       onPressIn={() => { held.value = withTiming(1, fade(D.instant)); }}
       onPressOut={() => { held.value = withTiming(0, fade(D.fast)); }}
+      unstable_pressDelay={PRESS_DELAY}
       disabled={disabled}
       hitSlop={TOGGLE_SLOP}
       accessibilityRole="switch"
@@ -557,11 +650,11 @@ export function Toggle({ value, onChange, label, disabled = false }: ToggleProps
       <Animated.View pointerEvents="none" style={[styles.thumb, thumbStyle]} />
     </Pressable>
   );
-}
+});
 
 // ─── ProgressDots ───────────────────────────────────────────────────────
 // Completed steps are coral; the current one stretches into a capsule.
-export function ProgressDots({ total, current }: { total: number; current: number }) {
+export const ProgressDots = memo(function ProgressDots({ total, current }: { total: number; current: number }) {
   return (
     <View accessible accessibilityLabel={`Step ${current} of ${total}`} style={styles.dots}>
       {Array.from({ length: total }, (_, i) => (
@@ -572,16 +665,16 @@ export function ProgressDots({ total, current }: { total: number; current: numbe
       ))}
     </View>
   );
-}
+});
 
 // ─── StatusPill ─────────────────────────────────────────────────────────
-export function StatusPill({ children, accent = W.text2, bg = W.surface1 }: { children: React.ReactNode; accent?: string; bg?: string }) {
+export const StatusPill = memo(function StatusPill({ children, accent = W.text2, bg = W.surface1 }: { children: React.ReactNode; accent?: string; bg?: string }) {
   return (
     <View style={[styles.statusPill, { backgroundColor: bg }]}>
-      <Txt variant="footnote" weight={500} style={{ color: accent }}>{children}</Txt>
+      <Txt variant="footnote" weight={500} color={accent}>{children}</Txt>
     </View>
   );
-}
+});
 
 // ─── MemoryBadge ────────────────────────────────────────────────────────
 // Reports a memory the backend actually saved. It keeps its place while
@@ -742,11 +835,14 @@ function MinuteWarning({ minutes, seconds, onUpgrade }: { minutes: number; secon
 const SEE_PLANS_H = 28;
 
 function SeePlans({ onPress }: { onPress: () => void }) {
-  const press = usePressFeedback({ scale: MOTION.press.scaleSmall });
+  const press = usePressFeedback({ scale: MOTION.press.scaleSmall, haptic: false });
   return (
     <Animated.View style={press.animatedStyle}>
       <Pressable
-        onPress={onPress}
+        onPress={() => {
+          haptic.light();
+          onPress();
+        }}
         onPressIn={press.onPressIn}
         onPressOut={press.onPressOut}
         hitSlop={minTarget(HIT, SEE_PLANS_H)}
@@ -754,7 +850,7 @@ function SeePlans({ onPress }: { onPress: () => void }) {
         accessibilityLabel="See plans to keep talking"
         style={({ pressed }) => [styles.seePlans, pressed ? styles.pressedSoft : null]}
       >
-        <Txt variant="footnote" weight={600} maxScale={1.2} style={{ color: W.onAccent }}>See plans</Txt>
+        <Txt variant="footnote" weight={600} maxScale={1.2} color={W.onAccent}>See plans</Txt>
       </Pressable>
     </Animated.View>
   );
@@ -766,7 +862,7 @@ function SeePlans({ onPress }: { onPress: () => void }) {
 // The 1–1.5px gradient hairline that sits on the top edge of a "live" card
 // (tonight's check-in, chat header). Fades out at both ends so it reads as
 // light catching an edge rather than a border.
-export function AuroraLine({ height = 1.5, style }: { height?: number; style?: StyleProp<ViewStyle> }) {
+export const AuroraLine = memo(function AuroraLine({ height = 1.5, style }: { height?: number; style?: StyleProp<ViewStyle> }) {
   return (
     <LinearGradient
       pointerEvents="none"
@@ -776,45 +872,55 @@ export function AuroraLine({ height = 1.5, style }: { height?: number; style?: S
       style={[{ position: 'absolute', left: 0, right: 0, top: 0, height }, style]}
     />
   );
-}
+});
 
 // ─── SectionLabel ───────────────────────────────────────────────────────
 // Settings-style group heading: colored dot, uppercase label, hairline rule
 // running to the right edge.
-export function SectionLabel({ children, dot = W.primary, rule = true }: { children: React.ReactNode; dot?: string; rule?: boolean }) {
+export const SectionLabel = memo(function SectionLabel({ children, dot = W.primary, rule = true }: { children: React.ReactNode; dot?: string; rule?: boolean }) {
   return (
     <View style={styles.sectionLabel}>
       <View style={[styles.sectionDot, { backgroundColor: dot }]} />
-      <Txt variant="eyebrow" heading style={{ color: W.text2 }}>{children}</Txt>
+      <Txt variant="eyebrow" heading color={W.text2}>{children}</Txt>
       {rule ? <View style={styles.sectionRule} /> : null}
     </View>
   );
-}
+});
 
 // ─── StreakPill ─────────────────────────────────────────────────────────
 // Gold flame + day count, with a specular sweep crossing it every few
 // seconds — the one piece of chrome allowed to move on the home header.
 const SWEEP_PERIOD = 4500;
-const SWEEP_SHARE = 0.31; // of the period spent crossing; the rest is rest
+const SWEEP_CROSS = Math.round(SWEEP_PERIOD * 0.31); // the rest of the period is rest
 const SWEEP_W = 26;
 
-/** A 0→1 sawtooth on the UI thread. Rests at 0 under Reduce Motion and while
- *  the app is in the background. */
-function useSawtooth(periodMs: number): SharedValue<number> {
+/**
+ * The sweep's progress across the pill: 0→1 over SWEEP_CROSS, once every
+ * SWEEP_PERIOD. Between crossings nothing is animating, so the pill draws
+ * nothing new for two-thirds of every period (a looping clock would redraw it
+ * every frame of the rest too). Holds at 0 under Reduce Motion, once Home has
+ * been covered or hidden for a moment, and while the app is inactive.
+ */
+function useSweep(): SharedValue<number> {
   const reduced = useReducedMotion();
-  const active = useAppActive();
+  const inFront = useSceneActive();
   const t = useSharedValue(0);
-  const running = active && !reduced;
+  const running = inFront && !reduced;
 
   useEffect(() => {
-    t.value = 0;
     if (!running) return;
-    t.value = withRepeat(
-      withTiming(1, { duration: periodMs, easing: Easing.linear, reduceMotion: ReduceMotion.Never }),
-      -1, false, undefined, ReduceMotion.Never,
-    );
-    return () => cancelAnimation(t);
-  }, [running, periodMs, t]);
+    const cross = () => {
+      t.value = 0;
+      t.value = withTiming(1, { duration: SWEEP_CROSS, easing: ease.standard, reduceMotion: ReduceMotion.Never });
+    };
+    cross();
+    const id = setInterval(cross, SWEEP_PERIOD);
+    return () => {
+      clearInterval(id);
+      cancelAnimation(t);
+      t.value = 0;
+    };
+  }, [running, t]);
 
   return t;
 }
@@ -830,28 +936,31 @@ interface StreakPillProps {
 
 const STREAK_SLOP = minTarget(HIT, 32);
 
-export function StreakPill({ days, onPress, accessibilityLabel, accessibilityHint }: StreakPillProps) {
-  const press = usePressFeedback({ scale: MOTION.press.scaleSmall });
-  const clock = useSawtooth(SWEEP_PERIOD);
+export const StreakPill = memo(function StreakPill({ days, onPress, accessibilityLabel, accessibilityHint }: StreakPillProps) {
+  const press = usePressFeedback({ scale: MOTION.press.scaleSmall, haptic: false });
+  const sweep = useSweep();
   const width = useSharedValue(0);
 
-  const sweepStyle = useAnimatedStyle(() => {
-    const t = ease.standard(Math.min(1, clock.value / SWEEP_SHARE));
-    return {
-      opacity: width.value > 0 && clock.value > 0 ? 1 : 0,
-      transform: [
-        { translateX: interpolate(t, [0, 1], [-SWEEP_W * 2, width.value + SWEEP_W]) },
-        { skewX: '-20deg' },
-      ],
-    };
-  });
+  // The band rests past the right edge (clipped) and starts each crossing off
+  // the left one, so the jump back between crossings is never seen.
+  const sweepStyle = useAnimatedStyle(() => ({
+    opacity: width.value > 0 && sweep.value > 0 ? 1 : 0,
+    transform: [
+      { translateX: interpolate(sweep.value, [0, 1], [-SWEEP_W * 2, width.value + SWEEP_W]) },
+      { skewX: '-20deg' },
+    ],
+  }));
 
   return (
     <Animated.View style={press.animatedStyle}>
       <Pressable
-        onPress={onPress}
+        onPress={onPress ? () => {
+          haptic.light();
+          onPress();
+        } : undefined}
         onPressIn={onPress ? press.onPressIn : undefined}
         onPressOut={onPress ? press.onPressOut : undefined}
+        unstable_pressDelay={PRESS_DELAY}
         hitSlop={STREAK_SLOP}
         accessibilityRole={onPress ? 'button' : 'text'}
         accessibilityLabel={accessibilityLabel ?? `${days}-day streak`}
@@ -861,79 +970,81 @@ export function StreakPill({ days, onPress, accessibilityLabel, accessibilityHin
       >
         <Animated.View pointerEvents="none" style={[styles.sweep, sweepStyle]} />
         <NavIcon name="flame-solid" color={W.gold} size={14} />
-        <Txt font="display" weight={700} maxScale={1.2} style={[styles.tabular, { fontSize: 13, color: W.gold }]}>{days}</Txt>
+        <Txt font="display" weight={700} maxScale={1.2} style={styles.streakDays}>{days}</Txt>
       </Pressable>
     </Animated.View>
   );
-}
+});
 
 // ─── MemoryChip ─────────────────────────────────────────────────────────
 // Gold-on-dark inline chip for a saved memory or a memory count. Gold is
 // reserved for memory + streaks. A pressable chip shows a chevron.
 const CHIP_SLOP = minTarget(HIT, 30);
 
-export function MemoryChip({ children, icon = 'check', onPress, accessibilityHint }: {
+// Chips sit in scrolling threads; their pressed fill is the feedback, so they
+// carry no animation machinery of their own.
+export const MemoryChip = memo(function MemoryChip({ children, icon = 'check', onPress, accessibilityHint }: {
   children: React.ReactNode;
   icon?: 'check' | 'sparkle-solid';
   onPress?: () => void;
   accessibilityHint?: string;
 }) {
-  const press = usePressFeedback();
   const body = (
     <>
       <NavIcon name={icon} color={W.gold} size={13} />
-      <Txt variant="footnote" weight={500} style={{ color: W.gold }}>{children}</Txt>
+      <Txt variant="footnote" weight={500} color={W.gold}>{children}</Txt>
       {onPress ? <NavIcon name="right" color={W.gold} size={12} /> : null}
     </>
   );
   if (!onPress) return <View style={styles.memoryChip}>{body}</View>;
   return (
-    <Animated.View style={press.animatedStyle}>
-      <Pressable
-        onPress={onPress}
-        onPressIn={press.onPressIn}
-        onPressOut={press.onPressOut}
-        hitSlop={CHIP_SLOP}
-        accessibilityRole="button"
-        accessibilityHint={accessibilityHint}
-        style={({ pressed }) => [styles.memoryChip, pressed ? styles.memoryChipPressed : null]}
-      >
-        {body}
-      </Pressable>
-    </Animated.View>
+    <Pressable
+      onPress={() => {
+        haptic.light();
+        onPress();
+      }}
+      unstable_pressDelay={PRESS_DELAY}
+      hitSlop={CHIP_SLOP}
+      accessibilityRole="button"
+      accessibilityHint={accessibilityHint}
+      style={({ pressed }) => [styles.memoryChip, pressed ? styles.memoryChipPressed : null]}
+    >
+      {body}
+    </Pressable>
   );
-}
+});
 
 // ─── QuickReply ─────────────────────────────────────────────────────────
 // Coral-outlined suggestion chip above the composer. Its row sits at the top
 // edge of a scroll view, which would swallow a top hit slop, so the chip
-// grows downward only; the row should add a little top padding.
+// grows downward only; the row should add a little top padding. The label
+// wraps rather than truncates: tapping sends the whole text, so all of it
+// has to be readable first, at any text size.
 const QUICK_REPLY_SLOP = { top: 4, bottom: 4 };
 
-export function QuickReply({ children, onPress, accessibilityHint }: {
+export const QuickReply = memo(function QuickReply({ children, onPress, accessibilityHint }: {
   children: React.ReactNode;
   onPress?: () => void;
   accessibilityHint?: string;
 }) {
-  const press = usePressFeedback({ haptic: 'selection' });
   return (
-    <Animated.View style={press.animatedStyle}>
-      <Pressable
-        onPress={onPress}
-        onPressIn={press.onPressIn}
-        onPressOut={press.onPressOut}
-        hitSlop={QUICK_REPLY_SLOP}
-        accessibilityRole="button"
-        accessibilityHint={accessibilityHint}
-        style={({ pressed }) => [styles.quickReply, pressed ? styles.quickReplyPressed : null]}
-      >
-        <Txt variant="subhead" weight={500} numberOfLines={1} style={{ color: W.primarySoft }}>
-          {children}
-        </Txt>
-      </Pressable>
-    </Animated.View>
+    <Pressable
+      onPress={onPress ? () => {
+        haptic.selection();
+        onPress();
+      } : undefined}
+      unstable_pressDelay={PRESS_DELAY}
+      hitSlop={QUICK_REPLY_SLOP}
+      accessibilityRole="button"
+      accessibilityHint={accessibilityHint}
+      style={({ pressed }) => [styles.quickReply, pressed ? styles.quickReplyPressed : null]}
+    >
+      <Txt variant="subhead" weight={500} color={W.primarySoft}>
+        {children}
+      </Txt>
+    </Pressable>
   );
-}
+});
 
 // ─── MeterBar ───────────────────────────────────────────────────────────
 // Thin aurora progress track — voice minutes, usage caps. The fill slides in
@@ -948,7 +1059,7 @@ interface MeterBarProps {
   accessibilityLabel?: string;
 }
 
-export function MeterBar({ pct, height = 6, lowAt, accessibilityLabel }: MeterBarProps) {
+export const MeterBar = memo(function MeterBar({ pct, height = 6, lowAt, accessibilityLabel }: MeterBarProps) {
   const clamped = Math.max(0, Math.min(1, pct));
   const low = lowAt != null && clamped <= lowAt;
   const trackW = useSharedValue(0);
@@ -989,12 +1100,13 @@ export function MeterBar({ pct, height = 6, lowAt, accessibilityLabel }: MeterBa
       </Animated.View>
     </View>
   );
-}
+});
 
 // ─── Skeleton ───────────────────────────────────────────────────────────
 // Placeholder blocks with a soft light sweep. Every skeleton on screen reads
-// one shared clock so they shimmer in step; it stops when the last one
-// unmounts, and Reduce Motion or a backgrounded app leaves them still.
+// one shared clock so they shimmer in step; it stops when the last moving one
+// unmounts or is covered. Reduce Motion leaves them still, and so does their
+// screen being covered or hidden (after a short grace, see useSceneActive).
 const SHIMMER_PERIOD = 1600;
 const SHIMMER_SHARE = 0.65;
 const SHIMMER_BAND = 96;
@@ -1030,10 +1142,10 @@ interface SkeletonProps {
 
 /** A placeholder block. Hidden from VoiceOver: label the loading region instead
  *  (SkeletonLines does). */
-export function Skeleton({ width = '100%', height = 14, radius = R.sm, style }: SkeletonProps) {
+export const Skeleton = memo(function Skeleton({ width = '100%', height = 14, radius = R.sm, style }: SkeletonProps) {
   const reduced = useReducedMotion();
-  const active = useAppActive();
-  const moving = active && !reduced;
+  const inFront = useSceneActive();
+  const moving = inFront && !reduced;
   const clock = useShimmerClock(moving);
   const w = useSharedValue(0);
 
@@ -1056,12 +1168,12 @@ export function Skeleton({ width = '100%', height = 14, radius = R.sm, style }: 
       ) : null}
     </View>
   );
-}
+});
 
 const LINE_WIDTHS: DimensionValue[] = ['100%', '92%', '84%', '96%'];
 
 /** Paragraph placeholder; the last line runs short. Announced as "Loading". */
-export function SkeletonLines({ lines = 3, style }: { lines?: number; style?: StyleProp<ViewStyle> }) {
+export const SkeletonLines = memo(function SkeletonLines({ lines = 3, style }: { lines?: number; style?: StyleProp<ViewStyle> }) {
   return (
     <View accessible accessibilityLabel="Loading" accessibilityState={{ busy: true }} style={[styles.lines, style]}>
       {Array.from({ length: lines }, (_, i) => (
@@ -1069,7 +1181,7 @@ export function SkeletonLines({ lines = 3, style }: { lines?: number; style?: St
       ))}
     </View>
   );
-}
+});
 
 // ─── EmptyState / ErrorState ────────────────────────────────────────────
 interface EmptyStateProps {
@@ -1081,7 +1193,7 @@ interface EmptyStateProps {
   style?: StyleProp<ViewStyle>;
 }
 
-export function EmptyState({ icon = 'sparkle', title, body, actionLabel, onAction, style }: EmptyStateProps) {
+export const EmptyState = memo(function EmptyState({ icon = 'sparkle', title, body, actionLabel, onAction, style }: EmptyStateProps) {
   const entering = useOnMount(() => enter.fadeUp);
   return (
     <Animated.View entering={entering} style={[styles.state, style]}>
@@ -1095,7 +1207,7 @@ export function EmptyState({ icon = 'sparkle', title, body, actionLabel, onActio
       ) : null}
     </Animated.View>
   );
-}
+});
 
 interface ErrorStateProps {
   title?: string;
@@ -1107,7 +1219,7 @@ interface ErrorStateProps {
   style?: StyleProp<ViewStyle>;
 }
 
-export function ErrorState({
+export const ErrorState = memo(function ErrorState({
   title = "Couldn't load this", body = 'Please try again in a moment.',
   onRetry, retryLabel = 'Try again', retrying = false, style,
 }: ErrorStateProps) {
@@ -1130,7 +1242,7 @@ export function ErrorState({
       ) : null}
     </Animated.View>
   );
-}
+});
 
 // ─── InlineNotice ───────────────────────────────────────────────────────
 type NoticeTone = 'info' | 'warning' | 'error' | 'success';
@@ -1151,7 +1263,7 @@ interface InlineNoticeProps {
 
 /** A one-line status inside a screen. Warnings and errors are spoken when
  *  they appear or change. */
-export function InlineNotice({ tone, text, actionLabel, onAction, style }: InlineNoticeProps) {
+export const InlineNotice = memo(function InlineNotice({ tone, text, actionLabel, onAction, style }: InlineNoticeProps) {
   const { color, icon } = NOTICE[tone];
   const entering = useOnMount(() => enter.fade);
   const exiting = useOnMount(() => exit.fade);
@@ -1174,12 +1286,12 @@ export function InlineNotice({ tone, text, actionLabel, onAction, style }: Inlin
           accessibilityRole="button"
           style={({ pressed }) => [styles.noticeAction, pressed ? styles.pressed : null]}
         >
-          <Txt variant="subhead" weight={600} style={{ color }}>{actionLabel}</Txt>
+          <Txt variant="subhead" weight={600} color={color}>{actionLabel}</Txt>
         </Pressable>
       ) : null}
     </Animated.View>
   );
-}
+});
 
 const NOTICE_ACTION_SLOP = minTarget(HIT, 24);
 
@@ -1193,6 +1305,9 @@ const styles = StyleSheet.create({
   tabular: { fontVariant: ['tabular-nums'] },
 
   backButton: { marginLeft: -10 },
+
+  cardSolid: { ...FILL, backgroundColor: W.surface2 },
+  cardPressed: { transform: [{ scale: MOTION.press.scaleSubtle }] },
 
   specular: { position: 'absolute', left: 1, top: 1, right: 1, borderTopLeftRadius: R.pill, borderTopRightRadius: R.pill },
   settledEdge: { position: 'absolute', left: 0, right: 0, bottom: 0, height: 1, backgroundColor: rgba(W.shadow, 0.22) },
@@ -1263,9 +1378,11 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   sweep: { position: 'absolute', left: 0, top: 0, bottom: 0, width: SWEEP_W, backgroundColor: rgba(W.text, 0.14) },
+  streakDays: { fontSize: 13, color: W.gold, fontVariant: ['tabular-nums'] },
 
+  // maxWidth lets a long starter wrap inside its row instead of overflowing it.
   quickReply: {
-    minHeight: 36, paddingVertical: SP.xs2, paddingHorizontal: SP.md2, borderRadius: R.pill, justifyContent: 'center',
+    minHeight: 36, maxWidth: '100%', paddingVertical: SP.xs2, paddingHorizontal: SP.md2, borderRadius: R.pill, justifyContent: 'center',
     backgroundColor: rgba(W.primary, 0.08), borderWidth: 1, borderColor: rgba(W.primary, 0.28),
   },
   quickReplyPressed: { backgroundColor: rgba(W.primary, 0.16) },

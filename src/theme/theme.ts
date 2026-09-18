@@ -99,7 +99,7 @@ export const GRAD = {
   danger: [W.dangerSoft, W.danger] as const,
   /** User chat bubble. */
   userBubble: ['rgba(64,46,52,0.85)', 'rgba(50,36,44,0.85)'] as const,
-  /** Bottom-sheet panel, top → bottom (sits over a blur). */
+  /** Bottom-sheet panel, top → bottom (over the panel's surface1 base). */
   sheet: ['rgba(48,32,40,0.95)', 'rgba(24,16,20,0.95)'] as const,
 } as const;
 

@@ -4,14 +4,16 @@
 //
 // Every loop is one native timing that never calls back into JS, so it keeps
 // moving while the JS thread is busy and staggered siblings stay in phase.
-// Loops hold still under Reduce Motion and pause while the app is inactive.
+// Loops hold still under Reduce Motion and pause, keeping their phase, once
+// their screen has been covered or its tab hidden for a moment, or the app
+// goes inactive (useSceneActive).
 // New components should prefer the Reanimated primitives in ./motion.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Animated, Easing } from 'react-native';
+import { Animated, Easing, type GestureResponderEvent } from 'react-native';
 
 import { haptic, type HapticKind } from '../lib/haptics';
-import { useAppActive, useReducedMotion } from './motion';
+import { isPressRelease, useReducedMotion, useSceneActive } from './motion';
 import { MOTION } from './theme';
 
 type Bezier = readonly [number, number, number, number];
@@ -110,7 +112,7 @@ function createLoop(durationMs: number, delayMs: number, yoyo: boolean, moving: 
 /** A looping 0→1→0 (yoyo) or 0→1 driver value on the native thread. */
 export function useLoop(durationMs: number, opts?: LoopOptions): Animated.AnimatedInterpolation<number> {
   const reduced = useReducedMotion();
-  const active = useAppActive();
+  const focused = useSceneActive();
   const moving = (opts?.enabled ?? true) && !reduced;
 
   // `yoyo` and `delay` shape the node graph, so they are read once.
@@ -123,12 +125,14 @@ export function useLoop(durationMs: number, opts?: LoopOptions): Animated.Animat
     return () => clock.dispose();
   }, [clock]);
 
+  // A covered screen's (or inactive app's) loop stops where it is, the gate
+  // left open, so it carries on from the same phase when it is back.
   useEffect(() => {
-    if (!moving || !active) return;
+    if (!moving || !focused) return;
     clock.duration = durationMs;
     clock.run();
     return () => clock.pause();
-  }, [clock, moving, active, durationMs]);
+  }, [clock, moving, focused, durationMs]);
 
   // A yoyo eases to and from its midpoint when a caller toggles it; Reduce
   // Motion cuts straight there. A new timing or setValue replaces any fade
@@ -226,32 +230,47 @@ export function useEntrance(opts?: { fromTranslateY?: number; durationMs?: numbe
   return useMemo(() => ({ opacity: v, transform: [{ translateY: lerp(v, from, 0) }] }), [v, from]);
 }
 
+// A count redraws whoever reads it, so it ticks at most this often (~12 a
+// second) rather than every frame; the eye reads a rolling numeral the same.
+const COUNT_TICK = 80;
+
 /** Counts from the number on screen to `to` over `duration` ms and returns
  *  the rounded value. Text can't be driven natively, so this one ticks on
- *  the JS thread. Under Reduce Motion it returns `to` straight away. */
+ *  the JS thread — on a timer, only when the shown number changes, and never
+ *  more than ~12 times a second, so the component reading it re-renders a
+ *  handful of times rather than every frame. Under Reduce Motion it returns
+ *  `to` straight away. */
 export function useCountUp(to: number, duration = 1200, delay = 0): number {
   const reduced = useReducedMotion();
   const [n, setN] = useState(reduced ? to : 0);
   const shown = useRef(n);
 
   useEffect(() => {
-    if (reduced) {
-      shown.current = to;
-      setN(to);
+    const show = (value: number) => {
+      if (value === shown.current) return;
+      shown.current = value;
+      setN(value);
+    };
+    if (reduced || duration <= 0) {
+      show(to);
       return;
     }
     const from = shown.current;
     if (from === to) return;
-    const v = new Animated.Value(0);
-    const sub = v.addListener(({ value }) => {
-      shown.current = Math.round(from + (to - from) * value);
-      setN(shown.current);
-    });
-    const anim = Animated.timing(v, { toValue: 1, duration, delay, easing: DECEL, useNativeDriver: false });
-    anim.start();
+    let interval: ReturnType<typeof setInterval> | undefined;
+    const start = setTimeout(() => {
+      const t0 = Date.now();
+      const tick = () => {
+        const t = Math.min(1, (Date.now() - t0) / duration);
+        show(Math.round(from + (to - from) * DECEL(t)));
+        if (t >= 1) clearInterval(interval);
+      };
+      interval = setInterval(tick, COUNT_TICK);
+      tick();
+    }, delay);
     return () => {
-      anim.stop();
-      v.removeListener(sub);
+      clearTimeout(start);
+      clearInterval(interval);
     };
   }, [to, duration, delay, reduced]);
 
@@ -261,21 +280,23 @@ export function useCountUp(to: number, duration = 1200, delay = 0): number {
 const PRESS_IN = { ...MOTION.spring.snappy, useNativeDriver: true };
 const PRESS_OUT = { ...MOTION.spring.bouncy, useNativeDriver: true };
 
-/** A pressable scale-down spring for tap feedback, with a light haptic on
- *  press-in unless `haptic` says otherwise. It answers the user's own touch,
- *  so it plays under Reduce Motion too. Returns animated style + handlers. */
+/** A pressable scale-down spring for tap feedback, with a light haptic when
+ *  the press lands (on release, never on touch-down, so a scroll that starts
+ *  on the control doesn't tick) unless `haptic` says otherwise. It answers
+ *  the user's own touch, so it plays under Reduce Motion too. Returns
+ *  animated style + handlers. */
 export function usePressScale(scaleTo: number = MOTION.press.scale, opts?: { haptic?: HapticKind | false }) {
   const v = useRef(new Animated.Value(1)).current;
   const kind = opts?.haptic ?? 'light';
 
   const onPressIn = useCallback(() => {
     Animated.spring(v, { toValue: scaleTo, ...PRESS_IN }).start();
-    if (kind) haptic[kind]();
-  }, [v, scaleTo, kind]);
+  }, [v, scaleTo]);
 
-  const onPressOut = useCallback(() => {
+  const onPressOut = useCallback((e?: GestureResponderEvent) => {
     Animated.spring(v, { toValue: 1, ...PRESS_OUT }).start();
-  }, [v]);
+    if (kind && isPressRelease(e)) haptic[kind]();
+  }, [v, kind]);
 
   const style = useMemo(() => ({ transform: [{ scale: v }] }), [v]);
   return { style, onPressIn, onPressOut };

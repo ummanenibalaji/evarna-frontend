@@ -3,8 +3,11 @@
 // strokeWidth 1.8, round caps/joins, no fill.
 // Icons are decorative: the control that holds one carries the label
 // (see IconButton in Atoms).
+//
+// Memoized: every prop is a primitive, so a parent re-render never re-runs
+// react-native-svg's prop processing for an icon that hasn't changed.
 
-import React from 'react';
+import React, { memo } from 'react';
 import Svg, { Path, Rect, Circle } from 'react-native-svg';
 import { W } from '../theme/theme';
 
@@ -25,7 +28,7 @@ interface NavIconProps {
   size?: number;
 }
 
-export function NavIcon({ name, color = W.text, size = 22 }: NavIconProps) {
+function NavIconImpl({ name, color = W.text, size = 22 }: NavIconProps) {
   const common = {
     width: size,
     height: size,
@@ -155,3 +158,6 @@ export function NavIcon({ name, color = W.text, size = 22 }: NavIconProps) {
       return null;
   }
 }
+
+export const NavIcon = memo(NavIconImpl);
+NavIcon.displayName = 'NavIcon';

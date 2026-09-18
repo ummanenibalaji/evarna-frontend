@@ -25,7 +25,7 @@ import Animated, {
 import { scheduleOnUI } from 'react-native-worklets';
 import { LinearGradient } from 'expo-linear-gradient';
 import { RadialGlow, type GlowStop } from './RadialGlow';
-import { timing, useAppActive, useBreath, useReducedMotion } from '../theme/motion';
+import { timing, useBreath, useReducedMotion, useSceneActive } from '../theme/motion';
 import { ELEV, GRAD, MOTION, W } from '../theme/theme';
 import type { OrbState } from '../lib/voiceCall';
 
@@ -87,12 +87,12 @@ const CORE: GlowStop[] = [
   { offset: 1, color: W.violet, opacity: 0 },
 ];
 
-/** A 0→1 sawtooth on the UI thread. Stopping (or Reduce Motion, or the app
- *  going to the background) leaves it where it is; starting again carries on
- *  from there. */
+/** A 0→1 sawtooth on the UI thread. Stopping (or Reduce Motion, the app
+ *  going to the background, or another screen covering this one) leaves it
+ *  where it is; starting again carries on from there. */
 function useCycle(periodMs: number, running: boolean): SharedValue<number> {
   const reduced = useReducedMotion();
-  const active = useAppActive();
+  const active = useSceneActive();
   const t = useSharedValue(0);
   const go = running && active && !reduced;
 

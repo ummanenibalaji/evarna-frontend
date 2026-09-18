@@ -1,8 +1,12 @@
 // Avatar.tsx + Waveform — ported from system.jsx Avatar() and onboarding.jsx Waveform().
 // Premium treatment: outer halo glow + gradient ring + inner radial light.
+//
+// Avatars repeat down lists and chat threads, so the avatar is memoized (its
+// props are primitives) and the breathing halo is its own component: an
+// avatar without one builds no loop at all.
 
-import React, { useId } from 'react';
-import { Animated, Image, View } from 'react-native';
+import React, { memo, useId } from 'react';
+import { Animated, Image, StyleSheet, View } from 'react-native';
 import Svg, { Circle, Defs, LinearGradient as SvgLinearGradient, Stop } from 'react-native-svg';
 
 import { useRingBreathe, useWave } from '../theme/animations';
@@ -46,10 +50,9 @@ const BARS = [0.4, 0.7, 1, 0.7, 0.4];
 const RING_STROKE = 1.5;
 const ABSOLUTE = { position: 'absolute' } as const;
 const SPECULAR = rgba(W.text, 0.18);
+const HALO_RANGE = [0.1, 0.22] as const;
 
-export function Avatar({ name, size = 48, color = W.primary, image, breathe = true, glyph = 'voice', accessibilityLabel }: AvatarProps) {
-  // The halo breathes 0.10 ↔ 0.22 and rests at 0.16 under Reduce Motion.
-  const haloPulse = useRingBreathe(breathe, [0.1, 0.22]);
+export const Avatar = memo(function Avatar({ name, size = 48, color = W.primary, image, breathe = true, glyph = 'voice', accessibilityLabel }: AvatarProps) {
   const ringOffset = Math.max(4, size * 0.07);
   const ringSize = size + ringOffset * 2;
   const haloSize = size + ringOffset * 4.8;
@@ -69,19 +72,7 @@ export function Avatar({ name, size = 48, color = W.primary, image, breathe = tr
     >
       {breathe ? (
         <>
-          {/* Soft accent bloom that fades out past the ring. */}
-          <Animated.View
-            pointerEvents="none"
-            style={[{ position: 'absolute', width: haloSize, height: haloSize }, haloPulse]}
-          >
-            <RadialGlow
-              width={haloSize} height={haloSize}
-              stops={[
-                { offset: (size / haloSize) * 0.9, color, opacity: 1 },
-                { offset: 1, color, opacity: 0 },
-              ]}
-            />
-          </Animated.View>
+          <BreathingHalo size={size} haloSize={haloSize} color={color} />
           {/* A stroked circle: no background-coloured cutout, so it sits on any surface. */}
           <Svg pointerEvents="none" width={ringSize} height={ringSize} style={ABSOLUTE}>
             <Defs>
@@ -141,6 +132,26 @@ export function Avatar({ name, size = 48, color = W.primary, image, breathe = tr
       )}
     </View>
   );
+});
+
+/** Soft accent bloom that fades out past the ring. It breathes 0.10 ↔ 0.22
+ *  and rests at 0.16 under Reduce Motion. */
+function BreathingHalo({ size, haloSize, color }: { size: number; haloSize: number; color: string }) {
+  const haloPulse = useRingBreathe(true, HALO_RANGE);
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={[{ position: 'absolute', width: haloSize, height: haloSize }, haloPulse]}
+    >
+      <RadialGlow
+        width={haloSize} height={haloSize}
+        stops={[
+          { offset: (size / haloSize) * 0.9, color, opacity: 1 },
+          { offset: 1, color, opacity: 0 },
+        ]}
+      />
+    </Animated.View>
+  );
 }
 
 interface WaveformProps {
@@ -165,15 +176,19 @@ export function Waveform({ color, animate = false, size = 40 }: WaveformProps) {
   );
 }
 
-function WaveBar({ color, height, animate, delay }: { color: string; height: number; animate: boolean; delay: number }) {
-  // Idle bars don't run a loop at all.
-  const wave = useWave(delay, animate);
-  return (
-    <Animated.View
-      style={[
-        { width: 3, height, backgroundColor: color, borderRadius: 2, opacity: 0.8 },
-        animate ? wave : undefined,
-      ]}
-    />
-  );
+type WaveBarProps = { color: string; height: number; animate: boolean; delay: number };
+
+function WaveBar({ color, height, animate, delay }: WaveBarProps) {
+  // Idle bars are plain views: no loop, not even an idle one.
+  if (animate) return <MovingWaveBar color={color} height={height} delay={delay} />;
+  return <View style={[styles.bar, { height, backgroundColor: color }]} />;
 }
+
+function MovingWaveBar({ color, height, delay }: Omit<WaveBarProps, 'animate'>) {
+  const wave = useWave(delay, true);
+  return <Animated.View style={[styles.bar, { height, backgroundColor: color }, wave]} />;
+}
+
+const styles = StyleSheet.create({
+  bar: { width: 3, borderRadius: 2, opacity: 0.8 },
+});

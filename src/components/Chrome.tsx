@@ -10,10 +10,9 @@ import {
   type StyleProp, type ViewStyle,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import { BlurView } from 'expo-blur';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AmbientBg } from './AmbientBg';
-import { AuroraLine } from './Atoms';
+import { AuroraLine, GlassFill } from './Atoms';
 import { Txt } from './Txt';
 import { GRAD, HIT, MOTION, SP, W, Z } from '../theme/theme';
 import { useReduceTransparency, useScreenReader } from '../hooks/useAccessibilityPrefs';
@@ -36,6 +35,9 @@ function useAndroidKeyboardVisible(): boolean {
   }, []);
   return visible;
 }
+
+const PAGE = [...GRAD.page] as const;
+const PAGE_AT = [0, 0.55, 1] as const;
 
 interface ScreenProps {
   children: React.ReactNode;
@@ -95,7 +97,7 @@ export function Screen({
       {ambient ? (
         <AmbientBg intensity={ambientIntensity} includePulse={ambientPulse} drift={ambientDrift} />
       ) : (
-        <LinearGradient colors={[...GRAD.page]} locations={[0, 0.55, 1]} style={StyleSheet.absoluteFill} />
+        <LinearGradient colors={PAGE} locations={PAGE_AT} style={StyleSheet.absoluteFill} />
       )}
       {body}
     </View>
@@ -119,13 +121,18 @@ interface TopBarProps {
   glass?: boolean;
   /** Custom fill; any value other than 'transparent' also frosts the bar. */
   bg?: string;
+  /** A real backdrop blur, for a bar laid over content that scrolls under
+   *  it. Off by default: a bar above its content only ever has the still
+   *  backdrop behind it, where a static frost looks the same and a live blur
+   *  would re-blur on every frame of every push and pop. */
+  liveBlur?: boolean;
   /** Aurora hairline along the bottom edge. */
   border?: boolean;
 }
 
 export function TopBar({
   left, center, right, title, titleRef, focusTitleOnMount = false,
-  height = 56, glass = false, bg = 'transparent', border = false,
+  height = 56, glass = false, bg = 'transparent', border = false, liveBlur = false,
 }: TopBarProps) {
   const reduceTransparency = useReduceTransparency();
   const screenReader = useScreenReader();
@@ -151,9 +158,7 @@ export function TopBar({
 
   return (
     <View style={[styles.bar, { minHeight: height, backgroundColor: fill }]}>
-      {frosted && !reduceTransparency && (
-        <BlurView pointerEvents="none" intensity={40} tint="dark" style={StyleSheet.absoluteFill} />
-      )}
+      {frosted && !reduceTransparency && <GlassFill intensity={40} live={liveBlur} />}
       {border && <AuroraLine height={1} style={styles.edge} />}
       <View style={styles.side}>{left}</View>
       <View style={styles.center}>
