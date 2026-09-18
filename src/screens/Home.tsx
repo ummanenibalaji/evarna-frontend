@@ -27,6 +27,7 @@ import { enter, exit, layout, useAppActive, usePressFeedback } from '../theme/mo
 import { haptic } from '../lib/haptics';
 import { ELEV, GRAD, HIT, MOTION, R, SP, W, rgba } from '../theme/theme';
 import { Go } from '../navigation/types';
+import { useTabReselect } from '../navigation/tabEvents';
 import { Companion, ARCHETYPE_COLORS, ARCHETYPE_LABEL, CHECK_IN } from '../data/config';
 import { getActivity, ApiActivity } from '../api';
 import { getAuthToken } from '../api/client';
@@ -634,6 +635,10 @@ export function S10_Home({
 
   const streak = activity?.streak_days ?? 0;
 
+  // A second tap on the Home tab scrolls back to the top.
+  const scrollRef = useRef<ScrollView>(null);
+  useTabReselect('home', () => scrollRef.current?.scrollTo({ y: 0, animated: true }));
+
   return (
     <Screen tabBar>
       {/* Exits are for things leaving while Home stays. Without this,
@@ -660,6 +665,7 @@ export function S10_Home({
         />
 
         <ScrollView
+          ref={scrollRef}
           style={styles.flex}
           contentContainerStyle={{ paddingBottom: tabBarHeight + SP.base }}
           scrollIndicatorInsets={{ bottom: Math.max(0, tabBarHeight - insets.bottom) }}

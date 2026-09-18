@@ -44,6 +44,7 @@ import {
 } from '../api';
 import { ApiError, NetworkError, isNetworkError, streamConversation, type SseErrorInfo } from '../api/client';
 import { Go } from '../navigation/types';
+import { useTabReselect } from '../navigation/tabEvents';
 
 const D = MOTION.duration;
 
@@ -476,6 +477,10 @@ export function S15_StudioHome({
     });
   };
 
+  // A second tap on the Studio tab scrolls back to the top.
+  const scrollRef = useRef<ScrollView>(null);
+  useTabReselect('studio', () => scrollRef.current?.scrollTo({ y: 0, animated: true }));
+
   return (
     <Screen tabBar>
       <TopBar
@@ -483,6 +488,7 @@ export function S15_StudioHome({
         right={<CreateButton onPress={openCreator} />}
       />
       <ScrollView
+        ref={scrollRef}
         style={styles.flex1}
         // Content scrolls on under the floating tab bar and clears it at the end.
         contentContainerStyle={{ paddingBottom: tabBarH + SP.base }}

@@ -71,6 +71,7 @@ import { readCache, writeCache } from '../lib/cache';
 import { legalDocs, openLegalDoc, type LegalDoc } from '../data/legal';
 import { ARCHETYPE_COLORS, ARCHETYPE_LABEL, MEM_TYPES, Companion, Tier } from '../data/config';
 import { Go, PaywallTrigger, ScreenName } from '../navigation/types';
+import { useTabReselect } from '../navigation/tabEvents';
 
 const D = MOTION.duration;
 const FILL = StyleSheet.absoluteFillObject;
@@ -567,6 +568,10 @@ export function S21_Settings({
   const tabBarH = useTabBarHeight();
   const alive = useAlive();
 
+  // A second tap on the Settings tab scrolls back to the top.
+  const scrollRef = useRef<ScrollView>(null);
+  useTabReselect('settings', () => scrollRef.current?.scrollTo({ y: 0, animated: true }));
+
   // ── Activity: the last known numbers at once, then the fresh ones ──────
   const [stats, setStats] = useState<ApiUserStats | null>(null);
   const [activity, setActivity] = useState<ApiActivity | null>(null);
@@ -759,6 +764,7 @@ export function S21_Settings({
   return (
     <Screen tabBar>
       <ScrollView
+        ref={scrollRef}
         style={styles.fill}
         contentContainerStyle={[styles.settingsContent, { paddingBottom: tabBarH + SP.xl }]}
         scrollIndicatorInsets={{ bottom: Math.max(0, tabBarH - insets.bottom) }}

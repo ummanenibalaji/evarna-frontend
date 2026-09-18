@@ -679,6 +679,12 @@ export default function App() {
 
   // ── Navigation actions ──────────────────────────────────────────────
   const closeOverlay = useCallback(() => setOverlay(null), [setOverlay]);
+  // A purchase the store confirms after the sheet has given up waiting
+  // ("Payment received · can take a few minutes") shows once this lands.
+  const closePaywall = useEvent(() => {
+    setOverlay(null);
+    void refreshEntitlement();
+  });
   const back = useEvent(() => setNav(s => pop(s)));
   // Only the screen that was swiped leaves, even if something else arrived mid-swipe.
   const swipedBack = useEvent((key: string) => setNav(s => (top(s).key === key ? pop(s) : s)));
@@ -736,7 +742,9 @@ export default function App() {
     if (top(navRef.current).key !== from.key) return;
     const adding = addMode === 'add';
     if (status === 'undetermined') {
-      setNav(s => push(s, route('notif', { next: adding ? 'home' : 'first-chat' })));
+      // 'first-chat' also finishes an added companion (see navigate), which
+      // resets the add flow and refreshes the list on the way Home.
+      setNav(s => push(s, route('notif', { next: 'first-chat' })));
       return;
     }
     if (adding) finishAddCompanion();
@@ -1500,7 +1508,10 @@ export default function App() {
     await Promise.all([refreshUserCharacters(), refreshEntitlement()]);
   });
   const selectCompanion = useEvent((c: Companion) => { void openChat(c); });
-  const moodCompanion = useEvent((c: Companion, mood: string) => { void openChat(c, mood); });
+  // Home hands over the bare chip word ('Heavy'); the draft reads as the user's own words.
+  const moodCompanion = useEvent((c: Companion, mood: string) => {
+    void openChat(c, `I'm feeling ${mood.trim().toLowerCase()}.`);
+  });
   const addCompanion = useEvent(() => {
     if (companionsRef.current.length >= MAX_COMPANIONS) return;
     setAddMode('add');
@@ -1622,10 +1633,11 @@ export default function App() {
           <S30_Login
             isNew={isNewUser}
             appleAvailable={false}
-            onGoogle={() => { void handleOAuth('google'); }}
-            onApple={() => { void handleOAuth('apple'); }}
+            // Returned, not voided: each button shows its own spinner until they settle.
+            onGoogle={() => handleOAuth('google')}
+            onApple={() => handleOAuth('apple')}
             onEmailRequest={handleEmailRequest}
-            onEmailVerify={code => { void handleEmailVerify(code); }}
+            onEmailVerify={handleEmailVerify}
             devCode={devCode}
             busy={authBusy}
             error={authError}
@@ -1787,7 +1799,7 @@ export default function App() {
           />
         );
       case 'character-creator':
-        return <S18_CharacterCreator go={go} apiVoices={voices} />;
+        return <S18_CharacterCreator go={go} apiVoices={voices} voicesStatus={voicesStatus} onRetryVoices={loadVoices} />;
       case 'sandbox-session':
         return (
           <S20_SandboxSession
@@ -1851,7 +1863,7 @@ export default function App() {
             onRetryEntitlement={refreshEntitlement}
             // Both arrive once the sheet has animated out.
             onPurchased={applyEntitlement}
-            onClose={closeOverlay}
+            onClose={closePaywall}
           />
         );
       case 'callDepleted': {

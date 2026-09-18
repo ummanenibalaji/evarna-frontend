@@ -506,8 +506,8 @@ const TOGGLE_SLOP = minTarget(TRACK_W, TRACK_H);
 interface ToggleProps {
   value: boolean;
   onChange: (v: boolean) => void;
-  /** Spoken name of the switch. Every caller should pass it. */
-  label?: string;
+  /** Spoken name of the switch. */
+  label: string;
   disabled?: boolean;
 }
 

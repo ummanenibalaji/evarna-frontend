@@ -35,6 +35,7 @@ import { aiNoticeText } from '../lib/aiNotice';
 import { restoreDraft } from '../lib/chatTurns';
 import { haptic } from '../lib/haptics';
 import { Go } from '../navigation/types';
+import { useTabReselect } from '../navigation/tabEvents';
 import { enter, exit, layout, timing, usePressFeedback } from '../theme/motion';
 import { HIT, MOTION, R, rgba, SP, W } from '../theme/theme';
 
@@ -91,6 +92,8 @@ export function S19_SandboxHome({ go, comingSoon, isMinor, openMode }: {
   const { width } = useWindowDimensions();
   const scrollRef = useRef<ScrollView>(null);
   const viewport = useRef({ y: 0, h: 0 });
+  // A second tap on the Sandbox tab scrolls back to the top.
+  useTabReselect('sandbox', () => scrollRef.current?.scrollTo({ y: 0, animated: true }));
   const [aboutOpen, setAboutOpen] = useState(false);
   const [lockNote, setLockNote] = useState<SandboxModeId | null>(null);
   // The card under the finger, read on the UI thread by the colour bleed, so
