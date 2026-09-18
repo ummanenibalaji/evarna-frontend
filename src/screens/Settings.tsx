@@ -10,6 +10,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AccessibilityInfo,
   ActivityIndicator,
   AppState,
   Linking,
@@ -32,7 +33,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import Svg, { Circle, Defs, LinearGradient as SvgLinearGradient, Path, Stop } from 'react-native-svg';
 import * as Application from 'expo-application';
-import { File, Paths } from 'expo-file-system';
+import { Directory, File, Paths } from 'expo-file-system';
 
 import { Screen, TopBar } from '../components/Chrome';
 import { useTabBarHeight } from '../components/BottomNav';
@@ -452,10 +453,13 @@ function useAccountSheets({ go, onDeleteAccount, entitlement }: {
   const [open, setOpen] = useState<'sign-out' | 'delete' | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  // Set while the account is on its way out, so nothing saves into it after.
+  const leavingAccount = useRef(false);
 
   const signOut = () => {
     // The router covers the app with its own "Signing out…" state and then
     // replaces this screen, so the sheet steps aside for it.
+    leavingAccount.current = true;
     setOpen(null);
     go('login');
   };
@@ -464,10 +468,12 @@ function useAccountSheets({ go, onDeleteAccount, entitlement }: {
     if (!onDeleteAccount || deleting) return;
     setDeleting(true);
     setDeleteError(null);
+    leavingAccount.current = true;
     try {
       // Success signs out and replaces this screen; the sheet stays busy until then.
       await onDeleteAccount();
     } catch (e) {
+      leavingAccount.current = false;
       if (!alive.current) return;
       setDeleting(false);
       setDeleteError(deleteFailure(e));
@@ -513,6 +519,7 @@ function useAccountSheets({ go, onDeleteAccount, entitlement }: {
 
   return {
     sheets,
+    leavingAccount,
     canDelete: !!onDeleteAccount,
     openSignOut: () => setOpen('sign-out'),
     openDelete: () => {
@@ -545,6 +552,8 @@ interface SettingsProps {
   // Deletes the account server-side, then signs out. Owned by App.tsx.
   onDeleteAccount?: () => void | Promise<void>;
 }
+
+const CHECKIN_DECLINED = "Check-ins need notifications to reach you, so they're still off.";
 
 const STATS_KEY = 'settings.stats';
 const ACTIVITY_KEY = 'settings.activity';
@@ -618,6 +627,8 @@ export function S21_Settings({
     lastUsage.current = usage;
     if (!first) void loadStats();
   }, [usage, loadStats]);
+  // The Memories row shows the server's count, which forgetting changes.
+  useEffect(() => subscribeMemoriesChanged(() => { void loadStats(); }), [loadStats]);
 
   // ── Notification permission, re-read whenever the app comes back ──────
   const [permission, setPermission] = useState<PushPermission | null>(null);
@@ -642,6 +653,8 @@ export function S21_Settings({
   // ── Daily check-in ─────────────────────────────────────────────────────
   const [checkinBusy, setCheckinBusy] = useState(false);
   const [checkinError, setCheckinError] = useState<string | null>(null);
+  // Said no to the system prompt, but Android can still ask again.
+  const [checkinDeclined, setCheckinDeclined] = useState(false);
   const denied = permission === 'denied';
   // The switch shows what will actually happen: nothing arrives while iOS blocks it.
   const checkinOn = settings.dailyCheckin && !denied;
@@ -669,32 +682,77 @@ export function S21_Settings({
   const changeCheckin = async (on: boolean) => {
     if (checkinBusy) return;
     setCheckinError(null);
+    setCheckinDeclined(false);
     if (on && permission !== 'granted') {
-      // Turning check-ins on is the moment to ask. A refusal leaves them off,
-      // and the notice under the row explains how to change it later.
+      // Turning check-ins on is the moment to ask. Anything but a yes leaves
+      // them off, and the notice under the row explains how to change it later.
+      // A first "Don't allow" on Android reads as 'undetermined', not 'denied',
+      // because Android can still ask again.
       setCheckinBusy(true);
       const now = await askPermission();
       if (!alive.current) return;
       setCheckinBusy(false);
-      if (now === 'denied') return;
+      if (now !== 'granted') {
+        if (now === 'undetermined') {
+          setCheckinDeclined(true);
+          announce(CHECKIN_DECLINED);
+        }
+        return;
+      }
     }
     void saveCheckin(on);
   };
 
   // ── Data export ────────────────────────────────────────────────────────
   const [exporting, setExporting] = useState(false);
-  const [exportError, setExportError] = useState<string | null>(null);
+  const [exportNotice, setExportNotice] = useState<ExportNotice | null>(null);
+  // An export too large to share as text, kept until it is saved as a file.
+  const bigExport = useRef<string | null>(null);
   const exportData = async () => {
     if (exporting) return;
     setExporting(true);
-    setExportError(null);
+    setExportNotice(null);
+    bigExport.current = null;
     try {
       const data = await exportMyData();
       if (!alive.current) return;
       await shareExport(data);
     } catch (e) {
       if (!alive.current) return;
-      setExportError(e instanceof ExportTooLargeError ? e.message : `Couldn't prepare your data. ${failureCopy(e)}`);
+      if (e instanceof ExportTooLargeError) {
+        // Asking again would fail the same way; a file has no size limit.
+        bigExport.current = e.json;
+        setExportNotice({
+          tone: 'warning',
+          text: 'Your data is too large to share from this phone. Save it as a file in a folder you choose instead.',
+          action: 'save',
+        });
+      } else {
+        setExportNotice({ tone: 'error', text: `Couldn't prepare your data. ${failureCopy(e)}`, action: 'retry' });
+      }
+    } finally {
+      if (alive.current) setExporting(false);
+    }
+  };
+  const saveBigExport = async () => {
+    const json = bigExport.current;
+    if (!json || exporting) return;
+    setExporting(true);
+    setExportNotice(null);
+    try {
+      const saved = await saveExportToFolder(json);
+      if (!alive.current) return;
+      if (saved) {
+        bigExport.current = null;
+        setExportNotice({ tone: 'success', text: 'Your data was saved to the folder you chose.' });
+        announce('Your data was saved to the folder you chose.');
+      } else {
+        // Cancelled the folder picker: leave the way back open.
+        setExportNotice({ tone: 'info', text: 'Your data is ready to save as a file.', action: 'save' });
+      }
+    } catch {
+      if (!alive.current) return;
+      setExportNotice({ tone: 'error', text: "Couldn't save the file there. Try a different folder.", action: 'save' });
     } finally {
       if (alive.current) setExporting(false);
     }
@@ -824,6 +882,13 @@ export function S21_Settings({
                   actionLabel="Open Settings"
                   onAction={() => { Linking.openSettings().catch(() => {}); }}
                 />
+              ) : checkinDeclined && !checkinOn ? (
+                <InlineNotice
+                  tone="info"
+                  text={CHECKIN_DECLINED}
+                  actionLabel="Turn on"
+                  onAction={() => { void changeCheckin(true); }}
+                />
               ) : permission === 'undetermined' && settings.dailyCheckin ? (
                 <InlineNotice
                   tone="info"
@@ -868,8 +933,15 @@ export function S21_Settings({
 
         <Group
           title="Privacy & safety"
-          notes={exportError ? (
-            <InlineNotice tone="error" text={exportError} actionLabel="Try again" onAction={() => { void exportData(); }} />
+          notes={exportNotice ? (
+            <InlineNotice
+              tone={exportNotice.tone}
+              text={exportNotice.text}
+              actionLabel={exportNotice.action === 'save' ? 'Choose folder' : exportNotice.action === 'retry' ? 'Try again' : undefined}
+              onAction={exportNotice.action === 'save'
+                ? () => { void saveBigExport(); }
+                : exportNotice.action === 'retry' ? () => { void exportData(); } : undefined}
+            />
           ) : null}
         >
           <Row
@@ -959,15 +1031,37 @@ function CompanionMark({ name, color }: { name: string; color: string }) {
 
 // ─── Data export ─────────────────────────────────────────────────────────
 
-class ExportTooLargeError extends Error {}
+type ExportNotice = {
+  tone: 'error' | 'warning' | 'info' | 'success';
+  text: string;
+  /** 'retry' asks the server again; 'save' writes the export already in hand to a file. */
+  action?: 'retry' | 'save';
+};
 
-// Android passes shared text to the target app in one binder transaction,
-// which fails at about 1 MB; this leaves room for the rest of the intent.
-const ANDROID_SHARE_TEXT_LIMIT = 500_000;
+/** Too large to share as text on Android. Carries the export, so it can be saved as a file instead. */
+class ExportTooLargeError extends Error {
+  readonly json: string;
+  constructor(json: string) {
+    super('Export too large to share as text');
+    this.json = json;
+  }
+}
+
+// Android can only share text: the share sheet can't take a file without a
+// module this build doesn't have. The text goes to the target app in one
+// binder transaction, which fails at about 1 MB, and it travels as UTF-16
+// (2 bytes a character) up to three times: as the text itself, and in the
+// clip Android copies it into for the share intent and again for the chooser.
+// Past this budget the share fails every time, so the export is saved to a
+// file instead.
+const ANDROID_SHARE_BUDGET_BYTES = 600_000;
+const sharedTextBytes = (text: string) => text.length * 2 * 3;
+
+const exportFileName = () => `evarna-data-${new Date().toISOString().slice(0, 10)}.json`;
 
 function writeExportFile(json: string): File | null {
   try {
-    const file = new File(Paths.cache, `evarna-data-${new Date().toISOString().slice(0, 10)}.json`);
+    const file = new File(Paths.cache, exportFileName());
     file.create({ overwrite: true });
     file.write(json);
     return file;
@@ -991,10 +1085,29 @@ async function shareExport(data: unknown): Promise<void> {
       }
       return;
     }
-  } else if (json.length > ANDROID_SHARE_TEXT_LIMIT) {
-    throw new ExportTooLargeError('Your data is too large to share as text from this phone.');
+  } else if (sharedTextBytes(json) > ANDROID_SHARE_BUDGET_BYTES) {
+    throw new ExportTooLargeError(json);
   }
   await Share.share({ title, message: json });
+}
+
+const pickerCancelled = (e: unknown) =>
+  (e as { code?: unknown } | null)?.code === 'ERR_PICKER_CANCELLED' ||
+  (e instanceof Error && /cancel/i.test(e.message));
+
+/**
+ * Android: writes the export as a JSON file into a folder the user picks
+ * (Downloads, Documents, a cloud drive). Resolves false if they back out.
+ */
+async function saveExportToFolder(json: string): Promise<boolean> {
+  const folder = await Directory.pickDirectoryAsync().catch((e: unknown) => {
+    if (pickerCancelled(e)) return null;
+    throw e;
+  });
+  if (!folder) return false;
+  const file = folder.createFile(exportFileName(), 'application/json');
+  file.write(json);
+  return true;
 }
 
 // ─── StatsHero — streak, talk time and voice balance ─────────────────────
@@ -1052,9 +1165,14 @@ function StatsHero({ status, error, stats, activity, entitlement, entitlementFai
   // Monday-first, bucketed by the server in the user's own zone.
   const todayIndex = (new Date().getDay() + 6) % 7;
   const talkedToday = (activity?.week_minutes?.[todayIndex] ?? 0) > 0;
+  // Any conversation started today counts toward the streak, but the minutes
+  // are rounded and only land once it ends: an open chat or a short call
+  // reads as 0 here while today already counts. So no minutes today proves
+  // nothing once there is a streak, and the hint says only what holds either
+  // way. A streak of 0 does prove it: today would have made it at least 1.
   const streakHint = !activity ? null
     : talkedToday ? "You've talked today"
-    : streak > 0 ? 'Talk today to keep it going'
+    : streak > 0 ? 'A chat each day keeps it going'
     : 'Talk today to start a streak';
   const streakSpoken = activity
     ? `Current streak, ${streak} ${streak === 1 ? 'day' : 'days'}. Best ${best}.${streakHint ? ` ${streakHint}.` : ''}`
@@ -1457,6 +1575,25 @@ export function S_UserProfile({ go, userName, userEmail, onSave, onDeleteAccount
 
   const account = useAccountSheets({ go, onDeleteAccount });
 
+  // Leaving without the on-screen Back (Android's back button, a tab, a
+  // notification) must keep an edit too. On Android, Back first only hides
+  // the keyboard and leaves the field focused, so it never reports the edit
+  // as finished, and the second Back closes the screen. The router shows a
+  // failure itself, with a Retry.
+  const onSaveRef = useRef(onSave);
+  onSaveRef.current = onSave;
+  const leavingAccount = account.leavingAccount;
+  useEffect(() => () => {
+    const next = nameRef.current.trim();
+    const save = onSaveRef.current;
+    if (!save || leavingAccount.current || !next) return;
+    // Already sent (by Back or the field), even if its reply hasn't come yet.
+    if (next === savedRef.current.trim() || submitted.current === next) return;
+    submitted.current = next;
+    const pending = save({ display_name: next });
+    if (isPromise(pending)) pending.catch(() => {});
+  }, [leavingAccount]);
+
   const prefValue = (options: Option[], v: string | null) =>
     prefsStatus === 'ready'
       ? { value: labelOf(options, v) }
@@ -1685,7 +1822,25 @@ function toDisplayMemory(m: ApiMemory): DisplayMemory {
 
 // Long enough to notice and reach Undo; twice that with VoiceOver running.
 const UNDO_MS = 5000;
-const UNDO_MS_SCREEN_READER = 10000;
+export const UNDO_MS_SCREEN_READER = 10000;
+
+// ── Memory changes ───────────────────────────────────────────────────────
+// A companion's profile stays mounted under Memories (the stack keeps the
+// screen below live), so it can't count on a fresh mount to re-read how many
+// memories there are. Whatever forgets memories says so here once the server
+// has agreed, and whoever shows a count re-reads it.
+type MemoriesChanged = (characterId: string | null) => void;
+const memoryListeners = new Set<MemoriesChanged>();
+
+/** A companion's memories changed on the server. `null`: possibly any companion's. */
+export function notifyMemoriesChanged(characterId: string | null): void {
+  memoryListeners.forEach(cb => cb(characterId));
+}
+
+export function subscribeMemoriesChanged(cb: MemoriesChanged): () => void {
+  memoryListeners.add(cb);
+  return () => { memoryListeners.delete(cb); };
+}
 
 export function S22_Memories({ go, characterId, companionName }: { go: Go; characterId?: string; companionName?: string }) {
   const name = companionName?.trim() || null;
@@ -1741,15 +1896,24 @@ export function S22_Memories({ go, characterId, companionName }: { go: Go; chara
 
   useEffect(() => { void load('initial'); }, [load]);
 
+  // Read at commit time without making the commit (and the effect that runs
+  // it on the way out) change identity along with the companion.
+  const characterRef = useRef(characterId);
+  characterRef.current = characterId;
+
   const commitPending = useCallback(() => {
     const p = pendingRef.current;
     if (!p) return;
     pendingRef.current = null;
     clearTimeout(undoTimer.current);
     if (alive.current) setPending(null);
-    deleteMemory(p.memory.id).catch(e => {
+    const changed = () => notifyMemoriesChanged(characterRef.current ?? null);
+    deleteMemory(p.memory.id).then(changed, e => {
       // Already gone is what was asked for.
-      if (e instanceof ApiError && e.status === 404) return;
+      if (e instanceof ApiError && e.status === 404) {
+        changed();
+        return;
+      }
       if (!alive.current) return;
       // It is still on the server, so it goes back where it was.
       setMemories(list => (list ? insertAt(list, p.index, p.memory) : list));
@@ -1813,6 +1977,7 @@ export function S22_Memories({ go, characterId, companionName }: { go: Go; chara
     setClearError(null);
     try {
       await deleteAllMemories(characterId);
+      notifyMemoriesChanged(characterId);
       if (!alive.current) return;
       setMemories([]);
       setFilter('all');
@@ -2145,12 +2310,14 @@ export function S23_Paywall({
   });
 
   // ── Buying ─────────────────────────────────────────────────────────────
+  // Every step from here on replaces the button that was pressed, so the
+  // step itself tells a screen reader what happened (PurchaseStatus and
+  // PurchaseDone, through useStatusFocus).
   const finish = (e: ApiEntitlement, restored: boolean) => {
     result.current = e;
     setDone({ entitlement: e, restored });
     setPhase('done');
     haptic.success();
-    announce(restored ? `Welcome back. You're on ${e.tier_label}.` : `You're on ${e.tier_label}.`);
   };
 
   /** Re-reads the store on the server until it shows the plan, or gives up quietly. */
@@ -2200,13 +2367,11 @@ export function S23_Paywall({
     }
     if (outcome === 'pending') {
       setPhase('pending');
-      announce(`Payment pending. Your plan unlocks when ${store} confirms it.`);
       return;
     }
     // The store has taken the payment. Nothing from here on may say it failed.
     setConfirmKind('purchase');
     setPhase('confirming');
-    announce('Payment received. Setting up your plan.');
     const e = await confirmPlan();
     if (!alive.current) return;
     if (e) finish(e, false);
@@ -2234,7 +2399,10 @@ export function S23_Paywall({
     if (!alive.current) return;
     setRestoring(false);
     if (!found) {
-      setMessage({ tone: 'info', text: `No active subscription was found for this ${DEVICE_STORE === 'ios' ? 'Apple ID' : 'Google account'}.` });
+      const text = `No active subscription was found for this ${DEVICE_STORE === 'ios' ? 'Apple ID' : 'Google account'}.`;
+      setMessage({ tone: 'info', text });
+      // An info notice is quiet on its own, and this is the answer to the tap.
+      announce(text);
       return;
     }
     // The store has one. Only our server has to catch up now.
@@ -2604,9 +2772,39 @@ function PlanSkeleton({ stacked }: { stacked: boolean }) {
   );
 }
 
+/**
+ * A paywall step replaces the footer holding the button that was pressed, so
+ * VoiceOver would lose its place and hear nothing. This moves it onto the new
+ * step, which reads it out. TalkBack is told in words instead: focusing a
+ * view there doesn't reliably move its cursor. `step` names the step; a new
+ * one moves focus again.
+ */
+function useStatusFocus(step: string, spoken: string) {
+  const ref = useRef<View>(null);
+  const screenReader = useScreenReader();
+  const spokenRef = useRef(spoken);
+  spokenRef.current = spoken;
+  useEffect(() => {
+    if (!screenReader) return;
+    // Wait for the new step to be laid out, or VoiceOver lands on nothing.
+    const id = setTimeout(() => {
+      if (Platform.OS === 'ios' && ref.current) AccessibilityInfo.sendAccessibilityEvent(ref.current, 'focus');
+      else announce(spokenRef.current);
+    }, D.base);
+    return () => clearTimeout(id);
+  }, [step, screenReader]);
+  return ref;
+}
+
 function PurchaseDone({ entitlement, restored }: { entitlement: ApiEntitlement; restored: boolean }) {
   const plan = entitlement.plans.find(p => p.tier === entitlement.tier);
   const [entering] = useState(() => enter.scaleIn);
+  const title = restored ? `Welcome back to ${entitlement.tier_label}` : `You're on ${entitlement.tier_label}`;
+  const detail = plan
+    ? `${plan.voice_minutes} voice minutes a month and ${plan.daily_messages.toLocaleString('en-US')} messages a day are ready for you.`
+    : null;
+  const spoken = detail ? `${title}. ${detail}` : title;
+  const focusRef = useStatusFocus('done', spoken);
   return (
     <Animated.View entering={entering} style={styles.statusWrap}>
       <View style={styles.doneMark}>
@@ -2614,14 +2812,10 @@ function PurchaseDone({ entitlement, restored }: { entitlement: ApiEntitlement; 
         <NavIcon name="check" color={W.onAccent} size={30} />
         <Sparkles count={6} />
       </View>
-      <Txt variant="title2" heading style={styles.center}>
-        {restored ? `Welcome back to ${entitlement.tier_label}` : `You're on ${entitlement.tier_label}`}
-      </Txt>
-      {plan ? (
-        <Txt variant="body" style={styles.centerMuted}>
-          {`${plan.voice_minutes} voice minutes a month and ${plan.daily_messages.toLocaleString('en-US')} messages a day are ready for you.`}
-        </Txt>
-      ) : null}
+      <View ref={focusRef} accessible accessibilityRole="header" accessibilityLabel={spoken} style={styles.statusText}>
+        <Txt variant="title2" style={styles.center}>{title}</Txt>
+        {detail ? <Txt variant="body" style={styles.centerMuted}>{detail}</Txt> : null}
+      </View>
     </Animated.View>
   );
 }
@@ -2639,8 +2833,10 @@ function PurchaseStatus({ phase, kind, store }: { phase: PaywallPhase; kind: 'pu
     title = kind === 'restore' ? 'We found your subscription' : 'Payment received';
     text = "Your plan can take a few minutes to show up here. You don't need to buy it again.";
   }
+  const spoken = `${title}. ${text}`;
+  const focusRef = useStatusFocus(`${phase}:${kind}`, spoken);
   return (
-    <View style={styles.statusWrap} accessibilityLiveRegion="polite">
+    <View style={styles.statusWrap}>
       {phase === 'confirming' ? (
         <ActivityIndicator size="large" color={W.text2} />
       ) : (
@@ -2648,8 +2844,17 @@ function PurchaseStatus({ phase, kind, store }: { phase: PaywallPhase; kind: 'pu
           <NavIcon name={phase === 'pending' ? 'clock' : 'check'} color={W.gold} size={26} />
         </View>
       )}
-      <Txt variant="title2" heading style={styles.center}>{title}</Txt>
-      <Txt variant="body" style={styles.centerMuted}>{text}</Txt>
+      <View
+        ref={focusRef}
+        accessible
+        accessibilityRole="header"
+        accessibilityLabel={spoken}
+        accessibilityState={{ busy: phase === 'confirming' }}
+        style={styles.statusText}
+      >
+        <Txt variant="title2" style={styles.center}>{title}</Txt>
+        <Txt variant="body" style={styles.centerMuted}>{text}</Txt>
+      </View>
     </View>
   );
 }
@@ -2813,6 +3018,7 @@ const styles = StyleSheet.create({
   footerLinks: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', columnGap: SP.xs },
   legalLink: { color: W.text2, textDecorationLine: 'underline' },
   statusWrap: { alignItems: 'center', gap: SP.md, paddingTop: SP.xl, paddingBottom: SP.base },
+  statusText: { alignSelf: 'stretch', alignItems: 'center', gap: SP.md },
   statusMark: {
     width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center',
     backgroundColor: rgba(W.gold, 0.12), borderWidth: 1, borderColor: rgba(W.gold, 0.3),

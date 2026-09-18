@@ -35,11 +35,12 @@ import { canOpenCrisisResource, crisisResources, openCrisisResource, type Crisis
 import { legalDocs, openLegalDoc, type LegalDoc } from '../data/legal';
 import { hasVoicePreview, useVoicePreview } from '../lib/voicePreview';
 import { haptic } from '../lib/haptics';
-import { announce } from '../hooks/useAccessibilityPrefs';
+import { announce, useScreenReader } from '../hooks/useAccessibilityPrefs';
 import { enter, exit, layout, spring, timing, usePressFeedback } from '../theme/motion';
 import { ELEV, HIT, MOTION, R, resolveFont, rgba, SP, TYPE, W } from '../theme/theme';
 import { Go, ScreenName } from '../navigation/types';
 import { Companion, ARCHETYPE_COLORS, ARCHETYPE_LABEL, MEM_TYPES } from '../data/config';
+import { notifyMemoriesChanged, subscribeMemoriesChanged, UNDO_MS_SCREEN_READER } from './Settings';
 
 // The inline crisis card lives with the chat components now; this keeps the
 // name importable from here for anything that still reaches for it.
@@ -383,9 +384,17 @@ export function S26_CompanionEdit({
     autosaveTimer.current = setTimeout(() => { void flush(); }, AUTOSAVE_MS);
   }, [flush]);
 
-  // Leaving by any route (back, a tab, a notification) keeps the edits.
+  // Leaving by any route (back, a tab, a notification) keeps the edits,
+  // including a rename still being typed. On Android, Back first only hides
+  // the keyboard and leaves the field focused, so it never blurs and the
+  // rename is never finished; the second Back closes the screen.
   useEffect(() => () => {
     clearTimeout(savedTimer.current);
+    if (editingNameRef.current) {
+      editingNameRef.current = false;
+      // As finishNameEdit does, but without a render: the screen is going.
+      draft.current = { ...draft.current, name: draft.current.name.trim() || saved.current.name };
+    }
     void flush();
   }, [flush]);
 
@@ -558,12 +567,24 @@ export function S26_CompanionEdit({
   // null until known: a 0 shown while loading would tell someone whose
   // companion remembers plenty that it remembers nothing.
   const [memoryCount, setMemoryCount] = useState<number | null>(null);
-  useEffect(() => {
+  const countRequest = useRef(0);
+  const loadMemoryCount = useCallback(() => {
     if (!isRealCompanion) return;
+    // Only the latest read may set the count; an older reply is out of date.
+    const id = ++countRequest.current;
     getMemories(characterId)
-      .then(ms => { if (mounted.current) setMemoryCount(ms.length); })
+      .then(ms => { if (mounted.current && id === countRequest.current) setMemoryCount(ms.length); })
       .catch(() => { /* leave it unlabelled rather than show a wrong number */ });
   }, [characterId, isRealCompanion, mounted]);
+  useEffect(() => { loadMemoryCount(); }, [loadMemoryCount]);
+  // Memories opens over this screen, which stays mounted underneath, so
+  // forgetting there has to reach this count. It goes blank until the new
+  // number arrives: the old one would be wrong.
+  useEffect(() => subscribeMemoriesChanged(changed => {
+    if (changed !== null && changed !== characterId) return;
+    setMemoryCount(null);
+    loadMemoryCount();
+  }), [characterId, loadMemoryCount]);
   const memoryLabel = memoryCount === null
     ? 'Memories'
     : `${memoryCount} ${memoryCount === 1 ? 'memory' : 'memories'}`;
@@ -1432,6 +1453,9 @@ function formatDuration(session: ApiSession | null): string | null {
 // About a minute of patience in all, backing off: extraction usually lands
 // within half a minute, and a closed sheet stops asking.
 const RECAP_POLL_MS = [3000, 4000, 5000, 6000, 8000, 10000, 12000, 12000];
+// Undo sits in the sheet's footer. With a screen reader, hearing the
+// announcement and moving there takes far longer, so it gets as long as
+// Memories gives it.
 const UNDO_MS = 4000;
 
 type RecapPhase = 'loading' | 'waiting' | 'done' | 'slow' | 'none' | 'error';
@@ -1449,6 +1473,7 @@ export function S29_Recap({ go, companion, characterId }: {
   characterId?: string;
 }) {
   const mounted = useMountedRef();
+  const screenReader = useScreenReader();
   const [open, setOpen] = useState(true);
   const [session, setSession] = useState<ApiSession | null>(null);
   const [memories, setMemories] = useState<ApiMemory[]>([]);
@@ -1469,16 +1494,17 @@ export function S29_Recap({ go, companion, characterId }: {
     setPendingForget(p);
   };
 
+  const characterRef = useLatest(characterId);
   const commitForget = useCallback((p: PendingForget) => {
     forgotten.current.add(p.memory._id);
-    deleteMemory(p.memory._id).catch(() => {
+    deleteMemory(p.memory._id).then(() => notifyMemoriesChanged(characterRef.current ?? null), () => {
       forgotten.current.delete(p.memory._id);
       if (!mounted.current) return;
       setMemories(ms => insertAt(ms, p.index, p.memory));
       setForgetError("Couldn't forget that memory, so it's back in the list.");
       haptic.error();
     });
-  }, [mounted]);
+  }, [mounted, characterRef]);
 
   const forget = (m: ApiMemory) => {
     clearTimeout(undoTimer.current);
@@ -1492,7 +1518,7 @@ export function S29_Recap({ go, companion, characterId }: {
     undoTimer.current = setTimeout(() => {
       setPending(null);
       commitForget(p);
-    }, UNDO_MS);
+    }, screenReader ? UNDO_MS_SCREEN_READER : UNDO_MS);
   };
 
   const undo = () => {
