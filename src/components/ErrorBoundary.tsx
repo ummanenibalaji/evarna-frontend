@@ -4,7 +4,9 @@
 // Sentry.wrap() in App.tsx is only a profiler and touch tracker; it does not
 // catch anything. "Try again" remounts the whole subtree under a new key, so
 // a router below starts over from its boot state rather than re-rendering
-// the state that just threw.
+// the state that just threw. A boundary that can also be left (onReset)
+// offers that as its own, plainly named second action, so "Try again" never
+// quietly means "leave".
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
@@ -27,14 +29,21 @@ interface ErrorBoundaryProps {
   /** A change clears the error and remounts the children, e.g. the route
    *  key for a boundary around one screen. */
   resetKey?: string | number;
-  /** Runs before "Try again" remounts the children, e.g. to navigate home. */
+  /** A way out of the broken screen, e.g. back to the one it was opened
+   *  from. When given, the fallback offers it as a second action next to
+   *  "Try again", which still only remounts the children. */
   onReset?: () => void;
+  /** Names the onReset action. Defaults to 'Go back'. */
+  resetLabel?: string;
 }
 
-export function ErrorBoundary({ children, name = 'root', resetKey, onReset }: ErrorBoundaryProps) {
+export function ErrorBoundary({ children, name = 'root', resetKey, onReset, resetLabel = 'Go back' }: ErrorBoundaryProps) {
   const [attempt, setAttempt] = useState(0);
 
-  const retry = useCallback(() => {
+  const retry = useCallback(() => setAttempt(n => n + 1), []);
+
+  // The remount also covers a way out that leaves this boundary on screen.
+  const leave = useCallback(() => {
     onReset?.();
     setAttempt(n => n + 1);
   }, [onReset]);
@@ -43,18 +52,25 @@ export function ErrorBoundary({ children, name = 'root', resetKey, onReset }: Er
     <Sentry.ErrorBoundary
       key={`${resetKey ?? ''}:${attempt}`}
       beforeCapture={scope => scope.setTag('boundary', name)}
-      fallback={<Fallback onRetry={retry} />}
+      fallback={<Fallback onRetry={retry} onLeave={onReset ? leave : undefined} leaveLabel={resetLabel} />}
     >
       {children}
     </Sentry.ErrorBoundary>
   );
 }
 
+interface FallbackProps {
+  onRetry: () => void;
+  onLeave?: () => void;
+  leaveLabel: string;
+}
+
 // Kept free of the shared atoms so a bug in one of them can't also take the
 // recovery screen down.
-function Fallback({ onRetry }: { onRetry: () => void }) {
+function Fallback({ onRetry, onLeave, leaveLabel }: FallbackProps) {
   const insets = useSafeAreaInsets();
   const press = usePressFeedback();
+  const leavePress = usePressFeedback();
 
   useEffect(() => {
     haptic.error();
@@ -76,7 +92,9 @@ function Fallback({ onRetry }: { onRetry: () => void }) {
           Something went wrong
         </Txt>
         <Txt variant="body" style={[styles.center, styles.copy]}>
-          Evarna hit a snag showing this screen. Try again, and if it keeps happening, close and reopen the app.
+          {onLeave
+            ? 'Evarna hit a snag showing this screen. Try again, or leave this screen for now.'
+            : 'Evarna hit a snag showing this screen. Try again, and if it keeps happening, close and reopen the app.'}
         </Txt>
         <Animated.View style={[styles.buttonWrap, press.animatedStyle]}>
           <Pressable
@@ -95,6 +113,19 @@ function Fallback({ onRetry }: { onRetry: () => void }) {
             <Txt variant="button" style={styles.buttonLabel}>Try again</Txt>
           </Pressable>
         </Animated.View>
+        {onLeave && (
+          <Animated.View style={[styles.leaveWrap, leavePress.animatedStyle]}>
+            <Pressable
+              accessibilityRole="button"
+              onPress={onLeave}
+              onPressIn={leavePress.onPressIn}
+              onPressOut={leavePress.onPressOut}
+              style={styles.leave}
+            >
+              <Txt variant="button" style={styles.leaveLabel}>{leaveLabel}</Txt>
+            </Pressable>
+          </Animated.View>
+        )}
       </View>
     </View>
   );
@@ -124,4 +155,13 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   buttonLabel: { color: W.onAccent },
+  leaveWrap: { marginTop: SP.sm, alignSelf: 'stretch', alignItems: 'center' },
+  leave: {
+    minHeight: HIT,
+    minWidth: 200,
+    paddingHorizontal: SP.xl,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  leaveLabel: { color: W.text2 },
 });

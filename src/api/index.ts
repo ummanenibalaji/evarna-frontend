@@ -275,9 +275,13 @@ export const updateMe = (p: UpdateMePayload): Promise<unknown> =>
 export const deleteMe = (): Promise<unknown> =>
   apiDelete('/users/me', { confirm: 'DELETE' });
 
-// The user's full data as JSON (App Store data-portability requirement).
+// The user's full data as JSON (App Store data-portability requirement). Every
+// turn, memory and session, uncompressed: years of talking is megabytes, and
+// on a slow connection the download alone outlasts the usual 20s.
+const EXPORT_TIMEOUT_MS = 120_000;
+
 export const exportMyData = (): Promise<unknown> =>
-  apiGet('/users/me/export');
+  apiGet('/users/me/export', { timeoutMs: EXPORT_TIMEOUT_MS });
 
 // ── Push notifications ─────────────────────────────────────────────────────
 

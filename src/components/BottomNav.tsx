@@ -338,7 +338,15 @@ function Tab({ index, label, icon, selected, soon, hitX, hitW, labelW, geo, vis,
 
   return (
     <>
-      <Animated.View pointerEvents="none" style={[styles.slot, slotStyle]}>
+      {/* What the eye sees. The Pressable below is what a screen reader
+          reads — label, "coming soon" and selected state in one stop — so
+          the drawn label and badge must not become stops of their own. */}
+      <Animated.View
+        pointerEvents="none"
+        accessibilityElementsHidden
+        importantForAccessibility="no-hide-descendants"
+        style={[styles.slot, slotStyle]}
+      >
         <Animated.View
           style={[styles.content, { width: contentW, transformOrigin: [originX, ROW_H / 2, 0] }, press.animatedStyle]}
         >

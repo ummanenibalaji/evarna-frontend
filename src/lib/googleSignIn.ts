@@ -5,6 +5,8 @@
 // exists — including Expo Go, where the rest of the app still runs fine. Same
 // pattern as getAudioSession() in hooks/useVoiceCall.ts.
 
+import { withSystemPrompt } from '../components/PrivacyShield';
+
 /**
  * This build cannot do Google sign-in at all. The message is written for the
  * person holding the phone; the reason, which only a developer can act on, goes
@@ -83,7 +85,9 @@ export async function getGoogleIdToken(): Promise<string | null> {
   // missing Play Services fails deep inside the native call.
   await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
 
-  const res = await GoogleSignin.signIn();
+  // iOS asks "Evarna wants to use google.com to sign in" and then shows
+  // Google's sheet; the sign-in screen stays visible behind both.
+  const res = await withSystemPrompt(() => GoogleSignin.signIn());
   // v13+ returns { data: { idToken } }; older versions returned idToken at the
   // top level. Accept both so a minor bump does not silently break sign-in.
   return res?.data?.idToken ?? res?.idToken ?? null;

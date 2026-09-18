@@ -36,7 +36,15 @@ const TUNNEL_HEADERS = { 'bypass-tunnel-reminder': 'true' };
 
 // Long enough for a slow cellular round trip, short enough that a dead
 // connection turns into "can't reach Evarna" instead of an endless spinner.
+// RN's fetch only resolves once the whole body is in, so this covers the
+// download too: a request with a large answer passes its own timeoutMs.
 const REQUEST_TIMEOUT_MS = 20_000;
+// A chat turn's first byte waits on the whole server pipeline (moderation,
+// memory recall, compressing a long thread, the model's first token), and the
+// server keeps going after the app stops waiting. Giving up early only turns
+// a delivered message into a false "not sent", so this matches the 60s the
+// native client used to allow.
+const FIRST_EVENT_MS = 60_000;
 // Once a reply has started, this much silence means the connection is gone even
 // if nothing said so. Android's native client has no read timeout of its own.
 const STREAM_IDLE_MS = 45_000;
@@ -108,7 +116,8 @@ export function isNetworkError(e: unknown): boolean {
   // Raw fetch failures from code that bypasses this client: RN's fetch rejects
   // with TypeError('Network request failed'), expo/fetch with 'fetch failed: …'.
   if (e instanceof Error) return /network request|^fetch failed/i.test(e.message);
-  return (e as SseErrorInfo | null | undefined)?.code === 'NETWORK';
+  const code = (e as SseErrorInfo | null | undefined)?.code;
+  return code === 'NETWORK' || code === 'DELIVERY_UNKNOWN';
 }
 
 export function getAuthToken(): string | null {
@@ -194,13 +203,18 @@ function refusal(res: Response, body: RefusalBody | null, label: string, sentTok
   );
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+export interface RequestOptions {
+  /** How long the whole request, download included, may take. Defaults to 20s. */
+  timeoutMs?: number;
+}
+
+async function request<T>(method: string, path: string, body?: unknown, opts?: RequestOptions): Promise<T> {
   const label = `${method} ${path}`;
   // Captured up front: the 401 rule needs the token this request carried, not
   // whichever one is current by the time the answer lands.
   const sentToken = authToken;
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => ctrl.abort(), opts?.timeoutMs ?? REQUEST_TIMEOUT_MS);
   let res: Response;
   let text: string;
   try {
@@ -230,16 +244,21 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return json.data;
 }
 
-export const apiGet = <T>(path: string): Promise<T> => request<T>('GET', path);
+export const apiGet = <T>(path: string, opts?: RequestOptions): Promise<T> =>
+  request<T>('GET', path, undefined, opts);
 
-export const apiPost = <T>(path: string, body: unknown): Promise<T> => request<T>('POST', path, body);
+export const apiPost = <T>(path: string, body: unknown, opts?: RequestOptions): Promise<T> =>
+  request<T>('POST', path, body, opts);
 
-export const apiPut = <T>(path: string, body: unknown): Promise<T> => request<T>('PUT', path, body);
+export const apiPut = <T>(path: string, body: unknown, opts?: RequestOptions): Promise<T> =>
+  request<T>('PUT', path, body, opts);
 
-export const apiPatch = <T>(path: string, body: unknown): Promise<T> => request<T>('PATCH', path, body);
+export const apiPatch = <T>(path: string, body: unknown, opts?: RequestOptions): Promise<T> =>
+  request<T>('PATCH', path, body, opts);
 
 // `body` is only sent when given — DELETE /users/me requires { confirm: 'DELETE' }.
-export const apiDelete = <T>(path: string, body?: unknown): Promise<T> => request<T>('DELETE', path, body);
+export const apiDelete = <T>(path: string, body?: unknown, opts?: RequestOptions): Promise<T> =>
+  request<T>('DELETE', path, body, opts);
 
 // Refusals the server words for the user. Everything else stays a generic
 // "couldn't reach the server", because raw status text means nothing to anyone.
@@ -265,7 +284,11 @@ export interface SseErrorInfo {
   /**
    * The server's refusal code, or one the client assigns:
    * 'UNAUTHENTICATED' (session gone; subscribeAuthExpired has fired),
-   * 'NETWORK' (no connection, or no reply in time — see isNetworkError),
+   * 'NETWORK' (no connection, or a reply that went quiet — see isNetworkError),
+   * 'DELIVERY_UNKNOWN' (nothing came back before the first-byte budget ran
+   *   out; the server may well have the message and still be answering, and
+   *   pushes the reply if so — reload the thread before offering a resend.
+   *   isNetworkError() is true for it too),
    * 'STREAM_ERROR' (the server failed mid-reply),
    * 'STREAM_INCOMPLETE' (the connection closed before the reply finished).
    */
@@ -406,11 +429,11 @@ export function streamConversation(
 
   const fail = (message: string, info: SseErrorInfo) => settle(() => handlers.onError(message, info));
 
-  const armTimer = (ms: number) => {
+  const armTimer = (ms: number, code: 'NETWORK' | 'DELIVERY_UNKNOWN' = 'NETWORK') => {
     if (settled) return;
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
-      fail('timed out', { code: 'NETWORK' });
+      fail('timed out', { code });
       stopNetwork();
     }, ms);
   };
@@ -433,7 +456,9 @@ export function streamConversation(
   });
 
   (async () => {
-    armTimer(REQUEST_TIMEOUT_MS);
+    // Headers only arrive with the server's first write, i.e. once it has
+    // started answering, so until then whether it has the message is unknown.
+    armTimer(FIRST_EVENT_MS, 'DELIVERY_UNKNOWN');
     // RN's global fetch (whatwg-fetch) buffers the whole body and has no
     // `body` stream, so replies only appeared once fully generated.
     // expo/fetch streams natively.
@@ -448,6 +473,8 @@ export function streamConversation(
       body: JSON.stringify(payload),
       signal: net.signal,
     });
+    // The server has answered, so from here on silence means a lost connection.
+    armTimer(STREAM_IDLE_MS);
 
     if (!res.ok) {
       const body = parseJson(await res.text()) as RefusalBody | null;
@@ -491,7 +518,6 @@ export function streamConversation(
       // never occurs inside a UTF-8 sequence, and the SSE framing is by line.
       const decoder = new TextDecoder();
       let carry: Uint8Array | null = null;
-      armTimer(STREAM_IDLE_MS);
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
