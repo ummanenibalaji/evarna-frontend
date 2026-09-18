@@ -299,6 +299,12 @@ export interface SseErrorInfo {
   limit?: string;
   /** Seconds until a retry can succeed, from the Retry-After header. */
   retryAfter?: number;
+  /**
+   * True when the server had already answered 200 before the failure, so it
+   * has the message: reload the thread rather than offer a resend. Absent
+   * when the failure came first and delivery is unknown.
+   */
+  accepted?: boolean;
 }
 
 export interface SseHandlers {
@@ -383,6 +389,7 @@ export function streamConversation(
   const net = new AbortController();
   const sentToken = authToken;
 
+  let accepted = false;
   let settled = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let frame: number | null = null;
@@ -433,7 +440,7 @@ export function streamConversation(
     if (settled) return;
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
-      fail('timed out', { code });
+      fail('timed out', { code, ...(accepted ? { accepted } : {}) });
       stopNetwork();
     }, ms);
   };
@@ -505,6 +512,8 @@ export function streamConversation(
       return;
     }
 
+    // Past this point the server has taken the message.
+    accepted = true;
     const body = res.body;
     if (!body) {
       // No stream to read (e.g. web). The whole reply arrives at once, and it
@@ -533,8 +542,8 @@ export function streamConversation(
     parser.end();
     // A proxy cut or a server crash after the headers: without this the reply
     // would spin forever.
-    fail('stream ended early', { code: 'STREAM_INCOMPLETE' });
-  })().catch((e: unknown) => fail(String(e), { code: 'NETWORK' }));
+    fail('stream ended early', { code: 'STREAM_INCOMPLETE', accepted });
+  })().catch((e: unknown) => fail(String(e), { code: 'NETWORK', ...(accepted ? { accepted } : {}) }));
 
   return ctrl;
 }

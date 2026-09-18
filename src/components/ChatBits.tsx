@@ -4,10 +4,10 @@
 // jump-to-latest button).
 // Ported from home.jsx + chat.jsx.
 
-import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, type RefObject } from 'react';
 import {
   Animated as RNAnimated, Platform, Pressable, ScrollView, StyleSheet, TextInput, View, useWindowDimensions,
-  type AccessibilityActionEvent, type NativeScrollEvent, type NativeSyntheticEvent,
+  type AccessibilityActionEvent, type AccessibilityActionInfo, type NativeScrollEvent, type NativeSyntheticEvent,
 } from 'react-native';
 import Animated, { ReduceMotion, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -16,7 +16,7 @@ import { announce } from '../hooks/useAccessibilityPrefs';
 import { aiNoticeDue } from '../lib/aiNotice';
 import { haptic } from '../lib/haptics';
 import { useDotPulse, useLoop } from '../theme/animations';
-import { enter, exit, timing, usePressFeedback } from '../theme/motion';
+import { enter, exit, PRESS_DELAY, timing, usePressFeedback } from '../theme/motion';
 import { ELEV, GRAD, HIT, MOTION, R, resolveFont, rgba, SP, TYPE, W } from '../theme/theme';
 import { GlassFill, MemoryRef, minTarget } from './Atoms';
 import { NavIcon, type IconName } from './NavIcon';
@@ -77,7 +77,7 @@ function RefText({
           ? p
           : onMemoryClick
             ? <MemoryRef key={i} onPress={() => onMemoryClick(p.ref)}>{p.ref}</MemoryRef>
-            : <Txt key={i} variant={variant} weight={500} style={{ color: W.gold }}>{p.ref}</Txt>
+            : <Txt key={i} variant={variant} weight={500} color={W.gold}>{p.ref}</Txt>
       )}
     </Txt>
   );
@@ -85,7 +85,13 @@ function RefText({
 
 // ─── BubbleMem ───────────────────────────────────────────────────────────
 const NO_REFS: string[] = [];
-const REPORT_ACTIONS = [{ name: 'longpress', label: 'Report this reply' }];
+// On iOS (Fabric) VoiceOver speaks an action's `name` and ignores its label,
+// so there the name is the words; Android reads the label of the standard
+// long-press action.
+const REPORT_LABEL = 'Report this reply';
+const REPORT_ACTIONS: AccessibilityActionInfo[] = Platform.OS === 'ios'
+  ? [{ name: REPORT_LABEL }]
+  : [{ name: 'longpress', label: REPORT_LABEL }];
 
 interface BubbleProps {
   from: string;
@@ -96,8 +102,9 @@ interface BubbleProps {
   /** Long-press (and the VoiceOver action) opens the report sheet. */
   onLongPress?: () => void;
   /** Stable alternative to onLongPress, so a memoised thread doesn't re-render
-   *  every bubble: called with `reportId`. */
-  onReport?: (reportId: string) => void;
+   *  every bubble: called with `reportId`, and the bubble itself, for the
+   *  report sheet to hand VoiceOver focus back to. */
+  onReport?: (reportId: string, from: RefObject<View | null>) => void;
   reportId?: string;
   streaming?: boolean;
   /** Who is speaking, for VoiceOver ("Nova: …"). */
@@ -112,13 +119,15 @@ export const BubbleMem = memo(function BubbleMem({
 }: BubbleProps) {
   const isUser = from === 'user';
   const [entering] = useState(() => (animateIn ? enter.fadeUp : undefined));
+  const self = useRef<View>(null);
   const report = useCallback(() => {
-    if (onReport && reportId) onReport(reportId);
+    if (onReport && reportId) onReport(reportId, self);
     else onLongPress?.();
   }, [onReport, reportId, onLongPress]);
   const reportable = !!onLongPress || !!(onReport && reportId);
   const onAction = useCallback((e: AccessibilityActionEvent) => {
-    if (e.nativeEvent.actionName === 'longpress') report();
+    const action = e.nativeEvent.actionName;
+    if (action === 'longpress' || action === REPORT_LABEL) report();
   }, [report]);
 
   // Tappable memory phrases must stay reachable, so such a bubble isn't
@@ -136,27 +145,34 @@ export const BubbleMem = memo(function BubbleMem({
     </BubbleSkin>
   );
 
-  return (
-    <Animated.View entering={entering} style={[styles.bubbleWrap, isUser ? styles.end : styles.start]}>
-      {reportable ? (
-        // App Store Guideline 1.2: a way to report generated content, by
-        // long-press or, for VoiceOver, the "Report this reply" action.
-        <Pressable
-          onLongPress={report}
-          delayLongPress={400}
-          accessible={!hasLinks}
-          accessibilityLabel={hasLinks ? undefined : label}
-          accessibilityActions={REPORT_ACTIONS}
-          onAccessibilityAction={onAction}
-          style={({ pressed }) => (pressed ? styles.held : null)}
-        >
-          {skin}
-        </Pressable>
-      ) : (
-        <View accessible={!hasLinks} accessibilityLabel={hasLinks ? undefined : label}>{skin}</View>
-      )}
-    </Animated.View>
+  const body = reportable ? (
+    // App Store Guideline 1.2: a way to report generated content, by
+    // long-press or, for VoiceOver, the "Report this reply" action.
+    <Pressable
+      ref={self}
+      onLongPress={report}
+      delayLongPress={400}
+      // Every scroll of the thread starts on a bubble; it shouldn't dim for it.
+      unstable_pressDelay={PRESS_DELAY}
+      accessible={!hasLinks}
+      accessibilityLabel={hasLinks ? undefined : label}
+      accessibilityActions={REPORT_ACTIONS}
+      onAccessibilityAction={onAction}
+      style={({ pressed }) => (pressed ? styles.held : null)}
+    >
+      {skin}
+    </Pressable>
+  ) : (
+    <View accessible={!hasLinks} accessibilityLabel={hasLinks ? undefined : label}>{skin}</View>
   );
+
+  // History opens still, so it needs no animated wrapper (nor its cost,
+  // repeated for every bubble on screen). `entering` is fixed at mount, so a
+  // bubble never switches between the two.
+  const wrap = isUser ? styles.wrapEnd : styles.wrapStart;
+  return entering
+    ? <Animated.View entering={entering} style={wrap}>{body}</Animated.View>
+    : <View style={wrap}>{body}</View>;
 });
 
 // Blinking caret at the end of a reply while it streams in. Under Reduce
@@ -176,43 +192,96 @@ const COUNT_FROM = 200;
 const COUNT_WARN = 50;
 const INPUT_LINES = 5;
 
-export function ChatInput({
-  draft, setDraft, onSend, companionName, busy = false, maxLength = MESSAGE_MAX_LENGTH,
-}: {
-  draft: string;
-  setDraft: (v: string) => void;
-  onSend: () => void;
+/** What a screen can do with a composer that keeps its own text. */
+export interface ChatInputHandle {
+  /** The text in the box now. */
+  get(): string;
+  /** Replaces it: a starter picked, a refused message handed back. */
+  set(next: string | ((current: string) => string)): void;
+  focus(): void;
+}
+
+interface ChatInputProps {
   companionName: string;
   /** A reply is on its way: the draft stays editable, sending waits. */
   busy?: boolean;
   maxLength?: number;
-}) {
-  const { fontScale } = useWindowDimensions();
-  const hasDraft = draft.trim().length > 0;
-  const canSend = hasDraft && !busy;
+  /** Controlled: the screen holds the text. Every keystroke then re-renders
+   *  the screen, so a long thread should use the props below instead. */
+  draft?: string;
+  setDraft?: (v: string) => void;
+  /** Controlled send: the screen reads and clears its own draft. */
+  onSend?: () => void;
+  /** Uncontrolled: the text the box starts with. */
+  defaultDraft?: string;
+  /** Uncontrolled: every change, for the screen to keep (it must stay cheap
+   *  and only set state when something it shows changes). */
+  onDraftChange?: (text: string) => void;
+  /** Uncontrolled send, with the trimmed text. Return false to keep the text
+   *  in the box (nothing was sent); anything else clears it. */
+  onSubmit?: (text: string) => boolean | void;
+  ref?: React.Ref<ChatInputHandle>;
+}
 
-  // The send button keeps its slot, so the field never reflows; it only
-  // cross-fades between resting and ready, on the UI thread.
-  const ready = useSharedValue(canSend ? 1 : 0);
+/**
+ * The message box. With `onSubmit` it keeps its own text, so typing
+ * re-renders only the composer, never the thread above it; the screen hears
+ * about changes through `onDraftChange` and drives it through `ref`.
+ */
+export const ChatInput = memo(function ChatInput({
+  companionName, busy = false, maxLength = MESSAGE_MAX_LENGTH,
+  draft, setDraft, onSend, defaultDraft, onDraftChange, onSubmit, ref,
+}: ChatInputProps) {
+  const { fontScale } = useWindowDimensions();
+  const controlled = draft !== undefined && !!setDraft;
+  const [own, setOwn] = useState(() => defaultDraft ?? '');
+  const text = controlled ? draft : own;
+
+  // The latest of everything the stable handlers below need.
+  const live = useRef({ text, controlled, setDraft, onDraftChange, onSubmit, onSend });
+  live.current = { text, controlled, setDraft, onDraftChange, onSubmit, onSend };
+  const inputRef = useRef<TextInput>(null);
+
+  const apply = useCallback((next: string) => {
+    const l = live.current;
+    l.text = next;
+    if (l.controlled) l.setDraft?.(next);
+    else setOwn(next);
+    l.onDraftChange?.(next);
+  }, []);
+
+  useImperativeHandle(ref, () => ({
+    get: () => live.current.text,
+    set: next => apply(typeof next === 'function' ? next(live.current.text) : next),
+    focus: () => inputRef.current?.focus(),
+  }), [apply]);
+
+  const hasDraft = text.trim().length > 0;
+  const canSend = hasDraft && !busy;
+  const canSendRef = useRef(canSend);
+  canSendRef.current = canSend;
+
   const focus = useSharedValue(0);
-  useEffect(() => {
-    ready.value = withTiming(canSend ? 1 : 0, fade(D.fast));
-  }, [canSend, ready]);
-  const readyStyle = useAnimatedStyle(() => ({ opacity: ready.value }));
-  const restStyle = useAnimatedStyle(() => ({ opacity: 1 - ready.value }));
   const focusStyle = useAnimatedStyle(() => ({ opacity: focus.value }));
-  const press = usePressFeedback({ scale: MOTION.press.scaleSmall, haptic: false });
+  const onFocus = useCallback(() => { focus.value = withTiming(1, fade(D.base)); }, [focus]);
+  const onBlur = useCallback(() => { focus.value = withTiming(0, fade(D.base)); }, [focus]);
 
   // About five lines at the reader's text size, then the field scrolls.
   const scale = Math.min(fontScale, TYPE.body.maxScale);
   const maxHeight = Math.round(TYPE.body.lineHeight * INPUT_LINES * scale) + SP.sm2 * 2;
-  const left = maxLength - draft.length;
+  const inputStyle = useMemo(() => [styles.input, { maxHeight }], [maxHeight]);
+  const left = maxLength - text.length;
 
-  const send = () => {
-    if (!canSend) return;
+  const send = useCallback(() => {
+    if (!canSendRef.current) return;
     haptic.medium();
-    onSend();
-  };
+    const l = live.current;
+    if (l.onSubmit) {
+      if (l.onSubmit(l.text.trim()) !== false) apply('');
+    } else {
+      l.onSend?.();
+    }
+  }, [apply]);
 
   return (
     <View style={styles.composer}>
@@ -221,26 +290,24 @@ export function ChatInput({
           variant="caption"
           maxScale={1.2}
           accessibilityLabel={`${left} characters left`}
-          style={[styles.counter, { color: left <= COUNT_WARN ? W.warning : W.text3 }]}
+          color={left <= COUNT_WARN ? W.warning : W.text3}
+          style={styles.counter}
         >
           {left}
         </Txt>
       ) : null}
       <View style={styles.capsule}>
-        <View pointerEvents="none" style={styles.capsuleGlass}>
-          <GlassFill intensity={50} solid={W.surface1} />
-        </View>
-        {/* inset top highlight — the capsule catching light */}
-        <View pointerEvents="none" style={styles.capsuleHighlight} />
+        <CapsuleGlass />
 
         <View style={styles.field}>
           <View pointerEvents="none" style={[styles.fieldBorder, { borderColor: W.hairline }]} />
           <Animated.View pointerEvents="none" style={[styles.fieldBorder, styles.fieldFocused, focusStyle]} />
           <TextInput
-            value={draft}
-            onChangeText={setDraft}
-            onFocus={() => { focus.value = withTiming(1, fade(D.base)); }}
-            onBlur={() => { focus.value = withTiming(0, fade(D.base)); }}
+            ref={inputRef}
+            value={text}
+            onChangeText={apply}
+            onFocus={onFocus}
+            onBlur={onBlur}
             placeholder={`Talk to ${companionName}…`}
             placeholderTextColor={W.placeholder}
             selectionColor={W.primary}
@@ -249,46 +316,83 @@ export function ChatInput({
             maxFontSizeMultiplier={TYPE.body.maxScale}
             accessibilityLabel={`Message ${companionName}`}
             multiline
-            style={[styles.input, { maxHeight }]}
+            style={inputStyle}
           />
         </View>
 
-        <Pressable
+        <SendButton
+          canSend={canSend}
+          hint={busy && hasDraft ? `Available once ${companionName} has replied` : undefined}
           onPress={send}
-          onPressIn={press.onPressIn}
-          onPressOut={press.onPressOut}
-          disabled={!canSend}
-          accessibilityRole="button"
-          accessibilityLabel="Send message"
-          accessibilityState={{ disabled: !canSend }}
-          accessibilityHint={busy && hasDraft ? `Available once ${companionName} has replied` : undefined}
-          style={styles.sendSlot}
-        >
-          <Animated.View style={[styles.send, press.animatedStyle]}>
-            <Animated.View style={[styles.sendRest, restStyle]} />
-            {/* The glow sits on an opaque, unclipped layer so iOS draws it. */}
-            <Animated.View style={[styles.sendReady, readyStyle]}>
-              <View style={styles.sendClip}>
-                <LinearGradient colors={GRAD.aurora} locations={[0, 0.6, 1]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={FILL} />
-              </View>
-            </Animated.View>
-            <Animated.View style={[styles.sendIcon, restStyle]}>
-              <NavIcon name="send" color={W.text3} size={17} />
-            </Animated.View>
-            <Animated.View style={[styles.sendIcon, readyStyle]}>
-              <NavIcon name="send" color={W.onAccent} size={17} />
-            </Animated.View>
-          </Animated.View>
-        </Pressable>
+        />
       </View>
     </View>
   );
-}
+});
+
+// The capsule's glass and its lit top edge never change, so a keystroke
+// doesn't redraw them.
+const CapsuleGlass = memo(function CapsuleGlass() {
+  return (
+    <>
+      <View pointerEvents="none" style={styles.capsuleGlass}>
+        <GlassFill intensity={50} solid={W.surface1} />
+      </View>
+      {/* inset top highlight — the capsule catching light */}
+      <View pointerEvents="none" style={styles.capsuleHighlight} />
+    </>
+  );
+});
+
+// Re-renders only when it turns ready or resting, not on every keystroke.
+const SendButton = memo(function SendButton({ canSend, hint, onPress }: {
+  canSend: boolean; hint?: string; onPress: () => void;
+}) {
+  // The send button keeps its slot, so the field never reflows; it only
+  // cross-fades between resting and ready, on the UI thread.
+  const ready = useSharedValue(canSend ? 1 : 0);
+  useEffect(() => {
+    ready.value = withTiming(canSend ? 1 : 0, fade(D.fast));
+  }, [canSend, ready]);
+  const readyStyle = useAnimatedStyle(() => ({ opacity: ready.value }));
+  const restStyle = useAnimatedStyle(() => ({ opacity: 1 - ready.value }));
+  const press = usePressFeedback({ scale: MOTION.press.scaleSmall, haptic: false });
+
+  return (
+    <Pressable
+      onPress={onPress}
+      onPressIn={press.onPressIn}
+      onPressOut={press.onPressOut}
+      disabled={!canSend}
+      accessibilityRole="button"
+      accessibilityLabel="Send message"
+      accessibilityState={{ disabled: !canSend }}
+      accessibilityHint={hint}
+      style={styles.sendSlot}
+    >
+      <Animated.View style={[styles.send, press.animatedStyle]}>
+        <Animated.View style={[styles.sendRest, restStyle]} />
+        {/* The glow sits on an opaque, unclipped layer so iOS draws it. */}
+        <Animated.View style={[styles.sendReady, readyStyle]}>
+          <View style={styles.sendClip}>
+            <LinearGradient colors={GRAD.aurora} locations={[0, 0.6, 1]} start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }} style={FILL} />
+          </View>
+        </Animated.View>
+        <Animated.View style={[styles.sendIcon, restStyle]}>
+          <NavIcon name="send" color={W.text3} size={17} />
+        </Animated.View>
+        <Animated.View style={[styles.sendIcon, readyStyle]}>
+          <NavIcon name="send" color={W.onAccent} size={17} />
+        </Animated.View>
+      </Animated.View>
+    </Pressable>
+  );
+});
 
 // ─── TypingDots ──────────────────────────────────────────────────────────
 /** The companion is composing. The dots hold still under Reduce Motion, so
  *  the label is what carries the meaning there and for VoiceOver. */
-export function TypingDots({ name }: { name?: string }) {
+export const TypingDots = memo(function TypingDots({ name }: { name?: string }) {
   return (
     <View
       accessible
@@ -299,7 +403,7 @@ export function TypingDots({ name }: { name?: string }) {
       {[0, 1, 2].map(i => <TypingDot key={i} delay={i * 150} />)}
     </View>
   );
-}
+});
 
 function TypingDot({ delay }: { delay: number }) {
   const pulse = useDotPulse(delay);
@@ -309,26 +413,26 @@ function TypingDot({ delay }: { delay: number }) {
 // ─── DayDivider ──────────────────────────────────────────────────────────
 /** Centered chip that stamps the thread with a time ("Today 9:41 PM") or
  *  marks where something else begins ("Voice call"). */
-export function DayDivider({ label, icon }: { label: string; icon?: IconName }) {
+export const DayDivider = memo(function DayDivider({ label, icon }: { label: string; icon?: IconName }) {
   return (
     <View accessible accessibilityRole="text" accessibilityLabel={label} style={styles.divider}>
       {icon ? <NavIcon name={icon} color={W.text3} size={12} /> : null}
       <Txt variant="caption" weight={500} maxScale={1.3} style={styles.dividerText}>{label}</Txt>
     </View>
   );
-}
+});
 
 // ─── AiNotice ────────────────────────────────────────────────────────────
 // The legally required "you're talking with an AI" line (see lib/aiNotice).
 // Quiet like the day divider, but readable: it has to be clear, not decorative.
-export function AiNotice({ text }: { text: string }) {
+export const AiNotice = memo(function AiNotice({ text }: { text: string }) {
   return (
     <View accessible accessibilityRole="text" accessibilityLabel={text} style={styles.notice}>
       <NavIcon name="sparkle" color={W.text3} size={12} />
       <Txt variant="caption" weight={500} style={styles.noticeText}>{text}</Txt>
     </View>
   );
-}
+});
 
 /**
  * Calls onDue every 3 hours the screen stays open. Checked each minute rather
@@ -354,15 +458,15 @@ export function useAiNoticeRepeat(onDue: () => void): void {
 // Shown while a reply is being composed but before the first token lands, and
 // only for a companion that holds memories: every turn pulls from them, so
 // that is what the pause is. Quiet gold: it explains the wait, not fills it.
-export function RecallIndicator() {
+export const RecallIndicator = memo(function RecallIndicator() {
   const pulse = useDotPulse(0);
   return (
     <RNAnimated.View style={[styles.recall, pulse]}>
       <NavIcon name="sparkle-solid" color={W.gold} size={12} />
-      <Txt variant="caption" weight={500} style={{ color: W.recall }}>recalling your memories…</Txt>
+      <Txt variant="caption" weight={500} color={W.recall}>recalling your memories…</Txt>
     </RNAnimated.View>
   );
-}
+});
 
 // ─── CapHitCard ──────────────────────────────────────────────────────────
 /**
@@ -406,19 +510,20 @@ export function CapHitCard({ onUpgrade, dailyCap, resetsAt, upsell = true, messa
 
   return (
     <Animated.View entering={entering} style={styles.cap}>
-      <Txt variant="subhead" style={{ color: W.text }}>{copy}</Txt>
+      <Txt variant="subhead" color={W.text}>{copy}</Txt>
       {upsell ? (
         <Animated.View style={press.animatedStyle}>
           <Pressable
             onPress={onUpgrade}
             onPressIn={press.onPressIn}
             onPressOut={press.onPressOut}
+            unstable_pressDelay={PRESS_DELAY}
             hitSlop={minTarget(HIT, CAP_BUTTON_H)}
             accessibilityRole="button"
             accessibilityHint="Opens plans"
             style={({ pressed }) => [styles.capButton, pressed ? styles.pressed : null]}
           >
-            <Txt variant="footnote" weight={600} maxScale={1.3} style={{ color: W.onAccent }}>See plans</Txt>
+            <Txt variant="footnote" weight={600} maxScale={1.3} color={W.onAccent}>See plans</Txt>
           </Pressable>
         </Animated.View>
       ) : null}
@@ -444,13 +549,14 @@ export function SuggestionChip({ children, selected = false, onPress }: {
         onPress={() => { haptic.selection(); onPress(); }}
         onPressIn={press.onPressIn}
         onPressOut={press.onPressOut}
+        unstable_pressDelay={PRESS_DELAY}
         hitSlop={CHIP_SLOP}
         accessibilityRole="button"
         accessibilityState={{ selected }}
         accessibilityHint={selected ? 'In your message' : 'Puts this in your message'}
         style={({ pressed }) => [styles.chip, selected ? styles.chipSelected : null, pressed ? styles.chipPressed : null]}
       >
-        <Txt variant="subhead" weight={500} numberOfLines={1} maxScale={1.3} style={{ color: selected ? W.cream : W.primarySoft }}>
+        <Txt variant="subhead" weight={500} numberOfLines={1} maxScale={1.3} color={selected ? W.cream : W.primarySoft}>
           {children}
         </Txt>
       </Pressable>
@@ -460,34 +566,62 @@ export function SuggestionChip({ children, selected = false, onPress }: {
 
 // ─── MessageNote ─────────────────────────────────────────────────────────
 // The line under a message that didn't make it: "Not sent · Retry".
-export function MessageNote({ text, actionLabel, actionHint, onAction, align = 'start' }: {
+export interface NoteAction {
+  label: string;
+  hint?: string;
+  onPress: () => void;
+  /** Can't run right now (another reply is on its way); says why in `disabledHint`. */
+  disabled?: boolean;
+  disabledHint?: string;
+  /** Running now: shown as busy and not pressable. */
+  busy?: boolean;
+  busyLabel?: string;
+}
+
+export const MessageNote = memo(function MessageNote({ text, actionLabel, actionHint, onAction, actions, align = 'start', animateIn = true }: {
   text: string;
   actionLabel?: string;
   actionHint?: string;
   onAction?: () => void;
+  /** Several actions (Reload and Retry); used instead of actionLabel/onAction. */
+  actions?: NoteAction[];
   align?: 'start' | 'end';
+  /** Fade in on mount; off when a thread re-mounts a note it already showed. */
+  animateIn?: boolean;
 }) {
-  const [entering] = useState(() => enter.fade);
-  const press = usePressFeedback({ scale: MOTION.press.scaleSmall });
+  const [entering] = useState(() => (animateIn ? enter.fade : undefined));
+  const list = actions ?? (actionLabel && onAction ? [{ label: actionLabel, hint: actionHint, onPress: onAction }] : []);
   return (
     <Animated.View entering={entering} style={[styles.msgNote, align === 'end' ? styles.end : styles.start]}>
       <NavIcon name="alert" color={W.dangerText} size={13} />
       <Txt variant="footnote" style={styles.msgNoteText}>{text}</Txt>
-      {actionLabel && onAction ? (
-        <Animated.View style={press.animatedStyle}>
-          <Pressable
-            onPress={onAction}
-            onPressIn={press.onPressIn}
-            onPressOut={press.onPressOut}
-            hitSlop={minTarget(HIT, NOTE_ACTION_H)}
-            accessibilityRole="button"
-            accessibilityHint={actionHint}
-            style={({ pressed }) => [styles.msgNoteAction, pressed ? styles.pressed : null]}
-          >
-            <Txt variant="footnote" weight={600} style={{ color: W.primarySoft }}>{actionLabel}</Txt>
-          </Pressable>
-        </Animated.View>
-      ) : null}
+      {list.map(a => <NoteButton key={a.label} action={a} />)}
+    </Animated.View>
+  );
+});
+
+function NoteButton({ action: a }: { action: NoteAction }) {
+  const press = usePressFeedback({ scale: MOTION.press.scaleSmall, haptic: a.disabled || a.busy ? false : 'light' });
+  const inert = !!(a.disabled || a.busy);
+  return (
+    <Animated.View style={press.animatedStyle}>
+      <Pressable
+        onPress={a.onPress}
+        onPressIn={press.onPressIn}
+        onPressOut={press.onPressOut}
+        unstable_pressDelay={PRESS_DELAY}
+        disabled={inert}
+        hitSlop={minTarget(HIT, NOTE_ACTION_H)}
+        accessibilityRole="button"
+        accessibilityLabel={a.busy ? a.busyLabel ?? a.label : a.label}
+        accessibilityState={{ disabled: inert, busy: !!a.busy }}
+        accessibilityHint={a.disabled ? a.disabledHint : a.hint}
+        style={({ pressed }) => [styles.msgNoteAction, pressed ? styles.pressed : null]}
+      >
+        <Txt variant="footnote" weight={600} color={inert ? W.text3 : W.primarySoft}>
+          {a.busy ? a.busyLabel ?? a.label : a.label}
+        </Txt>
+      </Pressable>
     </Animated.View>
   );
 }
@@ -499,34 +633,55 @@ const NOTE_ACTION_H = 28;
 const NEAR_END = 80;
 const FAR_FROM_END = 320;
 
+/** The scrolling part of a ScrollView or FlatList this hook drives. */
+interface Scroller {
+  scrollToEnd?: (o?: { animated?: boolean }) => void;
+  scrollToOffset?: (o: { offset: number; animated?: boolean }) => void;
+}
+
 /**
- * Keeps a chat ScrollView on its latest message without hijacking a reader
- * who has scrolled up. Spread `scrollProps` on the ScrollView, call `pin()`
- * when the user sends and `arrived()` when the other side adds something, and
- * render <JumpToLatest unseen={unseen} onPress={jump} /> while `showJump`.
+ * Keeps a chat thread on its latest message without hijacking a reader who
+ * has scrolled up. Spread `scrollProps` on the list, call `pin()` when the
+ * user sends and `arrived()` when the other side adds something, and render
+ * <JumpToLatest unseen={unseen} onPress={jump} /> while `showJump`.
+ *
+ * `inverted`: for an inverted FlatList, whose latest end is offset 0. There
+ * the list itself stays at the end as content grows (with
+ * maintainVisibleContentPosition), so nothing follows content size.
  */
-export function useStickToBottom() {
-  const scrollRef = useRef<ScrollView>(null);
+export function useStickToBottom<T = ScrollView>(opts?: { inverted?: boolean }) {
+  const inverted = !!opts?.inverted;
+  const scrollRef = useRef<T>(null);
   // Unanimated when following: an animated scroll restarted on every token jitters.
   const nearEnd = useRef(true);
   const awayRef = useRef(false);
   const [away, setAway] = useState(false);
+  // Rendered form of nearEnd, for lists that behave differently at the end.
+  const [atEnd, setAtEnd] = useState(true);
   const [unseen, setUnseen] = useState(false);
 
-  const toEnd = useCallback((animated: boolean) => scrollRef.current?.scrollToEnd({ animated }), []);
+  const toEnd = useCallback((animated: boolean) => {
+    const list = scrollRef.current as unknown as Scroller | null;
+    if (inverted) list?.scrollToOffset?.({ offset: 0, animated });
+    else list?.scrollToEnd?.({ animated });
+  }, [inverted]);
   const follow = useCallback(() => { if (nearEnd.current) toEnd(false); }, [toEnd]);
 
   const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
-    const gap = contentSize.height - (contentOffset.y + layoutMeasurement.height);
-    nearEnd.current = gap < NEAR_END;
+    const gap = inverted
+      ? contentOffset.y
+      : contentSize.height - (contentOffset.y + layoutMeasurement.height);
+    const near = gap < NEAR_END;
+    if (near !== nearEnd.current) setAtEnd(near);
+    nearEnd.current = near;
     const far = gap > FAR_FROM_END;
     if (far !== awayRef.current) {
       awayRef.current = far;
       setAway(far);
     }
     if (nearEnd.current) setUnseen(false);
-  }, []);
+  }, [inverted]);
 
   /** The user sent something: bring the thread to its end. */
   const pin = useCallback(() => {
@@ -547,16 +702,16 @@ export function useStickToBottom() {
 
   const scrollProps = useMemo(() => ({
     onScroll,
-    scrollEventThrottle: 100,
-    onContentSizeChange: follow,
     // The keyboard shrinking the viewport doesn't change the content size, so
-    // without this the latest message would slip under it.
-    onLayout: follow,
+    // without onLayout the latest message would slip under it. An inverted
+    // list is anchored at its latest end already, and a FlatList needs every
+    // scroll event to mount rows in time, so it keeps its own throttle.
+    ...(inverted ? null : { scrollEventThrottle: 100, onContentSizeChange: follow, onLayout: follow }),
     keyboardShouldPersistTaps: 'handled' as const,
     keyboardDismissMode: Platform.OS === 'ios' ? ('interactive' as const) : ('on-drag' as const),
-  }), [onScroll, follow]);
+  }), [onScroll, follow, inverted]);
 
-  return { scrollRef, scrollProps, showJump: away || unseen, unseen, pin, arrived, jump };
+  return { scrollRef, scrollProps, showJump: away || unseen, unseen, atEnd, pin, arrived, jump };
 }
 
 // ─── JumpToLatest ────────────────────────────────────────────────────────
@@ -577,7 +732,7 @@ export function JumpToLatest({ unseen, onPress }: { unseen: boolean; onPress: ()
         accessibilityLabel={unseen ? 'New message. Jump to latest' : 'Jump to latest message'}
         style={[styles.jump, unseen ? styles.jumpUnseen : null]}
       >
-        {unseen ? <Txt variant="footnote" weight={600} maxScale={1.2} style={{ color: W.onAccent }}>New message</Txt> : null}
+        {unseen ? <Txt variant="footnote" weight={600} maxScale={1.2} color={W.onAccent}>New message</Txt> : null}
         <NavIcon name="down" color={unseen ? W.onAccent : W.text} size={16} />
       </Pressable>
     </Animated.View>
@@ -591,7 +746,8 @@ const styles = StyleSheet.create({
   shrink: { flexShrink: 1 },
   pressed: { opacity: 0.75 },
 
-  bubbleWrap: { maxWidth: '80%' },
+  wrapStart: { maxWidth: '80%', alignSelf: 'flex-start' },
+  wrapEnd: { maxWidth: '80%', alignSelf: 'flex-end' },
   bubble: {
     borderRadius: R.bubble, paddingVertical: SP.sm2 + 1, paddingHorizontal: SP.md2 + 1, borderWidth: 1,
   },

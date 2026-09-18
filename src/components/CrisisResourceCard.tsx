@@ -14,7 +14,7 @@ import {
   canOpenCrisisResource, crisisResources, openCrisisResource, type CrisisResource,
 } from '../data/crisis';
 import { announce } from '../hooks/useAccessibilityPrefs';
-import { enter, usePressFeedback } from '../theme/motion';
+import { enter, PRESS_DELAY, usePressFeedback } from '../theme/motion';
 import { HIT, R, rgba, SP, W } from '../theme/theme';
 import { InlineNotice } from './Atoms';
 import { NavIcon, type IconName } from './NavIcon';
@@ -28,21 +28,47 @@ function hintFor(r: CrisisResource): string {
   return 'Opens in your browser';
 }
 
-export function CrisisResourceCard({ onMore }: { onMore?: () => void }) {
-  // The helpline first, then the emergency number. The full list lives on the
-  // resources screen behind "More support".
-  const [lines] = useState(() => {
+// Cards already announced this app run, by `announceKey`. A virtualized
+// thread unmounts a card scrolled far out of view and mounts it again on the
+// way back; that is not news.
+const announced = new Set<string>();
+
+// The helpline first, then the emergency number. The full list lives on the
+// resources screen behind "More support". Worked out once: the region
+// doesn't change while the app runs.
+let cardLines: CrisisResource[] | null = null;
+const linesForCard = () => {
+  if (!cardLines) {
     const { emergency, resources } = crisisResources();
-    return resources.length ? [resources[0], emergency] : [emergency];
-  });
+    cardLines = resources.length ? [resources[0], emergency] : [emergency];
+  }
+  return cardLines;
+};
+
+export function CrisisResourceCard({ onMore, announceKey, animateIn = true, silent = false }: {
+  onMore?: () => void;
+  /** Identifies the message this card follows, so it is announced only once. */
+  announceKey?: string;
+  /** Rise into place on mount. False for a card shown with history. */
+  animateIn?: boolean;
+  /** Not announced at all (a card that was already there, e.g. history). */
+  silent?: boolean;
+}) {
+  const [lines] = useState(linesForCard);
   const [unopened, setUnopened] = useState<CrisisResource | null>(null);
-  const [entering] = useState(() => enter.fadeUp);
+  const [entering] = useState(() => (animateIn ? enter.fadeUp : undefined));
   const mounted = useRef(true);
 
   useEffect(() => {
-    announce('Support you can reach right now is listed in the conversation.');
+    mounted.current = true;
     return () => { mounted.current = false; };
   }, []);
+
+  useEffect(() => {
+    if (silent || (announceKey !== undefined && announced.has(announceKey))) return;
+    if (announceKey !== undefined) announced.add(announceKey);
+    announce('Support you can reach right now is listed in the conversation.');
+  }, [announceKey, silent]);
 
   const open = async (r: CrisisResource) => {
     setUnopened(null);
@@ -70,12 +96,15 @@ export function CrisisResourceCard({ onMore }: { onMore?: () => void }) {
       {onMore ? (
         <Pressable
           onPress={onMore}
+          // The card sits in a scrolling thread: a scroll that starts here
+          // shouldn't press it.
+          unstable_pressDelay={PRESS_DELAY}
           accessibilityRole="button"
           accessibilityHint="Opens more places to find help"
           hitSlop={{ top: SP.xs, bottom: SP.xs }}
           style={({ pressed }) => [styles.more, pressed ? styles.pressed : null]}
         >
-          <Txt variant="subhead" weight={600} style={{ color: W.warning }}>More support</Txt>
+          <Txt variant="subhead" weight={600} color={W.warning}>More support</Txt>
           <NavIcon name="right" color={W.warning} size={14} />
         </Pressable>
       ) : null}
@@ -92,9 +121,9 @@ function ResourceRow({ resource: r, onOpen }: { resource: CrisisResource; onOpen
         <NavIcon name={KIND_ICON[r.kind]} color={W.warning} size={16} />
       </View>
       <View style={styles.rowText}>
-        <Txt variant="subhead" weight={600} style={{ color: W.text }}>{r.name}</Txt>
-        <Txt variant="footnote" style={{ color: W.text2 }}>{r.detail}</Txt>
-        {r.hours ? <Txt variant="caption" style={{ color: W.text3 }}>{r.hours}</Txt> : null}
+        <Txt variant="subhead" weight={600} color={W.text}>{r.name}</Txt>
+        <Txt variant="footnote" color={W.text2}>{r.detail}</Txt>
+        {r.hours ? <Txt variant="caption" color={W.text3}>{r.hours}</Txt> : null}
       </View>
     </>
   );
@@ -110,6 +139,7 @@ function ResourceRow({ resource: r, onOpen }: { resource: CrisisResource; onOpen
         onPress={() => onOpen(r)}
         onPressIn={press.onPressIn}
         onPressOut={press.onPressOut}
+        unstable_pressDelay={PRESS_DELAY}
         accessibilityRole={r.kind === 'web' ? 'link' : 'button'}
         accessibilityLabel={label}
         accessibilityHint={hintFor(r)}

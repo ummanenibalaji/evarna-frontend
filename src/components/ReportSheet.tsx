@@ -4,7 +4,7 @@
 // "Report this reply" VoiceOver action. Any screen that shows generated
 // replies with a turn id can use it: <ReportSheet turnId={id} onClose={…} />.
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, type RefObject } from 'react';
 import { StyleSheet, TextInput, View } from 'react-native';
 
 import { createReport, type ReportReason } from '../api';
@@ -29,8 +29,12 @@ const CLOSE_AFTER_SENT_MS = 1600;
 
 type SendState = 'idle' | 'sending' | 'sent' | 'failed';
 
-/** `turnId` null keeps the sheet closed; the sheet animates out before it unmounts. */
-export function ReportSheet({ turnId, onClose }: { turnId: string | null; onClose: () => void }) {
+/** `turnId` null keeps the sheet closed; the sheet animates out before it
+ *  unmounts. `returnFocusRef`: the reply that opened it, where VoiceOver
+ *  focus goes back once it closes. */
+export function ReportSheet({ turnId, onClose, returnFocusRef }: {
+  turnId: string | null; onClose: () => void; returnFocusRef?: RefObject<View | null>;
+}) {
   // Held while the sheet animates out, so the content doesn't blank mid-slide.
   const [target, setTarget] = useState(turnId);
   const [reason, setReason] = useState<ReportReason | null>(null);
@@ -95,17 +99,17 @@ export function ReportSheet({ turnId, onClose }: { turnId: string | null; onClos
   );
 
   return (
-    <Sheet visible={!!turnId} onClose={onClose} title="Report this reply" footer={footer}>
+    <Sheet visible={!!turnId} onClose={onClose} title="Report this reply" footer={footer} returnFocusRef={returnFocusRef}>
       {sent ? (
         <View accessible style={styles.sent}>
-          <Txt variant="headline" style={{ color: W.cream, textAlign: 'center' }}>Thanks — we'll review it.</Txt>
-          <Txt variant="subhead" style={{ color: W.text2, textAlign: 'center' }}>
+          <Txt variant="headline" color={W.cream} style={styles.center}>Thanks — we'll review it.</Txt>
+          <Txt variant="subhead" color={W.text2} style={styles.center}>
             Reports help us keep conversations safe.
           </Txt>
         </View>
       ) : (
         <>
-          <Txt variant="subhead" style={{ color: W.text2 }}>What was wrong with it?</Txt>
+          <Txt variant="subhead" color={W.text2}>What was wrong with it?</Txt>
           <View accessibilityRole="radiogroup" accessibilityLabel="What was wrong" style={styles.reasons}>
             {REASONS.map(r => (
               <Pill key={r.k} size="sm" selected={reason === r.k} onPress={() => setReason(r.k)}>{r.l}</Pill>
@@ -135,6 +139,7 @@ export function ReportSheet({ turnId, onClose }: { turnId: string | null; onClos
 
 const styles = StyleSheet.create({
   sent: { paddingVertical: SP.lg, gap: SP.sm },
+  center: { textAlign: 'center' },
   reasons: { marginTop: SP.md2, gap: SP.sm },
   note: {
     marginTop: SP.md2, minHeight: 72, maxHeight: 140,

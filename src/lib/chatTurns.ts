@@ -41,9 +41,12 @@ export type ChatFrom = 'user' | 'comp' | 'notice';
 
 /**
  * Why a line did not complete.
- *   unsent       a user message the server never took; Retry sends it again
- *   dropped      the connection went mid-reply; the server finishes and saves
- *                the reply anyway, so Reload fetches it
+ *   unsent       a user message the server didn't take (or, with `unsure`,
+ *                may have taken); Retry sends it again, checking first when
+ *                unsure
+ *   dropped      the connection went after the server had the message; the
+ *                server finishes and saves the reply anyway, so Reload fetches
+ *                it (and, once a Reload comes back empty, Retry asks again)
  *   interrupted  the server itself failed mid-reply and saved nothing; Retry
  */
 export type ChatFailure = 'unsent' | 'dropped' | 'interrupted';
@@ -67,6 +70,13 @@ export interface ChatMsg {
   failed?: ChatFailure;
   /** Plain words for a failed send ("you're offline"), shown under it. */
   note?: string;
+  /** Unsent, but the server may have it after all (the answer never came
+   *  back): Retry checks the history before sending it again. */
+  unsure?: boolean;
+  /** A Reload or a Retry's check is under way for this exchange. */
+  checking?: boolean;
+  /** A Reload came back without this reply, so Retry is offered beside it. */
+  missing?: boolean;
   /** The server's crisis response; support resources are shown after it. */
   crisis?: boolean;
   /** History only: the session this turn belongs to, and whether it was a call. */
@@ -90,6 +100,9 @@ export interface HistoryTurn {
   role: 'user' | 'assistant';
   content_text: string;
   created_at: string;
+  /** Set by the server's moderation on the user turn; the reply after a
+   *  crisis turn is the server's crisis response. */
+  safety_flags?: { is_crisis?: boolean } | null;
 }
 
 export interface HistorySession {
@@ -101,15 +114,19 @@ export interface HistorySession {
 /**
  * Every session's turns as one chronological thread, newest `cap` kept. The
  * backend writes a user turn and its reply in one insert, so they can share a
- * timestamp; the question still goes first.
+ * timestamp; the question still goes first. The reply to a turn the server
+ * flagged as a crisis is marked, so its support card survives a reload.
  */
-export function historyFromSessions(sessions: HistorySession[], cap: number): ChatMsg[] {
+export function historyFromSessions(sessions: HistorySession[], cap = Infinity): ChatMsg[] {
   const rows: { msg: ChatMsg; order: number }[] = [];
   let order = 0;
   for (const s of sessions) {
+    let crisisNext = false;
     for (const t of s.turns) {
       const at = Date.parse(t.created_at);
       const comp = t.role === 'assistant';
+      const crisis = comp && crisisNext;
+      crisisNext = comp ? false : !!t.safety_flags?.is_crisis;
       rows.push({
         order: order++,
         msg: {
@@ -120,6 +137,7 @@ export function historyFromSessions(sessions: HistorySession[], cap: number): Ch
           ...(comp ? { turnId: t._id } : null),
           session: s.id,
           ...(s.voice ? { voice: true } : null),
+          ...(crisis ? { crisis: true } : null),
         },
       });
     }
@@ -128,51 +146,107 @@ export function historyFromSessions(sessions: HistorySession[], cap: number): Ch
     a.msg.at - b.msg.at
     || (a.msg.session === b.msg.session && a.msg.from !== b.msg.from ? (a.msg.from === 'user' ? -1 : 1) : 0)
     || a.order - b.order);
-  return rows.slice(-cap).map(r => r.msg);
+  return (rows.length > cap ? rows.slice(-cap) : rows).map(r => r.msg);
 }
 
 /**
- * Lays fresh server history under what this visit added.
- *
- * Everything that came from the server before is replaced. A local exchange is
- * dropped once the server has it: its reply's turn id is in the history, or —
- * for a reply that never reported an id (the connection dropped, or it was a
- * crisis response) — a user turn with the same words appeared since the last
- * load (`knownUntil`, server time; null on the first load, when nothing is
- * matched by words). Anything still in flight or failed stays, as do notices.
+ * Device and server clocks disagree a little. A message sent during this
+ * visit is looked for among server turns from this long before its send.
  */
-export function mergeHistory(history: ChatMsg[], current: ChatMsg[], knownUntil: number | null): ChatMsg[] {
+export const CLOCK_SKEW_MS = 2 * 60 * 1000;
+
+/**
+ * Where matching by words may start: after the newest turn already merged
+ * (server time), or, before any history has loaded this visit, a little
+ * before the visit's first send (device time). Null matches nothing.
+ */
+export function matchSince(knownUntil: number | null, firstSendAt: number | null): number | null {
+  if (knownUntil != null) return knownUntil;
+  return firstSendAt != null ? firstSendAt - CLOCK_SKEW_MS : null;
+}
+
+/**
+ * Which of this visit's exchanges the server history already holds. By id
+ * when the reply reported one; otherwise by the user's words, among user turns
+ * after `since` that nothing on screen accounts for yet.
+ */
+export function confirmedExchanges(
+  history: ChatMsg[], current: ChatMsg[], since: number | null,
+): { confirmed: Set<string>; crisisAfter: Set<string> } {
   const ids = new Set(history.map(m => m.id));
   const confirmed = new Set<string>();
   const crisisAfter = new Set<string>();
 
+  const shownTurns = new Set<string>();
   for (const m of current) {
+    if (m.turnId) shownTurns.add(m.turnId);
+    if (!m.local) shownTurns.add(m.id);
     if (m.local && m.pair && m.from === 'comp' && m.turnId && ids.has(m.turnId)) confirmed.add(m.pair);
   }
 
-  if (knownUntil != null) {
-    const claimed = new Set<string>();
-    for (const m of current) {
-      if (!m.local || !m.pair || m.from !== 'user' || m.failed || confirmed.has(m.pair)) continue;
-      // The server writes the question and its reply together, at the end, so
-      // an exchange still streaming cannot be in the history yet.
+  if (since == null) return { confirmed, crisisAfter };
+
+  // A server user turn is already accounted for when it is on screen itself,
+  // or its reply is (by turn id): "ok" answered earlier must not be taken for
+  // a later "ok" whose reply dropped.
+  const claimed = new Set<string>();
+  const askedIn = new Map<string, string>();
+  for (const h of history) {
+    const session = h.session ?? '';
+    if (h.from === 'user') {
+      askedIn.set(session, h.id);
+      if (shownTurns.has(h.id)) claimed.add(h.id);
+    } else if (h.from === 'comp') {
+      const asked = askedIn.get(session);
+      if (asked && shownTurns.has(h.id)) claimed.add(asked);
+      askedIn.delete(session);
+    }
+  }
+
+  // Exchanges the server surely took are matched first, in order; a message
+  // that may not have gone (`unsure`) only gets a server turn left over, so a
+  // repeated "hey" can't take the copy of the one that did go. A message the
+  // server refused is never matched.
+  const waves = [
+    current.filter(m => m.from === 'user' && !m.failed),
+    current.filter(m => m.from === 'user' && m.failed === 'unsent' && m.unsure),
+  ];
+  for (const wave of waves) {
+    for (const m of wave) {
+      if (!m.local || !m.pair || confirmed.has(m.pair)) continue;
+      // The server saves the question and its reply together once the reply
+      // is finished, so a match for an exchange still marked streaming means
+      // the server finished it: its stream is gone quiet (the phone slept, the
+      // app was in the background) and the saved copy is the whole reply.
       const reply = current.find(x => x.pair === m.pair && x.from === 'comp');
-      if (reply?.streaming) continue;
       const text = m.text.trim();
-      const match = history.find(h => h.from === 'user' && h.at > knownUntil && !claimed.has(h.id) && h.text.trim() === text);
+      const match = history.find(h => h.from === 'user' && h.at > since && !claimed.has(h.id) && h.text.trim() === text);
       if (!match) continue;
       claimed.add(match.id);
       confirmed.add(m.pair);
       if (reply?.crisis) crisisAfter.add(match.id);
     }
   }
+  return { confirmed, crisisAfter };
+}
+
+/**
+ * Lays fresh server history under what this visit added.
+ *
+ * Everything that came from the server before is replaced. A local exchange is
+ * dropped once the server has it (see confirmedExchanges; `since` comes from
+ * matchSince). Anything still in flight or failed stays, as do notices.
+ */
+export function mergeHistory(history: ChatMsg[], current: ChatMsg[], since: number | null): ChatMsg[] {
+  const ids = new Set(history.map(m => m.id));
+  const { confirmed, crisisAfter } = confirmedExchanges(history, current, since);
 
   // A crisis reply keeps its resources when the server's copy replaces it.
   let base = history;
   if (crisisAfter.size) {
     base = history.map((m, i) => {
       const prev = history[i - 1];
-      return m.from === 'comp' && prev && crisisAfter.has(prev.id) ? { ...m, crisis: true } : m;
+      return m.from === 'comp' && !m.crisis && prev && crisisAfter.has(prev.id) ? { ...m, crisis: true } : m;
     });
   }
 
@@ -188,7 +262,9 @@ export function settledThread(msgs: ChatMsg[]): ChatMsg[] {
   const out: ChatMsg[] = [];
   for (const m of msgs) {
     if (m.from === 'notice' || m.streaming || m.failed) continue;
-    const { local: _local, pair: _pair, note: _note, ...rest } = m;
+    const {
+      local: _local, pair: _pair, note: _note, unsure: _unsure, checking: _checking, missing: _missing, ...rest
+    } = m;
     out.push(rest);
   }
   return out;
@@ -204,25 +280,53 @@ export type ThreadRow =
 const STAMP_GAP_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+// Formatting a date is one of the costlier things JS can ask of iOS: every
+// toLocale*String call with options builds a new formatter. These are built
+// once, on first use, and every label and day boundary is remembered, so a
+// thread re-laid out after a send formats only the stamps it hasn't seen.
+let timeFmt: Intl.DateTimeFormat | null = null;
+let weekdayFmt: Intl.DateTimeFormat | null = null;
+let dateFmt: Intl.DateTimeFormat | null = null;
+let dateYearFmt: Intl.DateTimeFormat | null = null;
+const fmtTime = (d: Date) => (timeFmt ??= new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' })).format(d);
+const fmtWeekday = (d: Date) => (weekdayFmt ??= new Intl.DateTimeFormat(undefined, { weekday: 'long' })).format(d);
+const fmtDate = (d: Date, withYear: boolean) => (withYear
+  ? (dateYearFmt ??= new Intl.DateTimeFormat(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' }))
+  : (dateFmt ??= new Intl.DateTimeFormat(undefined, { weekday: 'short', day: 'numeric', month: 'short' }))
+).format(d);
+
+// Bounded, so a long session can't grow them without limit.
+const CACHE_MAX = 4000;
+const dayStarts = new Map<number, number>();
+const labels = new Map<string, string>();
+
 const startOfDay = (t: number) => {
+  const hit = dayStarts.get(t);
+  if (hit !== undefined) return hit;
   const d = new Date(t);
   d.setHours(0, 0, 0, 0);
+  if (dayStarts.size >= CACHE_MAX) dayStarts.clear();
+  dayStarts.set(t, d.getTime());
   return d.getTime();
 };
 
 /** "Today 9:41 PM", "Yesterday 8:02 PM", "Monday 7:15 PM", "Mon 12 Sep, 7:15 PM". */
 export function stampLabel(at: number, now: number): string {
+  const today = startOfDay(now);
+  const key = `${at}|${today}`;
+  const hit = labels.get(key);
+  if (hit !== undefined) return hit;
   const d = new Date(at);
-  const time = d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-  const days = Math.round((startOfDay(now) - startOfDay(at)) / DAY_MS);
-  if (days <= 0) return `Today ${time}`;
-  if (days === 1) return `Yesterday ${time}`;
-  if (days < 7) return `${d.toLocaleDateString(undefined, { weekday: 'long' })} ${time}`;
-  const sameYear = d.getFullYear() === new Date(now).getFullYear();
-  const date = d.toLocaleDateString(undefined, {
-    weekday: 'short', day: 'numeric', month: 'short', ...(sameYear ? null : { year: 'numeric' }),
-  });
-  return `${date}, ${time}`;
+  const time = fmtTime(d);
+  const days = Math.round((today - startOfDay(at)) / DAY_MS);
+  let label: string;
+  if (days <= 0) label = `Today ${time}`;
+  else if (days === 1) label = `Yesterday ${time}`;
+  else if (days < 7) label = `${fmtWeekday(d)} ${time}`;
+  else label = `${fmtDate(d, d.getFullYear() !== new Date(now).getFullYear())}, ${time}`;
+  if (labels.size >= CACHE_MAX) labels.clear();
+  labels.set(key, label);
+  return label;
 }
 
 /**
@@ -238,7 +342,7 @@ export function buildRows(msgs: ChatMsg[], now: number): ThreadRow[] {
   for (const m of msgs) {
     let broke = false;
     if (m.from !== 'notice' && m.at > 0) {
-      if (!timed || startOfDay(timed.at) !== startOfDay(m.at) || m.at - timed.at >= STAMP_GAP_MS) {
+      if (!timed || m.at - timed.at >= STAMP_GAP_MS || startOfDay(timed.at) !== startOfDay(m.at)) {
         rows.push({ kind: 'stamp', key: `stamp-${m.id}`, label: stampLabel(m.at, now) });
         broke = true;
       }
