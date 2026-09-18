@@ -87,11 +87,42 @@ export function planFeatures(p: ApiBillingPlan): string[] {
     : [`${p.voice_minutes} voice min/mo`, messages, 'Everything in Plus', 'Custom characters'];
 }
 
+/**
+ * The catalog's list price per month, in USD. Only for when the store cannot
+ * price the plan itself: next to a store price in the user's own currency, a
+ * dollar figure reads as a different, wrong price.
+ */
 export const priceFor = (p: ApiBillingPlan, annual: boolean): string =>
   `$${(annual ? p.annual_monthly_usd : p.monthly_usd).toFixed(2)}`;
 
+/**
+ * Whole percent saved by paying for a year up front, or null when there is
+ * nothing to claim. Derived from whatever prices are on screen, so the badge
+ * can never disagree with them; the old one was typed by hand ("save 37%").
+ */
+export function savingsPercent(monthlyPrice: number, annualPrice: number): number | null {
+  if (!(monthlyPrice > 0) || !(annualPrice > 0)) return null;
+  const pct = Math.round((1 - annualPrice / (monthlyPrice * 12)) * 100);
+  return pct > 0 ? pct : null;
+}
+
+/**
+ * The paid plan the account has access to right now, or null. A cancelled
+ * subscription still counts until it runs out; an expired one does not.
+ */
+export function currentPaidTier(e: ApiEntitlement | null | undefined): 'plus' | 'premium' | null {
+  if (!e || e.tier === 'free') return null;
+  return e.status === 'active' || e.status === 'grace' || e.status === 'cancelled' ? e.tier : null;
+}
+
 /** Below this, the top-up sheet and the in-call banner start warning. */
 export const LOW_BALANCE_SECONDS = 300;
+
+/** How a voice balance should read: plainly, as a warning, or as spent. */
+export function balanceTone(remainingSeconds: number): 'ok' | 'low' | 'empty' {
+  if (remainingSeconds <= 0) return 'empty';
+  return remainingSeconds <= LOW_BALANCE_SECONDS ? 'low' : 'ok';
+}
 
 /** The top-up sheet's balance line: neutral, warning, or spent. */
 export function balanceLine(e: ApiEntitlement): { text: string; urgent: boolean } {
