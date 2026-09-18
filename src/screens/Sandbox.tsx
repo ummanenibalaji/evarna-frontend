@@ -95,7 +95,9 @@ export function S19_SandboxHome({ go, comingSoon, isMinor, openMode }: {
   // A second tap on the Sandbox tab scrolls back to the top.
   useTabReselect('sandbox', () => scrollRef.current?.scrollTo({ y: 0, animated: true }));
   const [aboutOpen, setAboutOpen] = useState(false);
-  const [lockNote, setLockNote] = useState<SandboxModeId | null>(null);
+  // A fresh object per tap, so tapping the same locked card again re-arms the
+  // timer instead of letting the first tap's timeout take the note away.
+  const [lockNote, setLockNote] = useState<{ id: SandboxModeId; at: number } | null>(null);
   // The card under the finger, read on the UI thread by the colour bleed, so
   // a touch never re-renders the list.
   const pressed = useSharedValue<string>('');
@@ -114,7 +116,7 @@ export function S19_SandboxHome({ go, comingSoon, isMinor, openMode }: {
   const pick = (m: SandboxMode, state: CardState) => {
     if (state === 'locked') {
       haptic.warning();
-      setLockNote(m.id);
+      setLockNote({ id: m.id, at: Date.now() });
       announce(`${m.name} is for adults 18 and over.`);
       return;
     }
@@ -194,7 +196,7 @@ export function S19_SandboxHome({ go, comingSoon, isMinor, openMode }: {
           return (
             <React.Fragment key={m.id}>
               <ModeCard mode={m} state={state} pressed={pressed} onPress={() => pick(m, state)} />
-              {lockNote === m.id ? (
+              {lockNote?.id === m.id ? (
                 <View onLayout={revealNote}>
                   <InlineNotice tone="info" text={`${m.name} is for adults 18 and over.`} />
                 </View>
@@ -243,8 +245,17 @@ function ModeCard({ mode, state, pressed, onPress }: {
     pressed.value = '';
   };
 
-  const label = [mode.name, mode.adultsOnly ? 'Adults only' : null, mode.tagline, mode.desc].filter(Boolean).join('. ');
-  const hint = state === 'locked' ? 'Only for adults 18 and over' : state === 'soon' ? 'Coming soon' : 'Starts a session';
+  // The visible "Soon" chip is part of the name, not a hint: with hints off it
+  // is the only thing that says why the card is dimmed. A soon card does
+  // nothing when pressed, so it has no hint.
+  const label = [
+    mode.name,
+    mode.adultsOnly ? 'Adults only' : null,
+    state === 'soon' ? 'Coming soon' : null,
+    mode.tagline,
+    mode.desc,
+  ].filter(Boolean).join('. ');
+  const hint = state === 'locked' ? 'Only for adults 18 and over' : state === 'open' ? 'Starts a session' : undefined;
 
   return (
     <Animated.View
