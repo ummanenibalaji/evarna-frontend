@@ -8,7 +8,7 @@
 // so the scrim covers the display and nothing behind a confirmation can be
 // tapped.
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AccessibilityInfo,
   ActivityIndicator,
@@ -25,6 +25,7 @@ import {
   View,
   useWindowDimensions,
   type StyleProp,
+  type TextStyle,
   type ViewStyle,
 } from 'react-native';
 import Animated from 'react-native-reanimated';
@@ -73,6 +74,7 @@ import { legalDocs, openLegalDoc, type LegalDoc } from '../data/legal';
 import { ARCHETYPE_COLORS, ARCHETYPE_LABEL, MEM_TYPES, Companion, Tier } from '../data/config';
 import { Go, PaywallTrigger, ScreenName } from '../navigation/types';
 import { useTabReselect } from '../navigation/tabEvents';
+import { useSceneFocusEffect } from '../navigation/sceneContext';
 
 const D = MOTION.duration;
 const FILL = StyleSheet.absoluteFillObject;
@@ -569,7 +571,8 @@ const ABOUT_BODY =
   'Your companions are AI. They learn from your conversations and keep memories, which you can review or forget any time in Memories.\n\n' +
   "They're here to talk. They can't give medical, legal or financial advice, and they aren't a crisis service. If you're struggling, Crisis support lists people who can help.";
 
-export function S21_Settings({
+// Memoised: this tab root stays mounted, and live, under the screens it opens.
+export const S21_Settings = memo(function S21_Settings({
   go, entitlement, entitlementFailed = false, onRetryEntitlement, companions, userName, userEmail,
   settings, setSettings, openCompanionProfile, userId, onDeleteAccount,
 }: SettingsProps) {
@@ -580,6 +583,14 @@ export function S21_Settings({
   // A second tap on the Settings tab scrolls back to the top.
   const scrollRef = useRef<ScrollView>(null);
   useTabReselect('settings', () => scrollRef.current?.scrollTo({ y: 0, animated: true }));
+
+  // ── Nothing asked of the server or the OS until first opened ──────────
+  // This tab is drawn ahead of time, hidden, a couple of seconds after
+  // launch (TabRoots), and may never be opened. The stats and the
+  // notification permission are first read when it first comes to the
+  // front (the focus effect below the permission); from then on they are
+  // kept fresh as before, in front or not.
+  const opened = useRef(false);
 
   // ── Activity: the last known numbers at once, then the fresh ones ──────
   const [stats, setStats] = useState<ApiUserStats | null>(null);
@@ -605,6 +616,9 @@ export function S21_Settings({
     setStatsStatus(failure ? 'error' : 'ready');
   }, [userId, alive]);
 
+  // The saved numbers are read at mount even while hidden: that is only this
+  // phone's storage, and it lets the first open show them instead of
+  // skeletons while the fresh ones load.
   useEffect(() => {
     if (!userId) return;
     Promise.all([readCache<ApiUserStats>(userId, STATS_KEY), readCache<ApiActivity>(userId, ACTIVITY_KEY)])
@@ -613,7 +627,7 @@ export function S21_Settings({
         if (s) setStats(prev => prev ?? s);
         if (a) setActivity(prev => prev ?? a);
       });
-    void loadStats();
+    if (opened.current) void loadStats();
   }, [userId, loadStats, alive]);
 
   // This tab stays mounted, so it can't count on a fresh mount after a call.
@@ -625,10 +639,10 @@ export function S21_Settings({
     if (usage === null || usage === lastUsage.current) return;
     const first = lastUsage.current === null;
     lastUsage.current = usage;
-    if (!first) void loadStats();
+    if (!first && opened.current) void loadStats();
   }, [usage, loadStats]);
   // The Memories row shows the server's count, which forgetting changes.
-  useEffect(() => subscribeMemoriesChanged(() => { void loadStats(); }), [loadStats]);
+  useEffect(() => subscribeMemoriesChanged(() => { if (opened.current) void loadStats(); }), [loadStats]);
 
   // ── Notification permission, re-read whenever the app comes back ──────
   const [permission, setPermission] = useState<PushPermission | null>(null);
@@ -645,10 +659,21 @@ export function S21_Settings({
   }, [alive]);
 
   useEffect(() => {
-    void refreshPermission();
-    const sub = AppState.addEventListener('change', s => { if (s === 'active') void refreshPermission(); });
+    const sub = AppState.addEventListener('change', s => {
+      if (s === 'active' && opened.current) void refreshPermission();
+    });
     return () => sub.remove();
   }, [refreshPermission]);
+
+  // The first time this tab is in front: at mount if it opens straight away,
+  // otherwise once the move to it is over. Later visits rely on the
+  // refreshes above.
+  useSceneFocusEffect(() => {
+    if (opened.current) return;
+    opened.current = true;
+    void loadStats();
+    void refreshPermission();
+  });
 
   // ── Daily check-in ─────────────────────────────────────────────────────
   const [checkinBusy, setCheckinBusy] = useState(false);
@@ -790,6 +815,11 @@ export function S21_Settings({
   const paidTier = currentPaidTier(entitlement);
   const onlyCompanion = companions.length === 1 ? companions[0] : null;
 
+  // Stable, so the memoised hero and profile card skip this screen's other re-renders.
+  const retryStats = useCallback(() => { void loadStats(); }, [loadStats]);
+  const seePlans = useCallback(() => go('paywall'), [go]);
+  const openProfile = useCallback(() => go('user-profile'), [go]);
+
   let planRow: React.ReactNode;
   if (entitlement) {
     planRow = (
@@ -839,7 +869,7 @@ export function S21_Settings({
           email={userEmail}
           tier={paidTier}
           tierLabel={paidTier && entitlement ? entitlement.tier_label : null}
-          onPress={() => go('user-profile')}
+          onPress={openProfile}
         />
 
         {userId ? (
@@ -850,8 +880,8 @@ export function S21_Settings({
             activity={activity}
             entitlement={entitlement ?? null}
             entitlementFailed={entitlementFailed}
-            onRetry={() => { void loadStats(); }}
-            onSeePlans={() => go('paywall')}
+            onRetry={retryStats}
+            onSeePlans={seePlans}
           />
         ) : null}
 
@@ -981,9 +1011,9 @@ export function S21_Settings({
       {account.sheets}
     </Screen>
   );
-}
+});
 
-function ProfileCard({ name, email, tier, tierLabel, onPress }: {
+const ProfileCard = memo(function ProfileCard({ name, email, tier, tierLabel, onPress }: {
   name: string;
   email: string;
   tier: PaidTier | null;
@@ -1019,7 +1049,7 @@ function ProfileCard({ name, email, tier, tierLabel, onPress }: {
       </Pressable>
     </Animated.View>
   );
-}
+});
 
 function CompanionMark({ name, color }: { name: string; color: string }) {
   return (
@@ -1139,7 +1169,10 @@ interface StatsHeroProps {
   onSeePlans: () => void;
 }
 
-function StatsHero({ status, error, stats, activity, entitlement, entitlementFailed, onRetry, onSeePlans }: StatsHeroProps) {
+// Memoised, with stable props from Settings. The count-up lives in the two
+// small number components below, so while it runs only those digits re-render
+// on each frame, not the blur, gradients, glows and SVGs around them.
+const StatsHero = memo(function StatsHero({ status, error, stats, activity, entitlement, entitlementFailed, onRetry, onSeePlans }: StatsHeroProps) {
   const { width, fontScale } = useWindowDimensions();
   const [countUp] = useState(() => !statsCountedThisSession);
   const known = stats != null || activity != null;
@@ -1148,8 +1181,6 @@ function StatsHero({ status, error, stats, activity, entitlement, entitlementFai
   const streak = activity?.streak_days ?? 0;
   const best = Math.max(activity?.best_streak ?? 0, streak);
   const talk = Math.round(stats?.total_voice_minutes ?? 0);
-  const streakN = useCountUp(streak, countUp ? 1100 : 0, countUp ? 200 : 0);
-  const talkN = useCountUp(talk, countUp ? 1500 : 0, countUp ? 300 : 0);
 
   if (!known) {
     if (status === 'error') {
@@ -1159,8 +1190,6 @@ function StatsHero({ status, error, stats, activity, entitlement, entitlementFai
   }
 
   const stack = width < 350 || fontScale >= 1.3;
-  const shownStreak = countUp ? streakN : streak;
-  const shownTalk = countUp ? talkN : talk;
 
   // Monday-first, bucketed by the server in the user's own zone.
   const todayIndex = (new Date().getDay() + 6) % 7;
@@ -1186,8 +1215,6 @@ function StatsHero({ status, error, stats, activity, entitlement, entitlementFai
   const deltaSpoken = delta === null || firstWeek ? ''
     : delta === 0 ? ' Same as last week.'
     : ` ${Math.abs(delta)} minutes ${delta > 0 ? 'more' : 'less'} than last week.`;
-  const hours = Math.floor(shownTalk / 60);
-  const mins = shownTalk % 60;
   const talkSpoken = stats
     ? `Talk time, ${Math.floor(talk / 60)} hours ${talk % 60} minutes.${firstWeek ? ' Your first week starts today.' : deltaSpoken}`
     : 'Talk time unavailable';
@@ -1207,7 +1234,11 @@ function StatsHero({ status, error, stats, activity, entitlement, entitlementFai
             <View style={styles.flexShrink}>
               <Txt variant="eyebrow" style={{ color: W.gold }}>Current streak</Txt>
               <View style={styles.baselineRow}>
-                <Txt variant="numeral" style={{ color: W.cream }}>{activity ? shownStreak : '—'}</Txt>
+                {activity ? (
+                  <StatNumber value={streak} countFrom={countUp ? STREAK_COUNT : null} style={styles.streakNumber} />
+                ) : (
+                  <Txt variant="numeral" style={styles.streakNumber}>—</Txt>
+                )}
                 {activity ? <Txt variant="subhead" weight={500} style={styles.muted}>{streak === 1 ? 'day' : 'days'}</Txt> : null}
                 {activity ? <Txt variant="footnote" style={styles.bestLabel}>best {best}</Txt> : null}
               </View>
@@ -1224,16 +1255,7 @@ function StatsHero({ status, error, stats, activity, entitlement, entitlementFai
                 <Txt variant="eyebrow" style={styles.muted}>Talk time</Txt>
               </View>
               {stats ? (
-                <View style={styles.baselineRow}>
-                  {hours > 0 ? (
-                    <>
-                      <Txt variant="numeral" style={styles.statNumber}>{hours}</Txt>
-                      <Txt variant="footnote" weight={500} style={styles.muted}>h</Txt>
-                    </>
-                  ) : null}
-                  <Txt variant="numeral" style={styles.statNumber}>{mins}</Txt>
-                  <Txt variant="footnote" weight={500} style={styles.muted}>m</Txt>
-                </View>
+                <TalkTime minutes={talk} countFrom={countUp ? TALK_COUNT : null} />
               ) : (
                 <Txt variant="numeral" style={styles.statNumber}>—</Txt>
               )}
@@ -1270,9 +1292,54 @@ function StatsHero({ status, error, stats, activity, entitlement, entitlementFai
       ) : null}
     </View>
   );
+});
+
+// The first-look count-up: how long, and how long after the hero appears.
+interface CountSpec { duration: number; delay: number }
+const STREAK_COUNT: CountSpec = { duration: 1100, delay: 200 };
+const TALK_COUNT: CountSpec = { duration: 1500, delay: 300 };
+
+// Each counting number is its own small component, so a frame of the count
+// re-renders only the text that shows it.
+function CountingNumber({ to, spec, style }: { to: number; spec: CountSpec; style: StyleProp<TextStyle> }) {
+  const n = useCountUp(to, spec.duration, spec.delay);
+  return <Txt variant="numeral" style={style}>{n}</Txt>;
 }
 
-function VoiceBalance({ entitlement, onSeePlans }: { entitlement: ApiEntitlement; onSeePlans: () => void }) {
+/** A hero number, counting up from zero when `countFrom` says how. */
+function StatNumber({ value, countFrom, style }: { value: number; countFrom: CountSpec | null; style: StyleProp<TextStyle> }) {
+  if (countFrom) return <CountingNumber to={value} spec={countFrom} style={style} />;
+  return <Txt variant="numeral" style={style}>{value}</Txt>;
+}
+
+function TalkTimeDigits({ minutes }: { minutes: number }) {
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  return (
+    <View style={styles.baselineRow}>
+      {hours > 0 ? (
+        <>
+          <Txt variant="numeral" style={styles.statNumber}>{hours}</Txt>
+          <Txt variant="footnote" weight={500} style={styles.muted}>h</Txt>
+        </>
+      ) : null}
+      <Txt variant="numeral" style={styles.statNumber}>{mins}</Txt>
+      <Txt variant="footnote" weight={500} style={styles.muted}>m</Txt>
+    </View>
+  );
+}
+
+function CountingTalkTime({ minutes, spec }: { minutes: number; spec: CountSpec }) {
+  const n = useCountUp(minutes, spec.duration, spec.delay);
+  return <TalkTimeDigits minutes={n} />;
+}
+
+function TalkTime({ minutes, countFrom }: { minutes: number; countFrom: CountSpec | null }) {
+  if (countFrom) return <CountingTalkTime minutes={minutes} spec={countFrom} />;
+  return <TalkTimeDigits minutes={minutes} />;
+}
+
+const VoiceBalance = memo(function VoiceBalance({ entitlement, onSeePlans }: { entitlement: ApiEntitlement; onSeePlans: () => void }) {
   const v = entitlement.voice;
   const tone = balanceTone(v.remaining_seconds);
   const color = tone === 'empty' ? W.dangerText : tone === 'low' ? W.warning : W.cream;
@@ -1302,7 +1369,7 @@ function VoiceBalance({ entitlement, onSeePlans }: { entitlement: ApiEntitlement
       ) : null}
     </View>
   );
-}
+});
 
 function HeroSkeleton() {
   return (
@@ -1339,7 +1406,7 @@ const RING = 74;
 
 // Drawn as a dashed stroke so its length tracks progress toward the personal
 // best, with the flame sitting in the well.
-function StreakRing({ progress }: { progress: number }) {
+const StreakRing = memo(function StreakRing({ progress }: { progress: number }) {
   const stroke = 6;
   const r = (RING - stroke) / 2;
   const circumference = 2 * Math.PI * r;
@@ -1373,7 +1440,7 @@ function StreakRing({ progress }: { progress: number }) {
       </View>
     </View>
   );
-}
+});
 
 function FlameIcon() {
   return (
@@ -1384,7 +1451,7 @@ function FlameIcon() {
   );
 }
 
-function Sparkline({ data, color }: { data: number[]; color: string }) {
+const Sparkline = memo(function Sparkline({ data, color }: { data: number[]; color: string }) {
   const [w, setW] = useState(0);
   const h = 24;
   if (data.length < 2) return null;
@@ -1409,7 +1476,7 @@ function Sparkline({ data, color }: { data: number[]; color: string }) {
       ) : null}
     </View>
   );
-}
+});
 
 // ─── S_UserProfile — your own account (separate from companion edit) ─────
 
@@ -1932,10 +1999,16 @@ export function S22_Memories({ go, characterId, companionName }: { go: Go; chara
     };
   }, [commitPending]);
 
-  const forget = (m: DisplayMemory) => {
+  // Stable (the list and the screen-reader state are read through refs), so
+  // the memoised rows don't all re-render when the undo bar comes and goes.
+  const memoriesRef = useRef(memories);
+  memoriesRef.current = memories;
+  const screenReaderRef = useRef(screenReader);
+  screenReaderRef.current = screenReader;
+  const forget = useCallback((m: DisplayMemory) => {
     commitPending();
     setActionError(null);
-    const index = memories?.findIndex(x => x.id === m.id) ?? -1;
+    const index = memoriesRef.current?.findIndex(x => x.id === m.id) ?? -1;
     if (index < 0) return;
     setMemories(list => (list ? list.filter(x => x.id !== m.id) : list));
     const p = { memory: m, index };
@@ -1943,8 +2016,12 @@ export function S22_Memories({ go, characterId, companionName }: { go: Go; chara
     setPending(p);
     haptic.light();
     announce('Memory forgotten. You can undo this for a few seconds.');
-    undoTimer.current = setTimeout(commitPending, screenReader ? UNDO_MS_SCREEN_READER : UNDO_MS);
-  };
+    undoTimer.current = setTimeout(commitPending, screenReaderRef.current ? UNDO_MS_SCREEN_READER : UNDO_MS);
+  }, [commitPending]);
+  const renderMemory = useCallback(
+    ({ item }: { item: DisplayMemory }) => <MemoryRow memory={item} viaMid={viaMid} onForget={forget} />,
+    [viaMid, forget],
+  );
 
   const undo = () => {
     const p = pendingRef.current;
@@ -1964,11 +2041,11 @@ export function S22_Memories({ go, characterId, companionName }: { go: Go; chara
   const [clearing, setClearing] = useState(false);
   const [clearError, setClearError] = useState<string | null>(null);
 
-  const openClear = () => {
-    setClearCount(memories?.length ?? 0);
+  const openClear = useCallback(() => {
+    setClearCount(memoriesRef.current?.length ?? 0);
     setClearError(null);
     setClearOpen(true);
-  };
+  }, []);
 
   const clearAll = async () => {
     if (!characterId || clearing) return;
@@ -2000,6 +2077,37 @@ export function S22_Memories({ go, characterId, companionName }: { go: Go; chara
   const filterLabel = FILTERS.find(f => f.key === filter)?.label ?? 'Memories';
   const bottomPad = SP.xl + (pending ? UNDO_BAR_SPACE : 0);
 
+  // Kept by identity across the undo bar's comings and goings.
+  const refreshedWithError = !!loadError && status === 'ready';
+  const listHeader = useMemo(() => (
+    <View style={styles.memoriesHeader}>
+      {hasAny ? (
+        <Txt variant="subhead" style={styles.muted}>
+          {`What ${viaMid} has learned from your conversations. Forget anything you'd rather they didn't keep.`}
+        </Txt>
+      ) : null}
+      {refreshedWithError ? (
+        <InlineNotice
+          tone="warning"
+          text={`Couldn't refresh. ${failureCopy(loadError)}`}
+          actionLabel="Retry"
+          onAction={() => { void load('retry'); }}
+        />
+      ) : null}
+      {actionError ? <InlineNotice tone="error" text={actionError} /> : null}
+    </View>
+  ), [hasAny, viaMid, refreshedWithError, loadError, load, actionError]);
+  const showForgetAll = hasAny && visible.length > 0;
+  const listFooter = useMemo(() => (showForgetAll ? (
+    <TextButton
+      label={`Forget everything ${viaMid} knows`}
+      danger
+      onPress={openClear}
+      accessibilityHint="Asks you to confirm first"
+      style={styles.forgetAll}
+    />
+  ) : null), [showForgetAll, viaMid, openClear]);
+
   let content: React.ReactNode;
   if (!characterId) {
     content = (
@@ -2028,29 +2136,12 @@ export function S22_Memories({ go, characterId, companionName }: { go: Go; chara
         key={filter}
         style={styles.fill}
         data={visible}
-        keyExtractor={m => m.id}
-        renderItem={({ item }) => <MemoryRow memory={item} viaMid={viaMid} onForget={forget} />}
+        keyExtractor={memoryKey}
+        renderItem={renderMemory}
         itemLayoutAnimation={layout}
         skipEnteringExitingAnimations
         ItemSeparatorComponent={MemorySeparator}
-        ListHeaderComponent={
-          <View style={styles.memoriesHeader}>
-            {hasAny ? (
-              <Txt variant="subhead" style={styles.muted}>
-                {`What ${viaMid} has learned from your conversations. Forget anything you'd rather they didn't keep.`}
-              </Txt>
-            ) : null}
-            {loadError && status === 'ready' ? (
-              <InlineNotice
-                tone="warning"
-                text={`Couldn't refresh. ${failureCopy(loadError)}`}
-                actionLabel="Retry"
-                onAction={() => { void load('retry'); }}
-              />
-            ) : null}
-            {actionError ? <InlineNotice tone="error" text={actionError} /> : null}
-          </View>
-        }
+        ListHeaderComponent={listHeader}
         ListEmptyComponent={
           hasAny ? (
             <EmptyState
@@ -2068,15 +2159,7 @@ export function S22_Memories({ go, characterId, companionName }: { go: Go; chara
             />
           )
         }
-        ListFooterComponent={hasAny && visible.length > 0 ? (
-          <TextButton
-            label={`Forget everything ${viaMid} knows`}
-            danger
-            onPress={openClear}
-            accessibilityHint="Asks you to confirm first"
-            style={styles.forgetAll}
-          />
-        ) : null}
+        ListFooterComponent={listFooter}
         contentContainerStyle={[styles.memoriesContent, { paddingBottom: bottomPad }]}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
@@ -2119,8 +2202,11 @@ export function S22_Memories({ go, characterId, companionName }: { go: Go; chara
 }
 
 const MemorySeparator = () => <View style={styles.memoryGap} />;
+const memoryKey = (m: DisplayMemory) => m.id;
 
-function MemoryRow({ memory, viaMid, onForget }: { memory: DisplayMemory; viaMid: string; onForget: (m: DisplayMemory) => void }) {
+const MemoryRow = memo(function MemoryRow({ memory, viaMid, onForget }: {
+  memory: DisplayMemory; viaMid: string; onForget: (m: DisplayMemory) => void;
+}) {
   const kind = MEM_TYPES[memory.type] ?? { l: 'Memory', color: W.text2 };
   const [exiting] = useState(() => exit.fade);
   const recalled = memory.recalled > 0
@@ -2150,7 +2236,7 @@ function MemoryRow({ memory, viaMid, onForget }: { memory: DisplayMemory; viaMid
       />
     </Animated.View>
   );
-}
+});
 
 function MemorySkeleton() {
   return (
@@ -2927,6 +3013,7 @@ const styles = StyleSheet.create({
   statLabelRow: { flexDirection: 'row', alignItems: 'center', gap: SP.xs2 },
   statDot: { width: 6, height: 6, borderRadius: 3 },
   statNumber: { color: W.cream, fontSize: 24, lineHeight: 28 },
+  streakNumber: { color: W.cream },
   seePlans: { alignSelf: 'flex-start', paddingHorizontal: 0 },
   skeletonStack: { flex: 1, gap: SP.sm },
   ring: { width: RING, height: RING, alignItems: 'center', justifyContent: 'center' },

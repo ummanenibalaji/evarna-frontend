@@ -1,7 +1,9 @@
 // Studio.tsx — S15 Studio Home, S16 Scenario Setup, S17 Active Session (with
 // its summary and report sheets), S18 Character Creator.
 
-import React, { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  forwardRef, memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore,
+} from 'react';
 import {
   ActionSheetIOS, Alert, Keyboard, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, TextInput, View,
   type AccessibilityActionEvent, type NativeScrollEvent, type NativeSyntheticEvent, type StyleProp,
@@ -25,7 +27,9 @@ import {
 } from '../components/Atoms';
 import { Sheet } from '../components/Sheet';
 import { Avatar, Waveform, avatarColor } from '../components/Avatar';
-import { AiNotice, useAiNoticeRepeat, BubbleMem, CapHitCard, ChatInput, TypingDots } from '../components/ChatBits';
+import {
+  AiNotice, useAiNoticeRepeat, BubbleMem, CapHitCard, ChatInput, TypingDots, type ChatInputHandle,
+} from '../components/ChatBits';
 import { aiNoticeText } from '../lib/aiNotice';
 import { restoreDraft } from '../lib/chatTurns';
 import { haptic } from '../lib/haptics';
@@ -38,13 +42,16 @@ import { enter, exit, layout, spring, timing, usePressFeedback, useReducedMotion
 import { ELEV, HIT, MOTION, R, resolveFont, rgba, SP, TYPE, W } from '../theme/theme';
 import { SCENARIOS, Scenario } from '../data/config';
 import {
-  ApiGender, ApiMemory, ApiScenario, ApiSession, ApiStudioCharacter, ApiVoice, ReportReason,
+  ApiGender, ApiMemory, ApiScenario, ApiScenarioParam, ApiSession, ApiStudioCharacter, ApiTurn, ApiVoice, ReportReason,
   createReport, createStudioCharacter, deleteMemory, deleteStudioCharacter, endSession, getCharacterSessions,
   getConversationTurns, getMemories, startSession,
 } from '../api';
-import { ApiError, NetworkError, isNetworkError, streamConversation, type SseErrorInfo } from '../api/client';
+import {
+  ApiError, NetworkError, getAuthToken, isNetworkError, streamConversation, type SseErrorInfo,
+} from '../api/client';
 import { Go } from '../navigation/types';
 import { useTabReselect } from '../navigation/tabEvents';
+import { useSceneFocusRef } from '../navigation/sceneContext';
 
 const D = MOTION.duration;
 
@@ -78,13 +85,21 @@ const UNDO_MS = 4000;
 const UNDO_MS_SCREEN_READER = 10_000;
 // Within this distance of the end, new text keeps the thread pinned.
 const NEAR_BOTTOM_PX = 80;
+// Earlier sessions whose turns are asked for together, after the newest.
+const HISTORY_BATCH = 3;
+// Earlier messages drawn at first, and how many more each time the reader
+// nears the top: a resumed thread can hold 100 turns, and mounting them all
+// at once as the screen slides in is a visible hitch.
+const HISTORY_PAGE = 30;
+// Keeps what is on screen in place while older messages mount above it.
+const KEEP_POSITION = { minIndexForVisible: 0 } as const;
+const NO_LINES: { label: string; value: string }[] = [];
 
 const SCENARIO_CARD_W = 160;
 const CONTINUE_CARD_W = 220;
 const ROW_GAP = SP.md;
 
 const DELETE_ACTIONS = [{ name: 'delete', label: 'Delete' }];
-const REPORT_ACTIONS = [{ name: 'report', label: 'Report this reply' }];
 
 // Session fields the ApiSession type doesn't declare but GET /sessions returns.
 type SessionWithMemory = ApiSession & { memory_enabled?: boolean };
@@ -99,7 +114,27 @@ interface SetupBrief {
   unused: boolean;
 }
 const setupBriefs = new Map<string, SetupBrief>();
-let justCreated: ApiStudioCharacter | null = null;
+
+// The character the creator just made. Studio home stays mounted under the
+// creator, so it subscribes rather than reading this once at mount. It
+// belongs to the sign-in that made it: after a sign-out, or another
+// account's sign-in, the auth token no longer matches and it reads as none.
+// Studio home clears it once the server's list has the character.
+let justCreated: { token: string | null; character: ApiStudioCharacter } | null = null;
+const justCreatedListeners = new Set<() => void>();
+
+function setJustCreated(character: ApiStudioCharacter | null): void {
+  justCreated = character ? { token: getAuthToken(), character } : null;
+  justCreatedListeners.forEach(cb => cb());
+}
+
+function subscribeJustCreated(cb: () => void): () => void {
+  justCreatedListeners.add(cb);
+  return () => { justCreatedListeners.delete(cb); };
+}
+
+const readJustCreated = (): ApiStudioCharacter | null =>
+  (justCreated && justCreated.token === getAuthToken() ? justCreated.character : null);
 
 // ─── Copy for failures ───────────────────────────────────────────────────
 function createErrorMessage(e: unknown): string {
@@ -162,6 +197,14 @@ function chooseAction(o: { title: string; message?: string; actions: { label: st
 // Reanimated's layout-animation builders are made fresh on every read, so
 // each mount reads one and keeps it.
 const useOnce = <T,>(read: () => T): T => useState(read)[0];
+
+/** A function whose identity never changes and that always calls the latest
+ *  `fn`, for handlers handed to memoised children. */
+function useStableHandler<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R {
+  const ref = useRef(fn);
+  ref.current = fn;
+  return useCallback((...args: A) => ref.current(...args), []);
+}
 
 // A fade is the calm alternative to movement, so it plays under Reduce Motion.
 function calm(ms: number): WithTimingConfig {
@@ -278,7 +321,9 @@ const studioLook = (c: ApiStudioCharacter) =>
 // ─── Voice picker (S16, S18) ─────────────────────────────────────────────
 // Ids are backend voice UUIDs, exactly like S07_Voice. Picking a voice plays
 // its bundled sample when this build has one, as the iOS voice pickers do.
-function VoicePicker({ voices, catalogSize, gender, voiceId, onPick, status, onRetry }: {
+// Memoised, with stable handlers from its screen: typing in a field beside it
+// no longer redraws every card (and its waveform) on each keystroke.
+const VoicePicker = memo(function VoicePicker({ voices, catalogSize, gender, voiceId, onPick, status, onRetry }: {
   /** The voices for the chosen gender. */
   voices: ApiVoice[];
   /** How many voices the whole catalog has. */
@@ -289,7 +334,15 @@ function VoicePicker({ voices, catalogSize, gender, voiceId, onPick, status, onR
   status: LoadStatus;
   onRetry?: () => void;
 }) {
-  const preview = useVoicePreview();
+  const { playingId, play } = useVoicePreview();
+  const picked = useRef(voiceId);
+  picked.current = voiceId;
+  // One handler for every card, so a card only redraws when its own state changes.
+  const pick = useCallback((id: string) => {
+    if (picked.current !== id) haptic.selection();
+    onPick(id);
+    if (hasVoicePreview(id)) play(id);
+  }, [onPick, play]);
 
   if (voices.length === 0) {
     if (catalogSize > 0) {
@@ -320,27 +373,23 @@ function VoicePicker({ voices, catalogSize, gender, voiceId, onPick, status, onR
           key={v.id}
           voice={v}
           selected={voiceId === v.id}
-          playing={preview.playingId === v.id}
+          playing={playingId === v.id}
           canPreview={hasVoicePreview(v.id)}
-          onPress={() => {
-            if (voiceId !== v.id) haptic.selection();
-            onPick(v.id);
-            if (hasVoicePreview(v.id)) preview.play(v.id);
-          }}
+          onPress={pick}
         />
       ))}
     </View>
   );
-}
+});
 
-function VoiceCard({ voice: v, selected, playing, canPreview, onPress }: {
-  voice: ApiVoice; selected: boolean; playing: boolean; canPreview: boolean; onPress: () => void;
+const VoiceCard = memo(function VoiceCard({ voice: v, selected, playing, canPreview, onPress }: {
+  voice: ApiVoice; selected: boolean; playing: boolean; canPreview: boolean; onPress: (id: string) => void;
 }) {
   const press = usePressFeedback({ haptic: false });
   return (
     <Animated.View style={[styles.voiceCardOuter, press.animatedStyle]}>
       <Pressable
-        onPress={onPress}
+        onPress={() => onPress(v.id)}
         onPressIn={press.onPressIn}
         onPressOut={press.onPressOut}
         accessibilityRole="radio"
@@ -368,9 +417,9 @@ function VoiceCard({ voice: v, selected, playing, canPreview, onPress }: {
       </Pressable>
     </Animated.View>
   );
-}
+});
 
-function GenderPills({ value, onChange }: { value: StudioGender; onChange: (g: StudioGender) => void }) {
+const GenderPills = memo(function GenderPills({ value, onChange }: { value: StudioGender; onChange: (g: StudioGender) => void }) {
   return (
     <View accessibilityRole="radiogroup" accessibilityLabel="Voice gender" style={styles.genderRow}>
       {GENDERS.map(g => (
@@ -380,7 +429,7 @@ function GenderPills({ value, onChange }: { value: StudioGender; onChange: (g: S
       ))}
     </View>
   );
-}
+});
 
 // ─── S15 STUDIO HOME ─────────────────────────────────────────────────────
 interface StudioHomeProps {
@@ -397,7 +446,9 @@ interface StudioHomeProps {
   onDeleteCharacter?: (id: string) => Promise<void>;
 }
 
-export function S15_StudioHome({
+// Memoised: this tab root stays mounted, and live, under the screens it
+// opens, so it would otherwise redraw on every router render behind them.
+export const S15_StudioHome = memo(function S15_StudioHome({
   characters, setupScenario, openCreator, resumeConvo, status = 'ready', onRetry, onRefresh, onDeleteCharacter,
 }: StudioHomeProps) {
   const tabBarH = useTabBarHeight();
@@ -407,13 +458,13 @@ export function S15_StudioHome({
   const [refreshing, setRefreshing] = useState(false);
   // The character the creator just made, shown from the create response
   // until the router's refetch includes it, and pulsed once on arrival.
-  const [fresh] = useState(() => justCreated);
+  const fresh = useSyncExternalStore(subscribeJustCreated, readJustCreated);
 
   const listed = characters.filter(c => !removed.has(c._id));
   const freshListed = !!fresh && characters.some(c => c._id === fresh._id);
   useEffect(() => {
-    if (freshListed && justCreated?._id === fresh?._id) justCreated = null;
-  }, [freshListed, fresh]);
+    if (freshListed) setJustCreated(null);
+  }, [freshListed]);
   const all = fresh && !freshListed && !removed.has(fresh._id) ? [...listed, fresh] : listed;
 
   // "Continue" is every studio character that has actually been talked to.
@@ -436,7 +487,7 @@ export function S15_StudioHome({
   const remove = async (c: ApiStudioCharacter) => {
     setDeleteError(null);
     setRemoved(s => new Set(s).add(c._id));
-    if (justCreated?._id === c._id) justCreated = null;
+    if (readJustCreated()?._id === c._id) setJustCreated(null);
     try {
       await (onDeleteCharacter ?? deleteStudioCharacter)(c._id);
       announce(`${c.name} deleted.`);
@@ -581,7 +632,7 @@ export function S15_StudioHome({
       </ScrollView>
     </Screen>
   );
-}
+});
 
 function CreateButton({ onPress }: { onPress: () => void }) {
   const press = usePressFeedback({ scale: MOTION.press.scaleSmall });
@@ -618,7 +669,6 @@ function ContinueCard({ character: c, onPress, onOptions }: { character: ApiStud
       style={{ width: CONTINUE_CARD_W }}
       contentStyle={[styles.glassCard, styles.continueCard, { borderColor: rgba(look.accent, 0.15) }]}
     >
-      <GlassFill intensity={20} />
       <View style={styles.rowCenter}>
         {c.kind === 'custom'
           ? <Avatar name={c.name} glyph="initials" color={avatarColor(c._id)} size={36} breathe={false} />
@@ -648,7 +698,6 @@ function ScenarioCard({ scenario: s, inProgress, onPress }: { scenario: Scenario
       style={{ width: SCENARIO_CARD_W }}
       contentStyle={[styles.glassCard, styles.scenarioCard, { borderColor: rgba(s.accent, 0.12) }]}
     >
-      <GlassFill intensity={20} />
       <View style={styles.rowBetween}>
         <IconTile icon={s.icon} accent={s.accent} size={40} />
         {inProgress ? (
@@ -675,10 +724,14 @@ function CharacterTile({ character: c, highlight, onPress, onOptions }: {
   const when = formatLastInteraction(c.last_interaction_at);
 
   // One pulse for a character that was just created; the ring fades after.
+  // The tile arrives while the creator is still sliding off it, so both wait
+  // for that to finish.
   useEffect(() => {
     if (!highlight) return;
-    if (!reduced) pop.value = withSequence(withTiming(1.04, timing(D.fast, 'decel')), withSpring(1, spring('bouncy')));
-    ring.value = withDelay(D.slower, withTiming(0, calm(D.slower)));
+    if (!reduced) {
+      pop.value = withDelay(D.slow, withSequence(withTiming(1.04, timing(D.fast, 'decel')), withSpring(1, spring('bouncy'))));
+    }
+    ring.value = withDelay(D.slow + D.slower, withTiming(0, calm(D.slower)));
   }, [highlight, reduced, pop, ring]);
 
   const popStyle = useAnimatedStyle(() => ({ transform: [{ scale: pop.value }] }));
@@ -763,6 +816,26 @@ export function S16_ScenarioSetup({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const inputs = useRef<Record<string, TextInput | null>>({});
+  // Whether this setup is still the one the user is on. A slow create can
+  // outlive it (Back, Android's back button or an edge swipe while it is
+  // pending), and handing the character over then would replace whatever
+  // the user went to instead. The screen stops being in front the moment it
+  // starts to leave, well before it unmounts at the end of the slide. Read
+  // as a ref: only the late answer needs it, and useSceneFocused() would
+  // redraw the whole form in the commit that starts every push and pop.
+  const inFrontRef = useSceneFocusRef();
+  const alive = useRef(true);
+  const leftByBack = useRef(false);
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  const gone = () => !alive.current || !inFrontRef.current || leftByBack.current;
+
+  const leave = () => {
+    leftByBack.current = true;
+    go('studio');
+  };
 
   const setupStatus = useLoadStatus(!!def, defStatus);
   const voiceStatus = useLoadStatus(apiVoices.length > 0, voicesStatus);
@@ -779,7 +852,8 @@ export function S16_ScenarioSetup({
   }, []);
 
   const name = def?.name ?? scenario.name;
-  const voiceList = voicesFor(apiVoices, gender);
+  // Kept by identity between keystrokes, so the memoised voice grid can skip them.
+  const voiceList = useMemo(() => voicesFor(apiVoices, gender), [apiVoices, gender]);
   const pickedVoice = voiceList.some(v => v.id === voiceId) ? voiceId : voiceList[0]?.id ?? null;
   const fields = def?.params ?? [];
   const missing = fields.filter(p => p.required && !(params[p.key] ?? '').trim());
@@ -789,11 +863,12 @@ export function S16_ScenarioSetup({
     : missing.length ? `Still needed: ${missing.map(p => p.label).join(', ')}`
     : null;
 
-  const setParam = (key: string, value: string) => setParams(v => ({ ...v, [key]: value }));
+  const setParam = useCallback((key: string, value: string) => setParams(v => ({ ...v, [key]: value })), []);
 
   const start = async () => {
     if (!def || !pickedVoice || missing.length || busy) return;
     Keyboard.dismiss();
+    leftByBack.current = false;
     setBusy(true);
     setErr(null);
     try {
@@ -804,6 +879,13 @@ export function S16_ScenarioSetup({
         voice_id: pickedVoice,
         gender: API_GENDER[gender],
       });
+      if (gone()) {
+        // Left while it was being made: nobody will talk to it, and it would
+        // otherwise sit, unseen, in the Studio character limit.
+        deleteStudioCharacter(res.character_id).catch(() => {});
+        if (alive.current) setBusy(false);
+        return;
+      }
       setupBriefs.set(res.character_id, {
         lines: def.params
           .map(p => ({ label: p.label, value: (params[p.key] ?? '').trim() }))
@@ -812,9 +894,11 @@ export function S16_ScenarioSetup({
       });
       onStart(res.character_id, remember);
     } catch (e) {
+      if (!alive.current) return;
+      setBusy(false);
+      if (gone()) return;
       haptic.error();
       setErr(createErrorMessage(e));
-      setBusy(false);
     }
   };
 
@@ -825,7 +909,8 @@ export function S16_ScenarioSetup({
   return (
     <Screen>
       <TopBar
-        left={<BackButton onPress={() => go('studio')} />}
+        // Back stays available while a start is pending, and abandons it.
+        left={<BackButton onPress={leave} />}
         center={
           <View accessible accessibilityRole="header" accessibilityLabel={name} style={styles.titleRow}>
             <IconTile icon={scenario.icon} accent={scenario.accent} size={24} />
@@ -851,34 +936,16 @@ export function S16_ScenarioSetup({
           />
         </View>
 
-        {def ? fields.map(p => {
-          const value = params[p.key] ?? '';
-          const next = textKeys[textKeys.indexOf(p.key) + 1];
-          return (
-            <View key={p.key}>
-              <FieldLabel note={p.required && !value.trim() ? 'Required' : undefined}>{p.label}</FieldLabel>
-              {p.type === 'choice' ? (
-                <View accessibilityRole="radiogroup" accessibilityLabel={p.label} style={styles.wrapRow}>
-                  {(p.options ?? []).map(opt => (
-                    <Pill key={opt} size="sm" selected={value === opt} onPress={() => setParam(p.key, opt)}>{opt}</Pill>
-                  ))}
-                </View>
-              ) : (
-                <Field
-                  ref={r => { inputs.current[p.key] = r; }}
-                  value={value}
-                  onChangeText={v => setParam(p.key, v)}
-                  placeholder={p.placeholder}
-                  accessibilityLabel={p.required ? `${p.label}, required` : p.label}
-                  autoCapitalize="sentences"
-                  returnKeyType={next ? 'next' : 'done'}
-                  submitBehavior={next ? 'submit' : 'blurAndSubmit'}
-                  onSubmitEditing={() => { if (next) inputs.current[next]?.focus(); }}
-                />
-              )}
-            </View>
-          );
-        }) : setupStatus === 'loading' ? (
+        {def ? fields.map(p => (
+          <ParamField
+            key={p.key}
+            param={p}
+            value={params[p.key] ?? ''}
+            next={textKeys[textKeys.indexOf(p.key) + 1]}
+            inputs={inputs}
+            onChange={setParam}
+          />
+        )) : setupStatus === 'loading' ? (
           <View accessible accessibilityLabel="Loading the setup" style={styles.form0}>
             {[0, 1].map(i => (
               <View key={i} style={styles.gapSm}>
@@ -897,25 +964,8 @@ export function S16_ScenarioSetup({
         )}
 
         {/* Sent as `remember` on POST /sessions/start. Off means the backend
-            skips memory extraction when the session ends. The whole row is the switch. */}
-        <Pressable
-          onPress={() => { haptic.selection(); setRemember(r => !r); }}
-          accessibilityRole="switch"
-          accessibilityState={{ checked: remember }}
-          accessibilityLabel="Remember this session"
-          accessibilityHint={rememberCopy}
-          style={({ pressed }) => [styles.rememberRow, pressed ? styles.pressedRow : null]}
-        >
-          <GlassFill intensity={20} />
-          <View style={[styles.rememberIcon, { backgroundColor: remember ? rgba(W.gold, 0.12) : rgba(W.text3, 0.1) }]}>
-            <NavIcon name={remember ? 'sparkle' : 'eye-off'} color={remember ? W.gold : W.text2} />
-          </View>
-          <View style={styles.shrink}>
-            <Txt variant="callout" weight={500}>Remember this session</Txt>
-            <Txt variant="footnote" style={styles.rememberCopy}>{rememberCopy}</Txt>
-          </View>
-          <Toggle value={remember} onChange={setRemember} label="Remember this session" />
-        </Pressable>
+            skips memory extraction when the session ends. */}
+        <RememberRow remember={remember} copy={rememberCopy} onChange={setRemember} />
       </ScrollView>
 
       <View style={styles.footer}>
@@ -936,6 +986,75 @@ export function S16_ScenarioSetup({
   );
 }
 
+/** One setup parameter. Memoised with a stable onChange, so a keystroke
+ *  redraws only the field being typed in. */
+const ParamField = memo(function ParamField({ param: p, value, next, inputs, onChange }: {
+  param: ApiScenarioParam;
+  value: string;
+  /** The text field Return moves on to, if any. */
+  next?: string;
+  inputs: React.RefObject<Record<string, TextInput | null>>;
+  onChange: (key: string, value: string) => void;
+}) {
+  const key = p.key;
+  // Made once per field, so the ref isn't detached and re-attached on every commit.
+  const setRef = useCallback((r: TextInput | null) => { inputs.current[key] = r; }, [inputs, key]);
+  const onChangeText = useCallback((v: string) => onChange(key, v), [onChange, key]);
+  return (
+    <View>
+      <FieldLabel note={p.required && !value.trim() ? 'Required' : undefined}>{p.label}</FieldLabel>
+      {p.type === 'choice' ? (
+        <View accessibilityRole="radiogroup" accessibilityLabel={p.label} style={styles.wrapRow}>
+          {(p.options ?? []).map(opt => (
+            <Pill key={opt} size="sm" selected={value === opt} onPress={() => onChange(key, opt)}>{opt}</Pill>
+          ))}
+        </View>
+      ) : (
+        <Field
+          ref={setRef}
+          value={value}
+          onChangeText={onChangeText}
+          placeholder={p.placeholder}
+          accessibilityLabel={p.required ? `${p.label}, required` : p.label}
+          autoCapitalize="sentences"
+          returnKeyType={next ? 'next' : 'done'}
+          submitBehavior={next ? 'submit' : 'blurAndSubmit'}
+          onSubmitEditing={() => { if (next) inputs.current[next]?.focus(); }}
+        />
+      )}
+    </View>
+  );
+});
+
+/** The whole row is the switch. Memoised: it sits in the setup form, beside
+ *  fields that change on every keystroke. */
+const RememberRow = memo(function RememberRow({ remember, copy, onChange }: {
+  remember: boolean;
+  copy: string;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <Pressable
+      onPress={() => { haptic.selection(); onChange(!remember); }}
+      accessibilityRole="switch"
+      accessibilityState={{ checked: remember }}
+      accessibilityLabel="Remember this session"
+      accessibilityHint={copy}
+      style={({ pressed }) => [styles.rememberRow, pressed ? styles.pressedRow : null]}
+    >
+      <GlassFill intensity={20} />
+      <View style={[styles.rememberIcon, { backgroundColor: remember ? rgba(W.gold, 0.12) : rgba(W.text3, 0.1) }]}>
+        <NavIcon name={remember ? 'sparkle' : 'eye-off'} color={remember ? W.gold : W.text2} />
+      </View>
+      <View style={styles.shrink}>
+        <Txt variant="callout" weight={500}>Remember this session</Txt>
+        <Txt variant="footnote" style={styles.rememberCopy}>{copy}</Txt>
+      </View>
+      <Toggle value={remember} onChange={onChange} label="Remember this session" />
+    </Pressable>
+  );
+});
+
 // ─── S17 ACTIVE STUDIO SESSION ───────────────────────────────────────────
 // Same wiring as S14_Chat: one backend text session, SSE replies, session
 // ended on unmount. A studio character is just a character, so the endpoints
@@ -951,6 +1070,10 @@ interface PendingTurn { text: string; userId: string; replyId: string }
 
 let msgSeq = 0;
 const nextId = (prefix: string) => `${prefix}${++msgSeq}`;
+
+// Turns from an earlier session carry this id prefix; this visit's use u/r/n.
+const HISTORY_ID = 'h';
+const isHistory = (m: SMsg) => m.id.startsWith(HISTORY_ID);
 
 function updateMsg<K extends SMsg['from']>(
   list: SMsg[], id: string, from: K, fn: (m: Extract<SMsg, { from: K }>) => SMsg,
@@ -999,7 +1122,9 @@ export function S17_StudioSession({
   msgsRef.current = msgs;
   useAiNoticeRepeat(() => setMsgs(m => [...m, { id: nextId('n'), from: 'notice', text: aiNoticeText(scenario.name, isMinor, true) }]));
 
-  const [draft, setDraft] = useState('');
+  // The draft lives in the message box (ChatInput keeps it when given
+  // onSubmit), so typing redraws only the box, never the thread above it.
+  const composer = useRef<ChatInputHandle>(null);
   const [capRefused, setCapRefused] = useState<{ message?: string; planCap: boolean } | null>(null);
   const capHit = capRefused != null || (textRemainingToday != null && textRemainingToday <= 0);
   const [history, setHistory] = useState<LoadStatus>(characterId ? 'loading' : 'ready');
@@ -1013,6 +1138,9 @@ export function S17_StudioSession({
   const [showSummary, setShowSummary] = useState(false);
   const [reportTurn, setReportTurn] = useState<string | null>(null);
   const [unseen, setUnseen] = useState(false);
+  // How many of the earlier session's messages are drawn, counted back from
+  // the newest (see HISTORY_PAGE).
+  const [historyShown, setHistoryShown] = useState(HISTORY_PAGE);
 
   const mounted = useRef(true);
   const scrollRef = useRef<ScrollView>(null);
@@ -1044,25 +1172,45 @@ export function S17_StudioSession({
     announce(v ? 'This session will be remembered.' : 'One-time session. Nothing from it will be saved.');
   };
 
-  // Resume where the user left off: the newest session that has turns.
+  // Resume where the user left off: the newest earlier session that has turns.
   const loadHistory = useCallback(async (): Promise<void> => {
     if (!characterId) return;
     setHistory('loading');
+    // This visit's own session is never "earlier": its turns are already in
+    // the thread. Only it can have turns from this visit, and it has an id
+    // before its first message goes, so checking the id after each answer
+    // is enough (a Retry, or a slow list, can arrive after it exists).
+    const earlierSession = (id: string) => id !== sessionRef.current;
     try {
       const { sessions } = await getCharacterSessions(characterId);
-      // Visits used to open a session each, so many are empty. Fetch them
-      // together rather than one after another.
-      const turnsBySession = await Promise.all(sessions.map(s => getConversationTurns(s._id).then(r => r.turns)));
       if (!mounted.current) return;
-      const idx = turnsBySession.findIndex(t => t.length > 0);
-      const basis = (sessions[idx] ?? sessions[0]) as SessionWithMemory | undefined;
+      const candidates = (sessions as SessionWithMemory[]).filter(s => earlierSession(s._id));
+      // Newest first, stopping at the first with turns. That is nearly always
+      // the newest (sessions now open on the first message); characters from
+      // builds that opened one per visit have runs of empty ones, so after the
+      // first the rest are asked for a few at a time. Answers are read in
+      // order: a newer one failing means the resume point is unknown, but one
+      // behind an answer that's already found doesn't matter.
+      let found: { session: SessionWithMemory; turns: ApiTurn[] } | null = null;
+      for (let i = 0; i < candidates.length && !found;) {
+        const batch = candidates.slice(i, i + (i === 0 ? 1 : HISTORY_BATCH));
+        i += batch.length;
+        const requests = batch.map(s => getConversationTurns(s._id).then(r => r.turns));
+        requests.forEach(r => { r.catch(() => {}); });
+        for (let j = 0; j < batch.length && !found; j++) {
+          const turns = await requests[j];
+          if (!mounted.current) return;
+          if (turns.length && earlierSession(batch[j]._id)) found = { session: batch[j], turns };
+        }
+      }
+      const basis = found?.session ?? candidates[0];
       if (typeof basis?.memory_enabled === 'boolean') adoptServerRemember(basis.memory_enabled);
-      if (idx >= 0) {
-        const earlier = turnsBySession[idx].map((t): SMsg => (t.role === 'user'
-          ? { id: `h${t._id}`, from: 'user', text: t.content_text }
-          : { id: `h${t._id}`, from: 'comp', text: t.content_text, turnId: t._id }));
+      if (found) {
+        const earlier = found.turns.map((t): SMsg => (t.role === 'user'
+          ? { id: `${HISTORY_ID}${t._id}`, from: 'user', text: t.content_text }
+          : { id: `${HISTORY_ID}${t._id}`, from: 'comp', text: t.content_text, turnId: t._id }));
         // Merge rather than replace: anything sent while this loaded stays, after it.
-        setMsgs(m => (m.some(x => x.id.startsWith('h')) ? m : [...earlier, ...m]));
+        setMsgs(m => (m.some(isHistory) ? m : [...earlier, ...m]));
       }
       setHistory('ready');
     } catch {
@@ -1168,6 +1316,9 @@ export function S17_StudioSession({
 
   const runTurn = (sid: string, turn: PendingTurn) => {
     let received = false;
+    // The whole reply, so VoiceOver can read it once it has finished, as the
+    // companion chat does.
+    let acc = '';
     abortRef.current = streamConversation(
       { session_id: sid, message: turn.text },
       {
@@ -1176,12 +1327,14 @@ export function S17_StudioSession({
             received = true;
             haptic.selection();
           }
+          acc += content;
           setMsgs(m => updateMsg(m, turn.replyId, 'comp', r => ({ ...r, text: r.text + content })));
         },
         onDone: turnId => {
           setHadTurn(true);
           setMsgs(m => updateMsg(m, turn.replyId, 'comp', r => ({ ...r, streaming: false, turnId: turnId || undefined })));
           if (!nearBottom.current) setUnseen(true);
+          if (acc.trim()) announce(`${scenario.name}: ${acc.trim()}`);
           finishTurn();
         },
         // The server's safety response replaces the reply. It stays in the
@@ -1203,7 +1356,8 @@ export function S17_StudioSession({
             turnBusy.current = false;
             const ids = new Set(refused.flatMap(t => [t.userId, t.replyId]));
             setMsgs(m => m.filter(x => !ids.has(x.id)));
-            setDraft(d => restoreDraft(d, refused.map(t => t.text).join('\n')));
+            const back = refused.map(t => t.text).join('\n');
+            composer.current?.set(d => restoreDraft(d, back));
             setCapRefused(limited);
             onQuotaRefused?.();
             haptic.warning();
@@ -1246,12 +1400,9 @@ export function S17_StudioSession({
     pump();
   };
 
-  const send = () => {
-    if (!draft.trim()) return;
-    haptic.medium();
-    submit(draft);
-    setDraft('');
-  };
+  // For the message box (which has already given the send its haptic, and
+  // clears itself) and the opener's starters.
+  const sendText = useStableHandler(submit);
 
   // Retrying moves the message to the end, as iMessage does.
   const retry = (id: string) => {
@@ -1296,16 +1447,29 @@ export function S17_StudioSession({
     }
   };
 
-  const openReport = (turnId: string) => {
+  const openReport = useCallback((turnId: string) => {
     haptic.medium();
     Keyboard.dismiss();
     setReportTurn(turnId);
-  };
+  }, []);
 
   const openSummary = () => {
     haptic.light();
     Keyboard.dismiss();
     setShowSummary(true);
+  };
+
+  // ── Earlier messages, a page at a time ─────────────────────────────
+  // The earlier session's messages sit at the start of the list; all but the
+  // newest HISTORY_PAGE of them wait until the reader heads up towards them.
+  let historyCount = 0;
+  while (historyCount < msgs.length && isHistory(msgs[historyCount])) historyCount++;
+  const hiddenCount = Math.max(0, historyCount - historyShown);
+  const shownMsgs = hiddenCount ? msgs.slice(hiddenCount) : msgs;
+  const showOlder = () => {
+    // The same target from every call in one render, so a burst of scroll
+    // events adds one page, not one per event.
+    if (hiddenCount > 0) setHistoryShown(historyShown + HISTORY_PAGE);
   };
 
   // ── Scrolling ───────────────────────────────────────────────────────
@@ -1316,6 +1480,9 @@ export function S17_StudioSession({
     const near = contentSize.height - (contentOffset.y + layoutMeasurement.height) < NEAR_BOTTOM_PX;
     nearBottom.current = near;
     if (near) setUnseen(false);
+    // Two screens from the top the next page mounts, well before a fling
+    // gets there, so what is on screen stays put (KEEP_POSITION) as it lands.
+    if (hiddenCount > 0 && contentOffset.y < layoutMeasurement.height * 2) showOlder();
   };
   const onContentSizeChange = () => {
     if (nearBottom.current) scrollRef.current?.scrollToEnd({ animated: false });
@@ -1335,67 +1502,38 @@ export function S17_StudioSession({
   const showOpener = history === 'ready' && !talked;
   const sessionN = totalSessions + 1;
 
-  const renderMsg = (m: SMsg) => {
-    switch (m.from) {
-      case 'notice':
-        return <AiNotice key={m.id} text={m.text} />;
-      case 'crisis':
-        return <CrisisCard key={m.id} content={m.text} onMore={() => go('crisis')} />;
-      case 'user':
-        return (
-          <View key={m.id}>
-            <BubbleMem from="user" text={m.text} />
-            {m.status === 'failed' ? <FailedNote reason={m.reason} onPress={() => retry(m.id)} /> : null}
-          </View>
-        );
-      case 'comp':
-        if (m.streaming && !m.text) {
-          return (
-            <View key={m.id} accessible accessibilityLabel={`${scenario.name} is replying`}>
-              <TypingDots />
-            </View>
-          );
-        }
-        return (
-          <View key={m.id}>
-            <View
-              accessible
-              accessibilityLabel={`${scenario.name}: ${m.text}`}
-              accessibilityActions={m.turnId ? REPORT_ACTIONS : undefined}
-              onAccessibilityAction={m.turnId ? () => openReport(m.turnId!) : undefined}
-            >
-              <BubbleMem
-                from="comp"
-                text={m.text}
-                accent={scenario.accent}
-                streaming={m.streaming}
-                // App Store Guideline 1.2: generated replies must be reportable.
-                onLongPress={m.turnId ? () => openReport(m.turnId!) : undefined}
-              />
-            </View>
-            {m.cut ? <CutNote state={m.cut} onReload={() => reload(m.id)} /> : null}
-          </View>
-        );
-    }
-  };
+  // Everything below is memoised and handed handlers whose identity never
+  // changes, so a streamed frame re-renders only the reply it grew, and a
+  // keystroke only the composer.
+  const retryRow = useStableHandler(retry);
+  const reloadRow = useStableHandler(reload);
+  const moreSupport = useCallback(() => go('crisis'), [go]);
+  const onRememberChange = useStableHandler(changeRemember);
+  const leave = useCallback(() => go('studio'), [go]);
+  const endPressed = useStableHandler(openSummary);
+  const retryHistory = useCallback(() => { historyGate.current = loadHistory(); }, [loadHistory]);
+  const forgotten = useCallback(() => setMemoryCount(c => (c == null ? c : Math.max(0, c - 1))), []);
+  const keepGoing = useCallback(() => setShowSummary(false), []);
+  const endSessionNow = useCallback(() => {
+    setShowSummary(false);
+    go('studio');
+  }, [go]);
+  const closeReport = useCallback(() => setReportTurn(null), []);
+  const topNotice = useMemo(
+    () => <AiNotice text={aiNoticeText(scenario.name, isMinor, false)} />,
+    [scenario.name, isMinor],
+  );
 
   return (
     <Screen>
-      <TopBar
-        left={<BackButton onPress={() => go('studio')} />}
-        title={scenario.name}
-        focusTitleOnMount
-        right={<EndButton onPress={openSummary} />}
-        glass
-        border
-      />
+      <SessionHeader title={scenario.name} onBack={leave} onEnd={endPressed} />
       <MemoryBanner
         remember={remember}
         sessionN={sessionN}
         memoryCount={memoryCount}
         changeable={!memoryLocked}
         accent={scenario.accent}
-        onChange={changeRemember}
+        onChange={onRememberChange}
       />
       <View style={styles.flex1}>
         <ScrollView
@@ -1407,21 +1545,34 @@ export function S17_StudioSession({
           onScroll={onScroll}
           scrollEventThrottle={32}
           onContentSizeChange={onContentSizeChange}
+          maintainVisibleContentPosition={KEEP_POSITION}
         >
-          <AiNotice text={aiNoticeText(scenario.name, isMinor, false)} />
+          {topNotice}
           {history === 'loading' && !talked ? <ThreadSkeleton /> : null}
           {history === 'error' ? (
             <InlineNotice
               tone="warning"
               text="Couldn't load your earlier messages."
               actionLabel="Retry"
-              onAction={() => { historyGate.current = loadHistory(); }}
+              onAction={retryHistory}
             />
           ) : null}
           {showOpener ? (
-            <SessionOpener scenario={scenario} characterId={characterId} lines={brief?.lines ?? []} onStarter={submit} />
+            <SessionOpener scenario={scenario} characterId={characterId} lines={brief?.lines ?? NO_LINES} onStarter={sendText} />
           ) : null}
-          {msgs.map(renderMsg)}
+          {hiddenCount > 0 ? <EarlierMessages onPress={showOlder} /> : null}
+          {shownMsgs.map(m => (
+            <ThreadRow
+              key={m.id}
+              m={m}
+              name={scenario.name}
+              accent={scenario.accent}
+              onReport={openReport}
+              onRetry={retryRow}
+              onReload={reloadRow}
+              onMoreSupport={moreSupport}
+            />
+          ))}
           {sessionError ? <InlineNotice tone="error" text={sessionError} actionLabel="Retry" onAction={retryAllFailed} /> : null}
           {capHit ? (
             <CapHitCard
@@ -1435,7 +1586,7 @@ export function S17_StudioSession({
         </ScrollView>
         {unseen ? <NewMessageChip onPress={jumpToEnd} /> : null}
       </View>
-      <ChatInput draft={draft} setDraft={setDraft} onSend={send} companionName={scenario.name} />
+      <ChatInput ref={composer} companionName={scenario.name} onSubmit={sendText} />
 
       <SessionSummarySheet
         visible={showSummary}
@@ -1444,14 +1595,101 @@ export function S17_StudioSession({
         characterId={characterId}
         remember={remember}
         hadTurn={hadTurn}
-        onForgotten={() => setMemoryCount(c => (c == null ? c : Math.max(0, c - 1)))}
-        onKeepGoing={() => setShowSummary(false)}
-        onEnd={() => { setShowSummary(false); go('studio'); }}
+        onForgotten={forgotten}
+        onKeepGoing={keepGoing}
+        onEnd={endSessionNow}
       />
-      <ReportReplySheet turnId={reportTurn} onClose={() => setReportTurn(null)} />
+      <ReportReplySheet turnId={reportTurn} onClose={closeReport} />
     </Screen>
   );
 }
+
+const SessionHeader = memo(function SessionHeader({ title, onBack, onEnd }: {
+  title: string; onBack: () => void; onEnd: () => void;
+}) {
+  return (
+    <TopBar
+      left={<BackButton onPress={onBack} />}
+      title={title}
+      focusTitleOnMount
+      right={<EndButton onPress={onEnd} />}
+      glass
+      border
+    />
+  );
+});
+
+/** Shown above the thread while older messages are still waiting to be
+ *  drawn. Scrolling up draws them anyway; this is the explicit way, and the
+ *  one VoiceOver finds. */
+function EarlierMessages({ onPress }: { onPress: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      hitSlop={minTarget(HIT, 24)}
+      accessibilityRole="button"
+      accessibilityLabel="Show earlier messages"
+      style={({ pressed }) => [styles.earlier, pressed ? styles.pressed : null]}
+    >
+      <NavIcon name="clock" color={W.text2} size={14} />
+      <Txt variant="footnote" weight={500} style={{ color: W.text2 }}>Earlier messages</Txt>
+    </Pressable>
+  );
+}
+
+/** One message in the S17 thread. Memoised: with the stable handlers S17
+ *  passes, a streamed frame re-renders only the reply it changed. */
+const ThreadRow = memo(function ThreadRow({ m, name, accent, onReport, onRetry, onReload, onMoreSupport }: {
+  m: SMsg;
+  name: string;
+  accent: string;
+  onReport: (turnId: string) => void;
+  onRetry: (id: string) => void;
+  onReload: (id: string) => void;
+  onMoreSupport: () => void;
+}) {
+  // Earlier sessions arrive still, all at once; only this visit's messages rise in.
+  const animateIn = !isHistory(m);
+  switch (m.from) {
+    case 'notice':
+      return <AiNotice text={m.text} />;
+    case 'crisis':
+      return <CrisisCard content={m.text} onMore={onMoreSupport} />;
+    case 'user':
+      return (
+        <View>
+          <BubbleMem from="user" text={m.text} animateIn={animateIn} />
+          {m.status === 'failed' ? <FailedNote reason={m.reason} onPress={() => onRetry(m.id)} /> : null}
+        </View>
+      );
+    case 'comp':
+      if (m.streaming && !m.text) {
+        return (
+          <View accessible accessibilityLabel={`${name} is replying`}>
+            <TypingDots />
+          </View>
+        );
+      }
+      return (
+        <View>
+          <BubbleMem
+            from="comp"
+            text={m.text}
+            accent={accent}
+            speaker={name}
+            streaming={m.streaming}
+            animateIn={animateIn}
+            // App Store Guideline 1.2: generated replies must be reportable, by
+            // long-press or VoiceOver's "Report this reply" action. Only a
+            // reply the backend has saved has a turn id to report.
+            reportId={m.turnId}
+            onReport={onReport}
+          />
+          {m.cut ? <CutNote state={m.cut} onReload={() => onReload(m.id)} /> : null}
+        </View>
+      );
+  }
+});
 
 function EndButton({ onPress }: { onPress: () => void }) {
   return (
@@ -1469,7 +1707,7 @@ function EndButton({ onPress }: { onPress: () => void }) {
 
 /** Session number and memory state. Before the session opens (on the first
  *  message) the whole banner is the switch; after, it only reports. */
-function MemoryBanner({ remember, sessionN, memoryCount, changeable, accent, onChange }: {
+const MemoryBanner = memo(function MemoryBanner({ remember, sessionN, memoryCount, changeable, accent, onChange }: {
   remember: boolean; sessionN: number; memoryCount: number | null; changeable: boolean; accent: string;
   onChange: (v: boolean) => void;
 }) {
@@ -1502,7 +1740,7 @@ function MemoryBanner({ remember, sessionN, memoryCount, changeable, accent, onC
       {body}
     </Pressable>
   );
-}
+});
 
 function ThreadSkeleton() {
   return (
@@ -1516,7 +1754,7 @@ function ThreadSkeleton() {
 
 /** The first thing in a new thread: what this is, how it was set up, and a
  *  few ways to begin. */
-function SessionOpener({ scenario, characterId, lines, onStarter }: {
+const SessionOpener = memo(function SessionOpener({ scenario, characterId, lines, onStarter }: {
   scenario: Scenario; characterId?: string; lines: { label: string; value: string }[]; onStarter: (text: string) => void;
 }) {
   const entering = useOnce(() => enter.fadeUp);
@@ -1553,7 +1791,7 @@ function SessionOpener({ scenario, characterId, lines, onStarter }: {
       </View>
     </Animated.View>
   );
-}
+});
 
 function FailedNote({ reason, onPress }: { reason?: string; onPress: () => void }) {
   const entering = useOnce(() => enter.fade);
@@ -1697,7 +1935,11 @@ function CrisisRow({ resource: r, failed, onOpen }: { resource: CrisisResource; 
 // What is real is the character's memory set — shown here, and forgettable
 // with a short undo. Memories from this session are written by a job that runs
 // after it ends, so this can only list what was already remembered.
-function SessionSummarySheet({ visible, name, sessionN, characterId, remember, hadTurn, onForgotten, onKeepGoing, onEnd }: {
+// Memoised (as is the report sheet): both stay mounted under the thread,
+// which re-renders on every streamed frame.
+const SessionSummarySheet = memo(function SessionSummarySheet({
+  visible, name, sessionN, characterId, remember, hadTurn, onForgotten, onKeepGoing, onEnd,
+}: {
   visible: boolean; name: string; sessionN: number; characterId?: string; remember: boolean; hadTurn: boolean;
   onForgotten: () => void; onKeepGoing: () => void; onEnd: () => void;
 }) {
@@ -1839,7 +2081,7 @@ function SessionSummarySheet({ visible, name, sessionN, characterId, remember, h
       </View>
     </Sheet>
   );
-}
+});
 
 // ─── Report sheet ────────────────────────────────────────────────────────
 // Apple Guideline 1.2 — users must be able to report AI-generated content.
@@ -1851,15 +2093,21 @@ const REPORT_REASONS: { k: ReportReason; l: string }[] = [
   { k: 'other', l: 'Something else' },
 ];
 
-function ReportReplySheet({ turnId, onClose }: { turnId: string | null; onClose: () => void }) {
+const ReportReplySheet = memo(function ReportReplySheet({ turnId, onClose }: { turnId: string | null; onClose: () => void }) {
   // Kept after close so the content doesn't vanish while the sheet slides out.
   const [target, setTarget] = useState(turnId);
   const [reason, setReason] = useState<ReportReason | null>(null);
   const [note, setNote] = useState('');
   const [state, setState] = useState<'idle' | 'sending' | 'sent' | 'failed'>('idle');
   const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // The reply the sheet is open on right now (null while closed), so a report
+  // or its "Thanks" timer that outlives it can't act on the next one.
+  const openOn = useRef(turnId);
+  openOn.current = turnId;
 
   useEffect(() => {
+    // Closed by hand, or opened on another reply: the last one's auto-close is void.
+    clearTimeout(closeTimer.current);
     if (!turnId) return;
     setTarget(turnId);
     setReason(null);
@@ -1870,14 +2118,19 @@ function ReportReplySheet({ turnId, onClose }: { turnId: string | null; onClose:
 
   const submit = async () => {
     if (!target || !reason || state === 'sending') return;
+    const reported = target;
     setState('sending');
     try {
-      await createReport(target, reason, note.trim() || undefined);
-      setState('sent');
+      await createReport(reported, reason, note.trim() || undefined);
       haptic.success();
       announce('Report sent. Thank you.');
-      closeTimer.current = setTimeout(onClose, 1400);
+      if (openOn.current !== reported) return;
+      setState('sent');
+      closeTimer.current = setTimeout(() => {
+        if (openOn.current === reported) onClose();
+      }, 1400);
     } catch {
+      if (openOn.current !== reported) return;
       setState('failed');
       haptic.error();
     }
@@ -1920,7 +2173,7 @@ function ReportReplySheet({ turnId, onClose }: { turnId: string | null; onClose:
       )}
     </Sheet>
   );
-}
+});
 
 // ─── S18 CHARACTER CREATOR ───────────────────────────────────────────────
 const SLIDERS = [
@@ -1961,9 +2214,12 @@ export function S18_CharacterCreator({ go, apiVoices = [], voicesStatus, onRetry
     // Mount only: later failures are the Retry button's job.
   }, []);
 
-  const voiceList = voicesFor(apiVoices, gender);
+  // Kept by identity between keystrokes in the name, so the memoised voice grid skips them.
+  const voiceList = useMemo(() => voicesFor(apiVoices, gender), [apiVoices, gender]);
   const pickedVoice = voiceList.some(v => v.id === voiceId) ? voiceId : voiceList[0]?.id ?? null;
   const voiceName = apiVoices.find(v => v.id === pickedVoice)?.name;
+  // One stable handler for every slider, so moving one doesn't redraw the rest.
+  const setTrait = useCallback((k: TraitKey, v: number) => setTraits(t => ({ ...t, [k]: v })), []);
   const trimmed = name.trim();
   const canNext = !!trimmed && !!pickedVoice;
   const stepHint = step === 1 && !canNext ? (!trimmed ? 'Add a name to continue.' : 'Pick a voice to continue.') : null;
@@ -2005,7 +2261,7 @@ export function S18_CharacterCreator({ go, apiVoices = [], voicesStatus, onRetry
         ),
       });
       const created = res.name || trimmed;
-      justCreated = { _id: res.character_id, name: created, gender: API_GENDER[gender], voice_id: pickedVoice, kind: 'custom' };
+      setJustCreated({ _id: res.character_id, name: created, gender: API_GENDER[gender], voice_id: pickedVoice, kind: 'custom' });
       haptic.success();
       announce(`${created} is ready. You'll find them under Your characters.`);
       go('studio');
@@ -2072,7 +2328,7 @@ export function S18_CharacterCreator({ go, apiVoices = [], voicesStatus, onRetry
             <>
               <Txt variant="subhead" style={{ color: W.text2 }}>How should {trimmed} come across?</Txt>
               {SLIDERS.map(s => (
-                <TraitSlider key={s.k} spec={s} value={traits[s.k]} onChange={v => setTraits(t => ({ ...t, [s.k]: v }))} />
+                <TraitSlider key={s.k} spec={s} value={traits[s.k]} onChange={setTrait} />
               ))}
             </>
           ) : null}
@@ -2171,9 +2427,15 @@ function ReviewRow({ label, value, muted = false, onEdit, last = false }: {
 // commits on release; a drag that starts vertical is left to the scroll view.
 // Grabbing the thumb moves it from where it is, touching the track elsewhere
 // jumps there, and every tenth ticks. VoiceOver adjusts it in steps of 10.
+// Only transforms move during a drag (no layout pass per frame), and only
+// this slider's own label re-renders as the number changes.
 const THUMB = 24;
 
-function TraitSlider({ spec, value, onChange }: { spec: TraitSpec; value: number; onChange: (v: number) => void }) {
+const TraitSlider = memo(function TraitSlider({ spec, value, onChange }: {
+  spec: TraitSpec;
+  value: number;
+  onChange: (k: TraitKey, v: number) => void;
+}) {
   const [shown, setShown] = useState(Math.round(value * 100));
   const width = useSharedValue(0);
   const pos = useSharedValue(value);
@@ -2199,8 +2461,8 @@ function TraitSlider({ spec, value, onChange }: { spec: TraitSpec; value: number
   const commit = useCallback((v: number) => {
     const rounded = Math.round(v * 100) / 100;
     selfSet.current = rounded;
-    onChangeRef.current(rounded);
-  }, []);
+    onChangeRef.current(spec.k, rounded);
+  }, [spec.k]);
   const tick = useCallback(() => haptic.selection(), []);
 
   const gesture = useMemo(() => {
@@ -2250,7 +2512,13 @@ function TraitSlider({ spec, value, onChange }: { spec: TraitSpec; value: number
     return Gesture.Exclusive(pan, tap);
   }, [commit, tick, width, pos, grab, held, lastPct, lastTick]);
 
-  const fillStyle = useAnimatedStyle(() => ({ width: pos.value * Math.max(0, width.value - THUMB) }));
+  // A full-length fill slid in from the left and clipped by the track, rather
+  // than a width that would need a layout pass on every frame of the drag.
+  const fillStyle = useAnimatedStyle(() => ({
+    // Hidden until measured, like the thumb, or it would flash full.
+    opacity: width.value > 0 ? 1 : 0,
+    transform: [{ translateX: (pos.value - 1) * Math.max(0, width.value - THUMB) }],
+  }));
   const thumbStyle = useAnimatedStyle(() => ({
     // Hidden until measured, so it never flashes at the left edge.
     opacity: width.value > 0 ? 1 : 0,
@@ -2259,7 +2527,7 @@ function TraitSlider({ spec, value, onChange }: { spec: TraitSpec; value: number
 
   const adjust = (delta: number) => {
     const v = Math.min(1, Math.max(0, Math.round((value + delta) * 10) / 10));
-    if (v !== value) onChange(v);
+    if (v !== value) onChange(spec.k, v);
   };
 
   const word = traitWord(spec, shown / 100);
@@ -2292,7 +2560,7 @@ function TraitSlider({ spec, value, onChange }: { spec: TraitSpec; value: number
       </View>
     </View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   flex1: { flex: 1 },
@@ -2321,6 +2589,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: SP.md, borderRadius: R.pill,
     backgroundColor: rgba(W.primary, 0.12), borderWidth: 1, borderColor: rgba(W.primary, 0.28),
   },
+  // The carousel cards are tinted glass without a live blur: a blur view
+  // re-renders on every frame of a scroll, and these scroll both ways over a
+  // still, already soft backdrop, where the blur added little to see.
   glassCard: { borderRadius: R.lg, borderWidth: 1, overflow: 'hidden', backgroundColor: W.glass },
   continueCard: { padding: SP.md2, gap: SP.sm },
   scenarioCard: { padding: SP.base, minHeight: 200, justifyContent: 'space-between', gap: SP.md },
@@ -2386,8 +2657,8 @@ const styles = StyleSheet.create({
   traitRow: { flexDirection: 'row', alignItems: 'center', gap: SP.sm },
   traitEnd: { fontSize: TYPE.title3.size, lineHeight: TYPE.title3.lineHeight },
   sliderHit: { flex: 1, height: HIT, justifyContent: 'center' },
-  track: { marginHorizontal: THUMB / 2, height: 4, borderRadius: 2, backgroundColor: W.surface3 },
-  trackFill: { position: 'absolute', left: 0, top: 0, bottom: 0, borderRadius: 2, backgroundColor: W.primary },
+  track: { marginHorizontal: THUMB / 2, height: 4, borderRadius: 2, backgroundColor: W.surface3, overflow: 'hidden' },
+  trackFill: { ...StyleSheet.absoluteFillObject, borderRadius: 2, backgroundColor: W.primary },
   thumb: {
     position: 'absolute', left: 0, top: (HIT - THUMB) / 2, width: THUMB, height: THUMB, borderRadius: THUMB / 2,
     backgroundColor: W.cream, borderWidth: 3, borderColor: W.primary, ...ELEV.low,
@@ -2413,6 +2684,10 @@ const styles = StyleSheet.create({
     paddingTop: SP.xs, paddingHorizontal: SP.xs,
   },
   alignStart: { alignSelf: 'flex-start' },
+  earlier: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: SP.xs2,
+    alignSelf: 'center', paddingVertical: SP.xs, paddingHorizontal: SP.md,
+  },
   cutText: { alignSelf: 'flex-start', paddingTop: SP.xs, paddingHorizontal: SP.xs, color: W.text3 },
   chipWrap: { position: 'absolute', left: 0, right: 0, bottom: SP.sm, alignItems: 'center' },
   chip: {

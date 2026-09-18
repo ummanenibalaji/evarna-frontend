@@ -9,6 +9,7 @@
 import { Linking, Platform } from 'react-native';
 import type { PurchasesPackage } from 'react-native-purchases';
 import { subscriptionIdOf, tierAndPeriodOf, PaidTier } from './storeProducts';
+import { withSystemPrompt } from '../components/PrivacyShield';
 
 type PurchasesModule = typeof import('react-native-purchases').default;
 
@@ -150,7 +151,9 @@ export async function buyPlan(plan: StorePlan): Promise<PurchaseOutcome> {
     if (current) change = { oldProductIdentifier: subscriptionIdOf(current) };
   }
   try {
-    await Purchases.purchasePackage(plan.pkg, null, change);
+    // The store's sheet turns the app inactive while it is up; without this
+    // the app-switcher cover would hide the paywall underneath it.
+    await withSystemPrompt(() => Purchases.purchasePackage(plan.pkg, null, change));
     return 'purchased';
   } catch (e) {
     const code = codeOf(e);
@@ -166,7 +169,10 @@ export async function buyPlan(plan: StorePlan): Promise<PurchaseOutcome> {
  * didn't answer" can be told apart afterwards.
  */
 export async function restorePurchases(): Promise<boolean> {
-  const info = await load()!.restorePurchases();
+  // The App Store may ask for the Apple ID password over the paywall first,
+  // and that sheet, like the purchase one, must not raise the privacy cover.
+  const Purchases = load()!;
+  const info = await withSystemPrompt(() => Purchases.restorePurchases());
   return info.activeSubscriptions.some(id => tierAndPeriodOf(id) !== null);
 }
 

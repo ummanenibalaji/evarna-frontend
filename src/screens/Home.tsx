@@ -6,7 +6,7 @@
 // last-talked stamps, the streak and the week all come from the backend, and
 // anything the backend hasn't answered is either a skeleton or absent.
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import {
   Pressable, RefreshControl, ScrollView, StyleSheet, View, useWindowDimensions,
   type AccessibilityActionEvent, type StyleProp, type ViewStyle,
@@ -28,6 +28,7 @@ import { haptic } from '../lib/haptics';
 import { ELEV, GRAD, HIT, MOTION, R, SP, W, rgba } from '../theme/theme';
 import { Go } from '../navigation/types';
 import { useTabReselect } from '../navigation/tabEvents';
+import { useSceneFocusEffect, useSceneFocusRef } from '../navigation/sceneContext';
 import { Companion, ARCHETYPE_COLORS, ARCHETYPE_LABEL, CHECK_IN } from '../data/config';
 import { getActivity, ApiActivity } from '../api';
 import { getAuthToken } from '../api/client';
@@ -109,6 +110,13 @@ function leadLine(lead: Companion): string {
   return when ? `You and ${lead.name} last talked ${when}.` : `${lead.name} is ready when you are.`;
 }
 
+/** Everything Home works out from the clock at render, as one comparable
+ *  string: the date, the part of the day (greeting and check-in) and the
+ *  line under the greeting. */
+function clockFace(now: Date, lead: Companion | undefined): string {
+  return `${now.toDateString()}|${dayPart(now.getHours())}|${lead ? leadLine(lead) : ''}`;
+}
+
 // Monday-first narrow weekday letters in the device's language (1 Jan 2024
 // was a Monday), so the strip matches the localised date above it.
 const WEEKDAYS_EN = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
@@ -122,24 +130,52 @@ function weekdayLetters(): string[] {
 }
 
 // ─── Activity (streak + week) ────────────────────────────────────────────
-// Home remounts on every visit, so the last answer is kept for the session
-// and painted at once while a fresh one loads; that is what stops the streak
-// pill and the week strip from popping in on every return. It is keyed by
-// the auth token so a second account on the same phone never sees the
-// first one's numbers.
+// Home stays mounted while the tabs are up, including under the chats and
+// calls it opens, so coming back is not a new mount. It is remounted when
+// the tabs are rebuilt (sign-in, the end of onboarding, an error retry), and
+// the last answer is kept for that: it is painted at once while a fresh one
+// loads, so the streak pill and the week strip don't pop in. It is keyed by
+// the auth token so a second account on the same phone never sees the first
+// one's numbers.
 const ACTIVITY_STALE_MS = 30_000;
 let activityMemo: { token: string | null; data: ApiActivity; at: number } | null = null;
 const currentMemo = () => (activityMemo && activityMemo.token === getAuthToken() ? activityMemo : null);
 
-function useActivity() {
+/** The newest last-talked stamp across the companions, as a number so it can
+ *  key an effect (0 when nobody has been talked to). */
+function newestTalk(list: Companion[]): number {
+  let newest = 0;
+  for (const c of list) {
+    const at = c.lastInteractionAt ? Date.parse(c.lastInteractionAt) : NaN;
+    if (at > newest) newest = at;
+  }
+  return newest;
+}
+
+/**
+ * @param lastTalkedAt the newest last-talked stamp in the companion list
+ * @param listSettled false while that list is still first arriving
+ */
+function useActivity(lastTalkedAt: number, listSettled: boolean) {
   const [activity, setActivity] = useState<ApiActivity | null>(() => currentMemo()?.data ?? null);
   const [failed, setFailed] = useState(false);
   const inFlight = useRef<Promise<void> | null>(null);
+  const followUp = useRef<Promise<void> | null>(null);
 
   const load = useCallback((force: boolean): Promise<void> => {
     const memo = currentMemo();
     if (!force && memo && Date.now() - memo.at < ACTIVITY_STALE_MS) return Promise.resolve();
-    if (inFlight.current) return inFlight.current;
+    if (inFlight.current) {
+      if (!force) return inFlight.current;
+      // The answer on its way may predate what made this one forced, so it
+      // is asked once more after it lands, however many forced asks came
+      // in the meantime.
+      followUp.current ??= inFlight.current.then(() => {
+        followUp.current = null;
+        return load(true);
+      });
+      return followUp.current;
+    }
     const token = getAuthToken();
     const request = getActivity()
       .then(
@@ -156,12 +192,36 @@ function useActivity() {
     return request;
   }, []);
 
-  // On arrival and whenever the app comes back to the foreground (throttled
-  // by the memo's age), so a streak earned in a call shows on return.
+  // On arrival, whenever Home is uncovered or its tab picked again, and when
+  // the app comes back to the foreground while Home is in front; all
+  // throttled by the memo's age. A Studio session or a call that left the
+  // companion list alone still counts toward the streak, and this is what
+  // picks it up. Nothing is asked for while Home is out of sight.
+  //
+  // Whether Home is in front is followed without re-rendering it: reading it
+  // as state would redraw the whole screen in the commit that starts every
+  // push and pop. A return asks once the slide is over. At mount both
+  // effects run; the second finds the first's request in flight.
   const active = useAppActive();
+  const inFront = useSceneFocusRef();
   useEffect(() => {
+    if (active && inFront.current) load(false);
+  }, [active, inFront, load]);
+  useSceneFocusEffect(() => {
     if (active) load(false);
-  }, [active, load]);
+  });
+
+  // Back from a chat or a call. What moves the streak and the week is a
+  // conversation, and a conversation also moves the newest last-talked stamp
+  // in the list the router refetches on every return to Home, so a change
+  // there asks again at once. The list first arriving is not a conversation,
+  // and the arrival load above already covers it.
+  const seenTalk = useRef({ at: lastTalkedAt, settled: listSettled });
+  useEffect(() => {
+    const was = seenTalk.current;
+    seenTalk.current = { at: lastTalkedAt, settled: listSettled };
+    if (lastTalkedAt !== was.at && was.settled) void load(true);
+  }, [lastTalkedAt, listSettled, load]);
 
   const reload = useCallback(() => load(true), [load]);
   return { activity, pending: activity === null && !failed, reload };
@@ -201,7 +261,10 @@ function Appear({ entrance, index = 0, reflow = false, style, children }: {
 const ACCOUNT_SIZE = 40;
 const ACCOUNT_RING = [W.coral, W.rose, W.violet, W.coral] as const;
 
-function AccountButton({ name, onPress }: { name: string; onPress: () => void }) {
+// The pieces below are memoised and handed stable handlers, so a Home
+// re-render (activity arriving, a refresh starting or ending, the router
+// re-rendering under a chat) only redraws what actually changed.
+const AccountButton = memo(function AccountButton({ name, onPress }: { name: string; onPress: () => void }) {
   const press = usePressFeedback({ scale: MOTION.press.scaleSmall });
   // Array.from keeps an emoji or accented first letter whole.
   const initial = Array.from(name.trim())[0]?.toUpperCase();
@@ -227,7 +290,7 @@ function AccountButton({ name, onPress }: { name: string; onPress: () => void })
       </Pressable>
     </Animated.View>
   );
-}
+});
 
 // ─── Check-in card ───────────────────────────────────────────────────────
 // The daily ritual: a gold eyebrow (it feeds the streak), the aurora edge of a
@@ -236,7 +299,7 @@ function AccountButton({ name, onPress }: { name: string; onPress: () => void })
 const MOOD_BEAT_MS = MOTION.duration.fast;
 const BLOOM = [{ offset: 0, color: W.primary, opacity: 0.16 }, { offset: 0.65, color: W.primary, opacity: 0 }] as const;
 
-function CheckInCard({ lead, part, streak, streakPending, entrance, onMood, onOpen }: {
+const CheckInCard = memo(function CheckInCard({ lead, part, streak, streakPending, entrance, onMood, onOpen }: {
   lead: Companion;
   part: DayPart;
   streak: number | null;
@@ -304,7 +367,7 @@ function CheckInCard({ lead, part, streak, streakPending, entrance, onMood, onOp
       ) : null}
     </Card>
   );
-}
+});
 
 function CheckInSkeleton() {
   return (
@@ -326,11 +389,13 @@ function CheckInSkeleton() {
 // button nested inside another from the screen reader.
 const CALL_SIZE = 42;
 
-function CompanionCard({ companion, compact, onChat, onCall }: {
+// Handed the router's own (stable) handlers, which take the companion, so an
+// unchanged card skips every Home re-render.
+const CompanionCard = memo(function CompanionCard({ companion, compact, onChat: chatWith, onCall: callWith }: {
   companion: Companion;
   compact: boolean;
-  onChat: () => void;
-  onCall: () => void;
+  onChat: (c: Companion) => void;
+  onCall: (c: Companion) => void;
 }) {
   const accent = ARCHETYPE_COLORS[companion.archetype] ?? W.primary;
   const archetype = ARCHETYPE_LABEL[companion.archetype] ?? '';
@@ -343,10 +408,11 @@ function CompanionCard({ companion, compact, onChat, onCall }: {
   const stamp = formatLastInteraction(companion.lastInteractionAt) || companion.lastTalked || '';
   const spokenStamp = lastTalkedPhrase(companion.lastInteractionAt) || companion.lastTalked || '';
 
+  const onChat = useCallback(() => chatWith(companion), [chatWith, companion]);
   const call = useCallback(() => {
     haptic.medium();
-    onCall();
-  }, [onCall]);
+    callWith(companion);
+  }, [callWith, companion]);
 
   const label = [
     companion.name,
@@ -421,7 +487,7 @@ function CompanionCard({ companion, compact, onChat, onCall }: {
       </Pressable>
     </Animated.View>
   );
-}
+});
 
 function CompanionSkeleton({ compact }: { compact: boolean }) {
   const size = compact ? 48 : 56;
@@ -438,20 +504,29 @@ function CompanionSkeleton({ compact }: { compact: boolean }) {
 }
 
 // ─── Add companion ───────────────────────────────────────────────────────
-function AddCompanionRow({ size, count, max, limitReason, onAdd }: {
+// The count and the slots are only claimed from the server's list. Until then
+// (a saved companion standing in while it loads, or a list that failed) the
+// count may be short, so the row waits rather than start an add the server
+// would refuse at the last step. A limit the server has named still shows.
+const AddCompanionRow = memo(function AddCompanionRow({ size, count, max, status, limitReason, onAdd }: {
   size: number;
   count: number;
   max: number;
+  status: 'loading' | 'ready' | 'error';
   limitReason?: string;
   onAdd?: () => void;
 }) {
   const press = usePressFeedback({ scale: MOTION.press.scaleSubtle, haptic: false });
-  const atLimit = count >= max || !!limitReason;
-  const enabled = !atLimit && !!onAdd;
+  const known = status === 'ready';
+  const atLimit = !!limitReason || (known && count >= max);
+  const off = atLimit || !known;
+  const enabled = !off && !!onAdd;
   const slotsLeft = Math.max(0, max - count);
   const detail = atLimit
     ? limitReason ?? `${max} of ${max} used`
-    : `${slotsLeft} slot${slotsLeft === 1 ? '' : 's'} left`;
+    : !known
+      ? status === 'loading' ? 'Checking your companions…' : 'Available once your companions load'
+      : `${slotsLeft} slot${slotsLeft === 1 ? '' : 's'} left`;
 
   const add = () => {
     haptic.light();
@@ -466,15 +541,15 @@ function AddCompanionRow({ size, count, max, limitReason, onAdd }: {
         onPressOut={enabled ? press.onPressOut : undefined}
         disabled={!enabled}
         accessibilityRole="button"
-        accessibilityLabel={atLimit ? `Add a companion, unavailable. ${detail}` : `Add a companion. ${detail}`}
-        accessibilityState={{ disabled: !enabled }}
-        style={[styles.addRow, atLimit ? styles.addRowOff : styles.addRowOn]}
+        accessibilityLabel={off ? `Add a companion, unavailable. ${detail}` : `Add a companion. ${detail}`}
+        accessibilityState={{ disabled: !enabled, busy: !atLimit && status === 'loading' }}
+        style={[styles.addRow, off ? styles.addRowOff : styles.addRowOn]}
       >
-        <View style={[styles.addIcon, { width: size, height: size, borderRadius: size / 2 }, atLimit ? styles.addIconOff : styles.addIconOn]}>
-          <NavIcon name="plus" color={atLimit ? W.text3 : W.primary} size={22} />
+        <View style={[styles.addIcon, { width: size, height: size, borderRadius: size / 2 }, off ? styles.addIconOff : styles.addIconOn]}>
+          <NavIcon name="plus" color={off ? W.text3 : W.primary} size={22} />
         </View>
         <View style={styles.cardText}>
-          <Txt variant="headline" numberOfLines={1} style={{ color: atLimit ? W.text2 : W.cream }}>
+          <Txt variant="headline" numberOfLines={1} style={{ color: off ? W.text2 : W.cream }}>
             {atLimit ? 'Companion limit reached' : 'Add a companion'}
           </Txt>
           <Txt variant="footnote" numberOfLines={2} style={styles.addDetail}>{detail}</Txt>
@@ -482,7 +557,7 @@ function AddCompanionRow({ size, count, max, limitReason, onAdd }: {
       </Pressable>
     </Animated.View>
   );
-}
+});
 
 // ─── Week strip ──────────────────────────────────────────────────────────
 // Seven bars, Monday first. Today's bar is the only one that gets the aurora
@@ -490,7 +565,7 @@ function AddCompanionRow({ size, count, max, limitReason, onAdd }: {
 const BAR_MAX = 36;
 const BAR_MIN = 6;
 
-function WeekStrip({ activity, entrance }: { activity: ApiActivity; entrance: Entrance }) {
+const WeekStrip = memo(function WeekStrip({ activity, entrance }: { activity: ApiActivity; entrance: Entrance }) {
   const bars = activity.week_minutes.slice(0, 7);
   const peak = Math.max(...bars, 1);
   const total = activity.week_total_minutes;
@@ -552,10 +627,13 @@ function WeekStrip({ activity, entrance }: { activity: ApiActivity; entrance: En
       </View>
     </Appear>
   );
-}
+});
 
 // ─── S10 HOME ──────────────────────────────────────────────────────────────
-export function S10_Home({
+// Memoised: Home stays mounted under the chats and calls it opens, and the
+// screen right under the top one is kept live, so without this every router
+// re-render during a chat or a call would redraw Home behind it.
+export const S10_Home = memo(function S10_Home({
   go, companions, onSelectCompanion, onCallCompanion, userName, onAddCompanion, maxCompanions,
   status = 'ready', onRetry, onRefresh, onMood, companionLimitReason,
 }: {
@@ -584,9 +662,10 @@ export function S10_Home({
   const insets = useSafeAreaInsets();
   const tabBarHeight = useTabBarHeight();
 
-  // useActivity follows the app's foreground state, so Home re-renders on
-  // return and the greeting and date below are recomputed then.
-  const { activity, pending: activityPending, reload: reloadActivity } = useActivity();
+  const { activity, pending: activityPending, reload: reloadActivity } = useActivity(
+    newestTalk(companions),
+    status !== 'loading',
+  );
 
   const now = new Date();
   const part = dayPart(now.getHours());
@@ -599,6 +678,17 @@ export function S10_Home({
   const failedEmpty = status === 'error' && !hasData;
   const staleError = status === 'error' && hasData;
   const empty = status === 'ready' && !hasData;
+
+  // Home stays mounted under the screens it opens and isn't re-rendered for
+  // coming back to the front, so what it works out from the clock (see
+  // clockFace) could be stale on return: a chat that ran past midnight,
+  // "last talked 5 minutes ago" an hour later. Once back and still, it
+  // redraws if any of that would now read differently, and not otherwise.
+  const shownClock = clockFace(now, lead);
+  const [, redraw] = useReducer((n: number) => n + 1, 0);
+  useSceneFocusEffect(() => {
+    if (clockFace(new Date(), lead) !== shownClock) redraw();
+  });
 
   // Something that appears after Home has mounted fades in; what is already
   // there on arrival does not replay its entrance.
@@ -639,6 +729,15 @@ export function S10_Home({
   const scrollRef = useRef<ScrollView>(null);
   useTabReselect('home', () => scrollRef.current?.scrollTo({ y: 0, animated: true }));
 
+  // Stable, so the memoised header and check-in card skip unrelated renders.
+  const openSettings = useCallback(() => go('settings'), [go]);
+  const moodWithLead = useCallback((mood: string) => {
+    if (lead) onMood?.(lead, mood);
+  }, [onMood, lead]);
+  const openLead = useCallback(() => {
+    if (lead) onSelectCompanion(lead);
+  }, [onSelectCompanion, lead]);
+
   return (
     <Screen tabBar>
       {/* Exits are for things leaving while Home stays. Without this,
@@ -656,10 +755,10 @@ export function S10_Home({
             <View style={styles.headerRight}>
               {streak > 0 ? (
                 <Appear entrance={lateEntrance}>
-                  <StreakPill days={streak} onPress={() => go('settings')} />
+                  <StreakPill days={streak} onPress={openSettings} />
                 </Appear>
               ) : null}
-              <AccountButton name={userName} onPress={() => go('settings')} />
+              <AccountButton name={userName} onPress={openSettings} />
             </View>
           }
         />
@@ -692,8 +791,8 @@ export function S10_Home({
                 streak={activity ? streak : null}
                 streakPending={activityPending}
                 entrance={lateEntrance}
-                onMood={onMood ? mood => onMood(lead, mood) : undefined}
-                onOpen={() => onSelectCompanion(lead)}
+                onMood={onMood ? moodWithLead : undefined}
+                onOpen={openLead}
               />
             </Appear>
           ) : loadingEmpty ? (
@@ -705,7 +804,9 @@ export function S10_Home({
           {/* Companions */}
           <View style={styles.sectionHead}>
             <Txt variant="eyebrow" heading style={{ color: W.text2, flexShrink: 1 }}>Your companions</Txt>
-            {hasData ? (
+            {/* Only the server's list is counted: while it loads, or after it
+                failed, what is shown may be a saved stand-in. */}
+            {hasData && status === 'ready' ? (
               <Txt
                 variant="caption"
                 accessibilityLabel={`${companions.length} of ${maxCompanions} companions`}
@@ -758,8 +859,8 @@ export function S10_Home({
                   <CompanionCard
                     companion={c}
                     compact={compact}
-                    onChat={() => onSelectCompanion(c)}
-                    onCall={() => onCallCompanion(c)}
+                    onChat={onSelectCompanion}
+                    onCall={onCallCompanion}
                   />
                 </Appear>
               ))}
@@ -768,6 +869,7 @@ export function S10_Home({
                   size={avatarSize}
                   count={companions.length}
                   max={maxCompanions}
+                  status={status}
                   limitReason={companionLimitReason}
                   onAdd={onAddCompanion}
                 />
@@ -780,7 +882,7 @@ export function S10_Home({
       </LayoutAnimationConfig>
     </Screen>
   );
-}
+});
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
