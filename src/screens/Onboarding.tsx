@@ -9,7 +9,7 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Keyboard, Pressable, ScrollView, StyleSheet, TextInput, View, useWindowDimensions,
-  type AccessibilityActionEvent, type StyleProp, type ViewStyle,
+  type AccessibilityActionEvent, type NativeScrollEvent, type NativeSyntheticEvent, type StyleProp, type ViewStyle,
 } from 'react-native';
 import Animated, {
   Extrapolation, interpolate, ReduceMotion, scrollTo, useAnimatedRef, useAnimatedScrollHandler,
@@ -24,7 +24,7 @@ import { Screen, TopBar } from '../components/Chrome';
 import { Txt } from '../components/Txt';
 import { NavIcon, type IconName } from '../components/NavIcon';
 import {
-  BackButton, Card, EmptyState, ErrorState, GlassFill, InlineNotice, Pill, PrimaryButton,
+  BackButton, Card, EmptyState, ErrorState, GlassFill, IconButton, InlineNotice, Pill, PrimaryButton,
   ProgressDots, Skeleton,
 } from '../components/Atoms';
 import { Orb } from '../components/Orb';
@@ -37,6 +37,7 @@ import { canOpenCrisisResource, crisisResources, openCrisisResource, type Crisis
 import { enter, spring, timing, useBreath, usePressFeedback, useReducedMotion } from '../theme/motion';
 import { HIT, MOTION, R, resolveFont, rgba, SP, TYPE, W } from '../theme/theme';
 import type { Archetype, Go, ScreenName } from '../navigation/types';
+import { useBlockSwipeBack, useSceneFocused } from '../navigation/sceneContext';
 import { ARCHETYPE_COLORS, NAME_SUGGESTIONS } from '../data/config';
 import type { ApiVoice } from '../api';
 
@@ -64,14 +65,41 @@ function StepProgress({ phase, step }: { phase: Phase; step: number }) {
   );
 }
 
-/** Top bar for a numbered step: Back (when there is somewhere to go) and progress. */
-function StepBar({ onBack, phase, step }: { onBack?: () => void; phase: Phase; step: number }) {
-  return (
-    <TopBar
-      left={onBack ? <BackButton onPress={onBack} /> : undefined}
-      center={<StepProgress phase={phase} step={step} />}
-    />
-  );
+/** Top bar for a numbered step: Back (when there is somewhere to go) and progress.
+ *  `backDisabled` keeps Back in place but dimmed and inert, and says so to
+ *  VoiceOver, e.g. while the step waits on the server. */
+function StepBar({ onBack, backDisabled = false, phase, step }: {
+  onBack?: () => void; backDisabled?: boolean; phase: Phase; step: number;
+}) {
+  let back: React.ReactNode;
+  if (onBack && backDisabled) {
+    // BackButton has no disabled state; this is the same control with one.
+    back = <IconButton icon="back" label="Back" onPress={onBack} size={HIT} iconSize={24} haptic={false} disabled style={styles.backInert} />;
+  } else if (onBack) {
+    back = <BackButton onPress={onBack} />;
+  }
+  return <TopBar left={back} center={<StepProgress phase={phase} step={step} />} />;
+}
+
+// ScreenStack keeps covered screens mounted, and their UI-thread loops keep
+// running under the screen in front (its freeze only stops React renders).
+// A screen with ambient loops stops them once the screen over it has fully
+// arrived, not as soon as it starts to, because until then it is still in
+// view; it starts them again the moment it is uncovered.
+const COVER_SETTLE_MS = D.slower;
+
+function useInView(): boolean {
+  const focused = useSceneFocused();
+  const [hidden, setHidden] = useState(false);
+  useEffect(() => {
+    if (focused) {
+      setHidden(false);
+      return;
+    }
+    const t = setTimeout(() => setHidden(true), COVER_SETTLE_MS);
+    return () => clearTimeout(t);
+  }, [focused]);
+  return focused || !hidden;
 }
 
 /** The one heading recipe every step uses. */
@@ -175,6 +203,8 @@ export function S01_Splash({ go, goNew, booting = false }: { go: Go; goNew?: () 
   const burst = useSharedValue(0);
   const leave = useSharedValue(1);
   const leaving = useRef(false);
+  const enterTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (enterTimer.current) clearTimeout(enterTimer.current); }, []);
 
   const enterApp = () => (goNew ? goNew() : go('login'));
   const handleEnter = () => {
@@ -184,9 +214,10 @@ export function S01_Splash({ go, goNew, booting = false }: { go: Go; goNew?: () 
     haptic.light();
     pressScale.value = withSequence(withSpring(1.08, spring('snappy')), withSpring(1, spring('gentle')));
     burst.value = withTiming(1, timing(D.base));
-    leave.value = withDelay(D.fast, withTiming(0, timing(D.slow, 'accel'), finished => {
-      if (finished) scheduleOnRN(enterApp);
-    }));
+    // The press lands for a beat, then sign-in starts arriving while this
+    // fades: the router's cross-fade overlaps the fade instead of following it.
+    leave.value = withDelay(D.fast, withTiming(0, timing(D.base, 'accel')));
+    enterTimer.current = setTimeout(enterApp, D.fast);
   };
 
   const haloStyle = useAnimatedStyle(() => ({
@@ -262,8 +293,9 @@ export function S01_Splash({ go, goNew, booting = false }: { go: Go; goNew?: () 
                 </Reveal>
               ) : null
             ) : (
-              // A beat after the tagline, so the page settles before it asks for anything.
-              <Reveal key="enter" rise={false} delay={360}>
+              // Arrives with the tagline: the disc can be tapped from the
+              // start, so the hint shouldn't lag behind it.
+              <Reveal key="enter" rise={false} delay={120}>
                 {/* A bigger target for the same action; VoiceOver uses the disc. */}
                 <Pressable
                   onPress={handleEnter}
@@ -288,10 +320,19 @@ export function S01_Splash({ go, goNew, booting = false }: { go: Go; goNew?: () 
 // follow the scroll position on the UI thread, so nothing re-renders while it
 // spins. It reports a value only when it comes to rest, ticks a selection
 // haptic at every row, and is one adjustable element for VoiceOver.
+//
+// Only the rows around the centre are mounted (the year wheel has over a
+// hundred, each with its own UI-thread style). The window follows the wheel
+// in steps and reaches a few rows past what can be seen, so a fast spin
+// never runs off its edge.
 const WHEEL_MAX_SCALE = 1.35;
 const WHEEL_ACTIONS = [{ name: 'increment' }, { name: 'decrement' }];
 const WHEEL_FADE_TOP = [rgba(W.bg, 0.95), rgba(W.bg, 0)] as const;
 const WHEEL_FADE_BOTTOM = [rgba(W.bg, 0), rgba(W.bg, 0.95)] as const;
+/** Rows the wheel turns before the window re-centres on it. */
+const WINDOW_STEP = 3;
+/** Extra rows mounted beyond the visible ones, for the moment JS takes to catch up. */
+const WINDOW_SLACK = 3;
 
 interface WheelProps {
   /** Spoken name, e.g. "Birth month". */
@@ -307,8 +348,8 @@ interface WheelProps {
   style?: StyleProp<ViewStyle>;
 }
 
-const WheelRow = memo(function WheelRow({ text, index, y, rowH, placeholder }: {
-  text: string; index: number; y: SharedValue<number>; rowH: number; placeholder: boolean;
+const WheelRow = memo(function WheelRow({ text, index, y, rowH, top, placeholder }: {
+  text: string; index: number; y: SharedValue<number>; rowH: number; top: number; placeholder: boolean;
 }) {
   // One family and size throughout; emphasis comes from scale and fade.
   const style = useAnimatedStyle(() => {
@@ -319,13 +360,15 @@ const WheelRow = memo(function WheelRow({ text, index, y, rowH, placeholder }: {
     };
   });
   return (
-    <Animated.View style={[{ height: rowH }, styles.wheelRow, style]}>
+    <Animated.View style={[styles.wheelRow, { top, height: rowH }, style]}>
       <Txt variant="title3" maxScale={WHEEL_MAX_SCALE} numberOfLines={1} style={{ color: placeholder ? W.text3 : W.cream }}>
         {text}
       </Txt>
     </Animated.View>
   );
 });
+
+type ScrollEvent = NativeSyntheticEvent<NativeScrollEvent>;
 
 function DateWheel({ label, options, spoken, value, onChange, rowH, rows, style }: WheelProps) {
   const ref = useAnimatedRef<Animated.ScrollView>();
@@ -334,15 +377,67 @@ function DateWheel({ label, options, spoken, value, onChange, rowH, rows, style 
   const last = options.length - 1;
   const pad = rowH * Math.floor(rows / 2);
 
-  // The UI-thread handlers call back into JS through these stable functions,
-  // which read the latest props.
-  const latest = useRef({ value, onChange });
-  useEffect(() => { latest.current = { value, onChange }; });
+  // The rows mounted: those within `reach` of `windowAt`, which follows the
+  // wheel whenever it has turned WINDOW_STEP rows away.
+  const [windowAt, setWindowAt] = useState(value);
+  const reach = Math.floor(rows / 2) + WINDOW_STEP + WINDOW_SLACK;
+  const firstRow = Math.max(0, windowAt - reach);
+  const lastRow = Math.min(last, windowAt + reach);
+
+  // Snap points as offsets rather than an interval: Android truncates the
+  // interval to whole pixels and the error adds up row by row (with large
+  // text, enough by the far end of the year wheel to snap to the wrong
+  // year); each offset is truncated on its own, so it stays within a pixel.
+  const snaps = useMemo(() => Array.from({ length: last + 1 }, (_, i) => i * rowH), [last, rowH]);
+  // Where the wheel starts. Only read on mount: a changed contentOffset makes
+  // the native view jump there, and the effect below scrolls instead.
+  const [startOffset] = useState(() => ({ x: 0, y: value * rowH }));
+
+  // The native handlers call into these stable functions, which read the
+  // latest props.
+  const latest = useRef({ value, onChange, rowH, last });
+  useEffect(() => { latest.current = { value, onChange, rowH, last }; });
   const resting = useRef(value);
-  const [tick] = useState(() => () => haptic.selection());
-  const [settle] = useState(() => (index: number) => {
-    resting.current = index;
-    if (index !== latest.current.value) latest.current.onChange(index);
+  const [onDetent] = useState(() => (i: number) => {
+    haptic.selection();
+    setWindowAt(w => (Math.abs(i - w) >= WINDOW_STEP ? i : w));
+  });
+
+  // A value is reported only where the wheel comes to rest, and only after
+  // the user moved it: 'dragging' from the first touch, 'coasting' once the
+  // finger lifts, back to 'idle' when the wheel settles. Scrolls the wheel
+  // makes itself (following `value`) end while idle and report nothing.
+  const gesture = useRef<'idle' | 'dragging' | 'coasting'>('idle');
+  const [handlers] = useState(() => {
+    const rowAt = (offset: number) => {
+      const { rowH: h, last: end } = latest.current;
+      return Math.min(end, Math.max(0, Math.round(offset / h)));
+    };
+    const settle = (offset: number) => {
+      gesture.current = 'idle';
+      const index = rowAt(offset);
+      resting.current = index;
+      if (index !== latest.current.value) latest.current.onChange(index);
+    };
+    return {
+      onScrollBeginDrag: () => { gesture.current = 'dragging'; },
+      onScrollEndDrag: (e: ScrollEvent) => {
+        gesture.current = 'coasting';
+        // iOS says where the snap will land (Android doesn't, and always
+        // reports a momentum end after its snap). Settle now only when
+        // nothing more will move: let go with no speed, iOS stops on the
+        // nearest row. Otherwise wait for the momentum end, so a row the
+        // wheel merely passes is never reported (a month passed on the way
+        // would clamp the day).
+        const { contentOffset, targetContentOffset, velocity } = e.nativeEvent;
+        if (!targetContentOffset) return;
+        const coasts = (velocity?.y ?? 0) !== 0 && Math.abs(targetContentOffset.y - contentOffset.y) >= 0.5;
+        if (!coasts) settle(targetContentOffset.y);
+      },
+      onMomentumScrollEnd: (e: ScrollEvent) => {
+        if (gesture.current === 'coasting') settle(e.nativeEvent.contentOffset.y);
+      },
+    };
   });
 
   const onScroll = useAnimatedScrollHandler({
@@ -351,16 +446,8 @@ function DateWheel({ label, options, spoken, value, onChange, rowH, rows, style 
       const i = Math.min(last, Math.max(0, Math.round(e.contentOffset.y / rowH)));
       if (i !== detent.value) {
         detent.value = i;
-        scheduleOnRN(tick);
+        scheduleOnRN(onDetent, i);
       }
-    },
-    // Lifted on a row without a fling: no momentum phase will follow.
-    onEndDrag: e => {
-      if (Math.abs(e.velocity?.y ?? 0) > 0.05) return;
-      scheduleOnRN(settle, Math.min(last, Math.max(0, Math.round(e.contentOffset.y / rowH))));
-    },
-    onMomentumEnd: e => {
-      scheduleOnRN(settle, Math.min(last, Math.max(0, Math.round(e.contentOffset.y / rowH))));
     },
   });
 
@@ -372,6 +459,7 @@ function DateWheel({ label, options, spoken, value, onChange, rowH, rows, style 
     if (resting.current === value && !resized) return;
     resting.current = value;
     laidOutAt.current = rowH;
+    setWindowAt(value);
     const to = value * rowH;
     scheduleOnUI(() => {
       'worklet';
@@ -383,6 +471,13 @@ function DateWheel({ label, options, spoken, value, onChange, rowH, rows, style 
     const next = value + (e.nativeEvent.actionName === 'increment' ? 1 : -1);
     if (next >= 0 && next <= last) onChange(next);
   };
+
+  const visibleRows: React.ReactNode[] = [];
+  for (let i = firstRow; i <= lastRow; i++) {
+    visibleRows.push(
+      <WheelRow key={i} text={options[i]} index={i} y={y} rowH={rowH} top={pad + i * rowH} placeholder={i === 0} />,
+    );
+  }
 
   return (
     <View
@@ -398,17 +493,19 @@ function DateWheel({ label, options, spoken, value, onChange, rowH, rows, style 
       <Animated.ScrollView
         ref={ref}
         onScroll={onScroll}
+        onScrollBeginDrag={handlers.onScrollBeginDrag}
+        onScrollEndDrag={handlers.onScrollEndDrag}
+        // Also what makes Android send momentum events at all.
+        onMomentumScrollEnd={handlers.onMomentumScrollEnd}
         scrollEventThrottle={16}
         showsVerticalScrollIndicator={false}
-        snapToInterval={rowH}
+        snapToOffsets={snaps}
         decelerationRate="fast"
-        contentOffset={{ x: 0, y: value * rowH }}
-        contentContainerStyle={{ paddingVertical: pad }}
+        contentOffset={startOffset}
+        contentContainerStyle={{ height: pad * 2 + options.length * rowH }}
         importantForAccessibility="no-hide-descendants"
       >
-        {options.map((o, i) => (
-          <WheelRow key={i} text={o} index={i} y={y} rowH={rowH} placeholder={i === 0} />
-        ))}
+        {visibleRows}
       </Animated.ScrollView>
       <LinearGradient pointerEvents="none" colors={WHEEL_FADE_TOP} style={[styles.wheelFade, { top: 0, height: pad }]} />
       <LinearGradient pointerEvents="none" colors={WHEEL_FADE_BOTTOM} style={[styles.wheelFade, { bottom: 0, height: pad }]} />
@@ -856,11 +953,13 @@ const COMING_UP: { label: string; desc: string; icon: IconName; color: string }[
 ];
 
 export function S_Handoff({ go }: { go: Go }) {
-  const pulse = useBreath(2500, { rest: 1 });
+  // Stays mounted under archetype, voice and name; still while they cover it.
+  const inView = useInView();
+  const pulse = useBreath(2500, { rest: 1, paused: !inView });
   const nextDot = useAnimatedStyle(() => ({ opacity: 0.6 + pulse.value * 0.4, transform: [{ scale: 0.85 + pulse.value * 0.25 }] }));
 
   return (
-    <Screen ambientIntensity={1.4} ambientPulse>
+    <Screen ambientIntensity={1.4} ambientPulse={inView}>
       <TopBar left={<BackButton onPress={() => go('comm')} />} />
       <ScrollView style={styles.grow} contentContainerStyle={styles.handoffScroll} showsVerticalScrollIndicator={false}>
         <View
@@ -1185,7 +1284,8 @@ export function S07_Voice({ go, onPickVoice, apiVoices, voicesStatus, onRetryVoi
 // ─── S08 NAME ────────────────────────────────────────────────────────────
 // Creating the account (or, when adding one, the companion) happens here and
 // is awaited: Meet only opens once it exists. The router may itself move on
-// (under 15 → age, already set up → home) and resolve { ok: false }.
+// (under 15 → age, already set up → home) and resolve { ok: false } with no
+// message; every real failure carries one.
 export type PickNameResult = { ok: true } | { ok: false; message?: string };
 
 export function S08_Name({ go, archetype, onPickName }: {
@@ -1205,6 +1305,12 @@ export function S08_Name({ go, archetype, onPickName }: {
     return () => { mounted.current = false; };
   }, []);
 
+  // Nothing leaves while the account or companion is being made: going back
+  // mid-request would strand one that exists, and asking again would make a
+  // second. The router blocks Android back and its own swipe for the length
+  // of the request; this holds the swipe from the screen's side too.
+  useBlockSwipeBack(busy);
+
   const rename = (next: string) => {
     setName(next);
     if (error) setError(null);
@@ -1219,7 +1325,7 @@ export function S08_Name({ go, archetype, onPickName }: {
     try {
       result = await onPickName(trimmed);
     } catch {
-      result = { ok: false };
+      result = { ok: false, message: `Couldn't create ${trimmed}. Check your connection and try again.` };
     }
     if (!mounted.current) return;
     if (result.ok) {
@@ -1228,13 +1334,17 @@ export function S08_Name({ go, archetype, onPickName }: {
       return;
     }
     setBusy(false);
+    // No message: the router has already moved the user on (back to the
+    // birthday, or Home for an account that's already set up) and said why
+    // itself. Nothing failed here, so no error haptic or notice as this leaves.
+    if (!result.message) return;
     haptic.error();
-    setError(result.message ?? `Couldn't create ${trimmed}. Check your connection and try again.`);
+    setError(result.message);
   };
 
   return (
     <Screen>
-      <StepBar onBack={() => { if (!busy) go('voice'); }} phase="companion" step={3} />
+      <StepBar onBack={() => { if (!busy) go('voice'); }} backDisabled={busy} phase="companion" step={3} />
       <ScrollView
         style={styles.grow}
         contentContainerStyle={styles.stepScroll}
@@ -1293,6 +1403,8 @@ const SILENT_SPEAK_MS = 2600; // no clip: how long the greeting holds before the
 const CLIP_CAP_MS = 6000;     // a clip that never reports its end still moves on
 const WORD_STAGGER = 180;
 const GREETING_WORDS = GREETING_TEXT.split(' ');
+const ORB_SIZE = 180;
+const ORB_BOX = 2;            // the orb's layout box, as a multiple of its size
 
 function MeetWord({ word, delay }: { word: string; delay: number }) {
   const [entering] = useState(() => enter.fade.delay(delay));
@@ -1311,6 +1423,9 @@ export function S_Meet({ go, companion, accent = W.primary, voiceId }: {
   voiceId?: string;
 }) {
   const reduced = useReducedMotion();
+  // Stays mounted under the notification ask and the first chat; its orb and
+  // ambient loops stop while those cover it.
+  const inView = useInView();
   const { playingId, play } = useVoicePreview();
   const speaks = !!voiceId && hasVoicePreview(voiceId, 'greeting');
   const [step, setStep] = useState<'arriving' | 'speaking' | 'ready'>('arriving');
@@ -1322,9 +1437,17 @@ export function S_Meet({ go, companion, accent = W.primary, voiceId }: {
   }, []);
 
   useEffect(() => {
+    if (step === 'ready') {
+      // "Say hi" is the only way on, and it appears by itself once the
+      // greeting is over: tell VoiceOver it's there.
+      announce('Say hi, button');
+      return;
+    }
     if (step !== 'speaking') return;
     if (speaks && voiceId) {
-      play(voiceId, 'greeting');
+      // Nobody tapped for this, so it follows the silent switch: a phone on
+      // silent shows the captioned greeting without saying it out loud.
+      play(voiceId, 'greeting', 'auto');
       const cap = setTimeout(() => setStep('ready'), CLIP_CAP_MS);
       return () => clearTimeout(cap);
     }
@@ -1354,10 +1477,15 @@ export function S_Meet({ go, companion, accent = W.primary, voiceId }: {
   const showCompanion = step !== 'arriving';
 
   return (
-    <Screen ambientIntensity={2.4} ambientPulse ambientDrift>
+    <Screen ambientIntensity={2.4} ambientPulse={inView} ambientDrift={inView}>
       <View style={styles.meetStage}>
         <Animated.View style={orbIn} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
-          <Orb state={step === 'speaking' ? 'speaking' : 'idle'} size={180} accent={accent} />
+          {inView ? (
+            <Orb state={step === 'speaking' ? 'speaking' : 'idle'} size={ORB_SIZE} box={ORB_BOX} accent={accent} />
+          ) : (
+            // Covered: the orb and its loops go; the space it held stays.
+            <View style={styles.orbSpace} />
+          )}
         </Animated.View>
         <View style={styles.meetText}>
           {showCompanion ? (
@@ -1405,6 +1533,8 @@ const styles = StyleSheet.create({
   helper: { marginTop: SP.base, color: W.text2 },
   choices: { marginTop: SP.md2, gap: SP.sm2 },
   textLink: { minHeight: HIT, marginTop: SP.xs, alignItems: 'center', justifyContent: 'center' },
+  // BackButton's own offset, which lines the glyph up with the gutter.
+  backInert: { marginLeft: -10 },
 
   // Inputs: one fill and radius across onboarding.
   input: {
@@ -1448,7 +1578,8 @@ const styles = StyleSheet.create({
     position: 'absolute', left: SP.xs2, right: SP.xs2, borderRadius: R.md,
     backgroundColor: rgba(W.primary, 0.12), borderTopWidth: 1, borderBottomWidth: 1, borderColor: rgba(W.primary, 0.22),
   },
-  wheelRow: { alignItems: 'center', justifyContent: 'center' },
+  // Placed by index, so mounting and unmounting rows never moves the others.
+  wheelRow: { position: 'absolute', left: 0, right: 0, alignItems: 'center', justifyContent: 'center' },
   wheelFade: { position: 'absolute', left: 0, right: 0 },
 
   // S02
@@ -1527,6 +1658,7 @@ const styles = StyleSheet.create({
 
   // Meet
   meetStage: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: SP.xl },
+  orbSpace: { width: ORB_SIZE * ORB_BOX, height: ORB_SIZE * ORB_BOX },
   meetText: { alignItems: 'center', alignSelf: 'stretch', minHeight: 120 },
   meetName: { marginTop: -SP.lg, flexDirection: 'row', alignItems: 'center', gap: SP.sm2, maxWidth: '100%' },
   meetDot: { width: 8, height: 8, borderRadius: 4 },

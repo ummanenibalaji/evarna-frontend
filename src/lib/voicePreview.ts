@@ -16,6 +16,16 @@ import type * as ExpoAudio from 'expo-audio';
 
 export type VoiceClip = 'preview' | 'greeting';
 
+/**
+ * Why a clip is playing, which decides how it treats the phone's sound.
+ *   tap   the user tapped for it: plays even with the Ring/Silent switch on
+ *         silent, and ducks whatever else is playing.
+ *   auto  it plays by itself (the Meet greeting): follows the silent switch,
+ *         so a phone on silent stays silent, and mixes with other audio
+ *         instead of interrupting it.
+ */
+export type VoicePlayback = 'tap' | 'auto';
+
 /** What the greeting clip says, word for word, for captions and VoiceOver. */
 export const GREETING_TEXT = "Hi. It's really good to finally meet you.";
 
@@ -56,6 +66,36 @@ export function hasVoicePreview(voiceId: string, clip: VoiceClip = 'preview'): b
   return CLIPS[clip].has(voiceId) && loadAudio() !== null;
 }
 
+// iOS refuses to duck other audio when it also has to follow the silent
+// switch, so the quiet mode mixes instead.
+const SESSION_MODES: Record<VoicePlayback, Partial<ExpoAudio.AudioMode>> = {
+  tap: {
+    playsInSilentMode: true,
+    interruptionMode: 'duckOthers',
+    shouldPlayInBackground: false,
+    allowsRecording: false,
+  },
+  auto: {
+    playsInSilentMode: false,
+    interruptionMode: 'mixWithOthers',
+    shouldPlayInBackground: false,
+    allowsRecording: false,
+  },
+};
+
+// The audio session is app-wide, so the mode last asked for is too. It is
+// forgotten whenever a preview hook mounts, because a voice call since then
+// may have reconfigured the session behind this module's back.
+let session: { playback: VoicePlayback; ready: Promise<void> } | null = null;
+
+function sessionFor(A: typeof ExpoAudio, playback: VoicePlayback): Promise<void> {
+  if (session?.playback === playback) return session.ready;
+  const ready = A.setAudioModeAsync(SESSION_MODES[playback])
+    .catch(e => { console.warn('[VoicePreview] audio mode not applied:', e); });
+  session = { playback, ready };
+  return ready;
+}
+
 interface Owner {
   /** Stop without handing audio back: the new owner is about to play. */
   yieldTo: () => void;
@@ -77,7 +117,6 @@ function createPreview(setPlayingId: (id: string | null) => void) {
   // Bumped on every play/stop, so a play still waiting on the audio mode can
   // tell it has been superseded.
   let request = 0;
-  let modeReady: Promise<void> | null = null;
   let mounted = true;
 
   // `pause()` is what hands audio back to other apps: expo-audio deactivates
@@ -101,7 +140,7 @@ function createPreview(setPlayingId: (id: string | null) => void) {
 
   const owner: Owner = { yieldTo: () => halt(false) };
 
-  const play = (voiceId: string, clip: VoiceClip = 'preview') => {
+  const play = (voiceId: string, clip: VoiceClip = 'preview', playback: VoicePlayback = 'tap') => {
     const A = loadAudio();
     const source = CLIPS[clip].get(voiceId);
     if (!A || source === undefined) return;
@@ -111,17 +150,9 @@ function createPreview(setPlayingId: (id: string | null) => void) {
     const req = ++request;
     setPlayingId(voiceId);
 
-    // Previews must be audible with the silent switch on, and duck (then
-    // restore) whatever else is playing. Applied once per mount, because a
-    // call since the last mount may have reconfigured the session.
-    modeReady ??= A.setAudioModeAsync({
-      playsInSilentMode: true,
-      interruptionMode: 'duckOthers',
-      shouldPlayInBackground: false,
-      allowsRecording: false,
-    }).catch(e => { console.warn('[VoicePreview] audio mode not applied:', e); });
-
-    modeReady.then(() => {
+    // A tapped preview is heard even on silent; a clip nobody tapped for
+    // follows the switch (it still "plays", muted, and ends as usual).
+    sessionFor(A, playback).then(() => {
       if (req !== request || !mounted) return;
       releasePlayer(false);
       try {
@@ -141,7 +172,10 @@ function createPreview(setPlayingId: (id: string | null) => void) {
   return {
     play,
     stop: () => halt(true),
-    mount: () => { mounted = true; },
+    mount: () => {
+      mounted = true;
+      session = null;
+    },
     unmount: () => {
       mounted = false;
       halt(true);
@@ -153,11 +187,13 @@ function createPreview(setPlayingId: (id: string | null) => void) {
  * One clip at a time. `playingId` is the voice whose clip is playing (or
  * about to), and clears when the clip ends, fails or `stop()` is called.
  * Playing a voice again restarts it. `clip` picks the preview (default) or the
- * greeting. Playback stops and the player is released on unmount.
+ * greeting; `playback` says whether the user tapped for it (default) or it
+ * plays by itself (see VoicePlayback). Playback stops and the player is
+ * released on unmount.
  */
 export function useVoicePreview(): {
   playingId: string | null;
-  play: (voiceId: string, clip?: VoiceClip) => void;
+  play: (voiceId: string, clip?: VoiceClip, playback?: VoicePlayback) => void;
   stop: () => void;
 } {
   const [playingId, setPlayingId] = useState<string | null>(null);
