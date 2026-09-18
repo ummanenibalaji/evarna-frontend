@@ -1,91 +1,435 @@
-// Studio.tsx — S15 Studio Home, S16 Scenario Setup, S17 Active Session
-// (+ Session Summary sheet), S18 Character Creator. Ported from studio.jsx.
+// Studio.tsx — S15 Studio Home, S16 Scenario Setup, S17 Active Session (with
+// its summary and report sheets), S18 Character Creator.
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, {
+  forwardRef, memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore,
+} from 'react';
 import {
-  View, ScrollView, Pressable, TextInput, Animated, Easing,
-  LayoutChangeEvent, PanResponder,
+  ActionSheetIOS, Alert, Keyboard, Platform, Pressable, RefreshControl, ScrollView, StyleSheet, TextInput, View,
+  type AccessibilityActionEvent, type NativeScrollEvent, type NativeSyntheticEvent, type StyleProp,
+  type TextInputProps, type ViewStyle,
 } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
-import { BlurView } from 'expo-blur';
+import Animated, {
+  ReduceMotion, useAnimatedStyle, useSharedValue, withDelay, withSequence, withSpring,
+  withTiming, type WithTimingConfig,
+} from 'react-native-reanimated';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import { scheduleOnRN } from 'react-native-worklets';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
 import { Screen, TopBar } from '../components/Chrome';
-import { NavIcon, IconName } from '../components/NavIcon';
+import { useTabBarHeight } from '../components/BottomNav';
+import { NavIcon, type IconName } from '../components/NavIcon';
 import { Txt } from '../components/Txt';
-import { Pill, PrimaryButton, Toggle } from '../components/Atoms';
-import { Avatar, Waveform } from '../components/Avatar';
-import { AiNotice, useAiNoticeRepeat, BubbleMem, CapHitCard, ChatInput } from '../components/ChatBits';
+import {
+  BackButton, GlassFill, IconButton, InlineNotice, minTarget, Pill, PrimaryButton, ProgressDots, QuickReply,
+  Skeleton, Toggle,
+} from '../components/Atoms';
+import { Sheet } from '../components/Sheet';
+import { Avatar, Waveform, avatarColor } from '../components/Avatar';
+import {
+  AiNotice, useAiNoticeRepeat, BubbleMem, CapHitCard, ChatInput, TypingDots, type ChatInputHandle,
+} from '../components/ChatBits';
 import { aiNoticeText } from '../lib/aiNotice';
-import { dropRefusedTurn, restoreDraft } from '../lib/chatTurns';
+import { restoreDraft } from '../lib/chatTurns';
+import { haptic } from '../lib/haptics';
+import { hasVoicePreview, useVoicePreview } from '../lib/voicePreview';
+import { announce, useScreenReader } from '../hooks/useAccessibilityPrefs';
+import { canOpenCrisisResource, crisisResources, openCrisisResource, type CrisisResource } from '../data/crisis';
 import { messageLimitOf } from './Chat';
-import { W, alpha } from '../theme/theme';
+import { formatLastInteraction } from './Home';
+import { enter, exit, layout, spring, timing, usePressFeedback, useReducedMotion } from '../theme/motion';
+import { ELEV, HIT, MOTION, R, resolveFont, rgba, SP, TYPE, W } from '../theme/theme';
 import { SCENARIOS, Scenario } from '../data/config';
 import {
-  ApiGender, ApiMemory, ApiScenario, ApiStudioCharacter, ApiVoice,
-  createStudioCharacter, deleteMemory, endSession, getCharacterSessions,
+  ApiGender, ApiMemory, ApiScenario, ApiScenarioParam, ApiSession, ApiStudioCharacter, ApiTurn, ApiVoice, ReportReason,
+  createReport, createStudioCharacter, deleteMemory, deleteStudioCharacter, endSession, getCharacterSessions,
   getConversationTurns, getMemories, startSession,
 } from '../api';
-import { ApiError, streamConversation } from '../api/client';
-import { formatLastInteraction } from './Home';
+import {
+  ApiError, NetworkError, getAuthToken, isNetworkError, streamConversation, type SseErrorInfo,
+} from '../api/client';
 import { Go } from '../navigation/types';
+import { useTabReselect } from '../navigation/tabEvents';
+import { useSceneFocusRef } from '../navigation/sceneContext';
+
+const D = MOTION.duration;
+
+type LoadStatus = 'loading' | 'ready' | 'error';
 
 // The UI keeps male/female/neutral; the backend enum only knows nonbinary.
 type StudioGender = 'male' | 'female' | 'neutral';
 const API_GENDER: Record<StudioGender, ApiGender> = { male: 'male', female: 'female', neutral: 'nonbinary' };
+const GENDERS: readonly StudioGender[] = ['male', 'female', 'neutral'];
+const GENDER_LABEL: Record<StudioGender, string> = { male: 'Male', female: 'Female', neutral: 'Neutral' };
 
 // The backend voice catalog is tagged male/female only, so 'neutral' offers all of them.
 const voicesFor = (voices: ApiVoice[], g: StudioGender) =>
   g === 'neutral' ? voices : voices.filter(v => v.gender === g);
 
-// ponytail: ApiError keeps the backend's `code` but drops the 400 body's `field`,
-// so validation errors read generically. Widen ApiError if per-field highlighting matters.
-function createErrorMessage(e: unknown): string {
-  const code = e instanceof ApiError ? e.code : undefined;
-  if (code === 'STUDIO_LIMIT_REACHED') return "You've hit your Studio character limit. Delete one to make room.";
-  if (code === 'VALIDATION_ERROR') return 'The server rejected one of these fields. Check them and try again.';
-  return "Couldn't reach the server. Check your connection and try again.";
+// Backend limits (studio.routes.ts CreateStudioSchema).
+const NAME_MAX = 30;
+const BACKSTORY_MAX = 500;
+const REPORT_NOTE_MAX = 1000;
+
+// When the router passes no status, how long an empty list counts as loading
+// before the screen says it didn't arrive.
+const DATA_WAIT_MS = 8000;
+// A session that hasn't started by then fails its queued messages (with Retry).
+const SESSION_START_TIMEOUT_MS = 15_000;
+// The first send waits this long at most for history to say whether the
+// conversation being continued was a remembered one.
+const PREF_WAIT_MS = 3000;
+// How long "Memory forgotten · Undo" stays; longer while VoiceOver is talking.
+const UNDO_MS = 4000;
+const UNDO_MS_SCREEN_READER = 10_000;
+// Within this distance of the end, new text keeps the thread pinned.
+const NEAR_BOTTOM_PX = 80;
+// Earlier sessions whose turns are asked for together, after the newest.
+const HISTORY_BATCH = 3;
+// Earlier messages drawn at first, and how many more each time the reader
+// nears the top: a resumed thread can hold 100 turns, and mounting them all
+// at once as the screen slides in is a visible hitch.
+const HISTORY_PAGE = 30;
+// Keeps what is on screen in place while older messages mount above it.
+const KEEP_POSITION = { minIndexForVisible: 0 } as const;
+const NO_LINES: { label: string; value: string }[] = [];
+
+const SCENARIO_CARD_W = 160;
+const CONTINUE_CARD_W = 220;
+const ROW_GAP = SP.md;
+
+const DELETE_ACTIONS = [{ name: 'delete', label: 'Delete' }];
+
+// Session fields the ApiSession type doesn't declare but GET /sessions returns.
+type SessionWithMemory = ApiSession & { memory_enabled?: boolean };
+
+// ─── Handoffs between Studio screens ─────────────────────────────────────
+// The router carries only ids between these screens, so the setup a
+// scenario was started with (for S17's opening brief) and the character the
+// creator just made (so Studio home can show it at once) pass through here.
+interface SetupBrief {
+  lines: { label: string; value: string }[];
+  /** True until the first message: a setup left without one gets cleaned up. */
+  unused: boolean;
+}
+const setupBriefs = new Map<string, SetupBrief>();
+
+// The character the creator just made. Studio home stays mounted under the
+// creator, so it subscribes rather than reading this once at mount. It
+// belongs to the sign-in that made it: after a sign-out, or another
+// account's sign-in, the auth token no longer matches and it reads as none.
+// Studio home clears it once the server's list has the character.
+let justCreated: { token: string | null; character: ApiStudioCharacter } | null = null;
+const justCreatedListeners = new Set<() => void>();
+
+function setJustCreated(character: ApiStudioCharacter | null): void {
+  justCreated = character ? { token: getAuthToken(), character } : null;
+  justCreatedListeners.forEach(cb => cb());
 }
 
-// ─── Section header ──────────────────────────────────────────────────────
-function SectionHeader({ children, marginTop = 8 }: { children: React.ReactNode; marginTop?: number }) {
+function subscribeJustCreated(cb: () => void): () => void {
+  justCreatedListeners.add(cb);
+  return () => { justCreatedListeners.delete(cb); };
+}
+
+const readJustCreated = (): ApiStudioCharacter | null =>
+  (justCreated && justCreated.token === getAuthToken() ? justCreated.character : null);
+
+// ─── Copy for failures ───────────────────────────────────────────────────
+function createErrorMessage(e: unknown): string {
+  if (e instanceof ApiError) {
+    // The server names the real limit ("up to 20 Studio characters…").
+    if (e.code === 'STUDIO_LIMIT_REACHED') {
+      return e.serverMessage ?? "You've reached the Studio character limit. Delete a character in Studio to make room.";
+    }
+    if (e.code === 'VALIDATION_ERROR') return "Something here wasn't accepted. Check the details and try again.";
+    if (e.status === 429) return 'Too many tries just now. Wait a moment and try again.';
+  }
+  if (isNetworkError(e)) return "Can't reach Evarna. Check your connection and try again.";
+  return 'Something went wrong on our side. Try again in a moment.';
+}
+
+function sessionStartMessage(e: unknown): string {
+  if (isNetworkError(e)) return "Can't reach Evarna, so the session didn't start.";
+  if (e instanceof ApiError && e.status === 429) return 'Too many tries just now. Wait a moment, then retry.';
+  if (e instanceof ApiError && e.serverMessage) return e.serverMessage;
+  return "Couldn't start the session.";
+}
+
+/** Why a message didn't go, when that's known and useful. */
+function notSentReason(info?: SseErrorInfo): string | undefined {
+  if (info?.status === 429) return 'Too many messages at once.';
+  if (isNetworkError(info)) return 'Check your connection.';
+  return undefined;
+}
+
+// ─── Native confirmations ────────────────────────────────────────────────
+// Studio home is a tab root, and the floating tab bar draws above anything a
+// screen renders, so its menus use the system action sheet (which also
+// matches what iOS uses for destructive confirmations).
+function confirmDestructive(o: { title: string; message: string; confirmLabel: string; cancelLabel?: string; onConfirm: () => void }) {
+  const cancel = o.cancelLabel ?? 'Cancel';
+  haptic.warning();
+  if (Platform.OS === 'ios') {
+    ActionSheetIOS.showActionSheetWithOptions(
+      { title: o.title, message: o.message, options: [o.confirmLabel, cancel], destructiveButtonIndex: 0, cancelButtonIndex: 1, userInterfaceStyle: 'dark' },
+      i => { if (i === 0) o.onConfirm(); },
+    );
+    return;
+  }
+  Alert.alert(o.title, o.message, [{ text: cancel, style: 'cancel' }, { text: o.confirmLabel, style: 'destructive', onPress: o.onConfirm }]);
+}
+
+function chooseAction(o: { title: string; message?: string; actions: { label: string; onPress: () => void }[] }) {
+  if (Platform.OS === 'ios') {
+    const options = [...o.actions.map(a => a.label), 'Cancel'];
+    ActionSheetIOS.showActionSheetWithOptions(
+      { title: o.title, message: o.message, options, cancelButtonIndex: options.length - 1, userInterfaceStyle: 'dark' },
+      i => o.actions[i]?.onPress(),
+    );
+    return;
+  }
+  Alert.alert(o.title, o.message, [{ text: 'Cancel', style: 'cancel' }, ...o.actions.map(a => ({ text: a.label, onPress: a.onPress }))]);
+}
+
+// ─── Small hooks ─────────────────────────────────────────────────────────
+// Reanimated's layout-animation builders are made fresh on every read, so
+// each mount reads one and keeps it.
+const useOnce = <T,>(read: () => T): T => useState(read)[0];
+
+/** A function whose identity never changes and that always calls the latest
+ *  `fn`, for handlers handed to memoised children. */
+function useStableHandler<A extends unknown[], R>(fn: (...args: A) => R): (...args: A) => R {
+  const ref = useRef(fn);
+  ref.current = fn;
+  return useCallback((...args: A) => ref.current(...args), []);
+}
+
+// A fade is the calm alternative to movement, so it plays under Reduce Motion.
+function calm(ms: number): WithTimingConfig {
+  'worklet';
+  return { ...timing(ms), reduceMotion: ReduceMotion.Never };
+}
+
+/** The router's status when it gives one; otherwise data means ready, and an
+ *  empty list is loading until DATA_WAIT_MS passes, then an error. */
+function useLoadStatus(hasData: boolean, explicit?: LoadStatus): LoadStatus {
+  const [waited, setWaited] = useState(false);
+  useEffect(() => {
+    if (explicit || hasData) return;
+    const t = setTimeout(() => setWaited(true), DATA_WAIT_MS);
+    return () => clearTimeout(t);
+  }, [explicit, hasData]);
+  if (explicit) return explicit;
+  if (hasData) return 'ready';
+  return waited ? 'error' : 'loading';
+}
+
+// ─── Shared pieces ───────────────────────────────────────────────────────
+function SectionHeader({ children, marginTop = SP.sm }: { children: React.ReactNode; marginTop?: number }) {
   return (
-    <View style={{ paddingTop: marginTop, paddingHorizontal: 20, paddingBottom: 12 }}>
-      <Txt font="user" weight={600} style={{ fontSize: 11, color: W.text2, textTransform: 'uppercase', letterSpacing: 0.9 }}>
-        {children}
-      </Txt>
+    <View style={[styles.sectionHeader, { paddingTop: marginTop }]}>
+      <Txt variant="eyebrow" heading style={{ color: W.text2 }}>{children}</Txt>
     </View>
   );
 }
 
-function FieldLabel({ children }: { children: React.ReactNode }) {
+function FieldLabel({ children, note }: { children: React.ReactNode; note?: string }) {
   return (
-    <Txt font="user" weight={600} style={{ fontSize: 11, color: W.text2, textTransform: 'uppercase', letterSpacing: 0.9, marginBottom: 10 }}>
-      {children}
-    </Txt>
+    <View style={styles.fieldLabel}>
+      <Txt variant="eyebrow" style={{ color: W.text2, flexShrink: 1 }}>{children}</Txt>
+      {note ? <Txt variant="caption" style={{ color: W.text3 }}>{note}</Txt> : null}
+    </View>
   );
 }
 
-function ErrorNote({ children }: { children: React.ReactNode }) {
-  return <Txt font="user" style={{ fontSize: 12, color: W.danger, lineHeight: 17 }}>{children}</Txt>;
+/** A text input on the shared field recipe, with a focus ring. */
+const Field = forwardRef<TextInput, TextInputProps>(function Field({ style, onFocus, onBlur, ...props }, ref) {
+  const [focused, setFocused] = useState(false);
+  return (
+    <TextInput
+      ref={ref}
+      placeholderTextColor={W.placeholder}
+      maxFontSizeMultiplier={TYPE.callout.maxScale}
+      keyboardAppearance="dark"
+      selectionColor={W.primary}
+      {...props}
+      onFocus={e => { setFocused(true); onFocus?.(e); }}
+      onBlur={e => { setFocused(false); onBlur?.(e); }}
+      style={[styles.input, focused ? styles.inputFocused : null, style]}
+    />
+  );
+});
+
+function IconTile({ icon, accent, size }: { icon: string; accent: string; size: number }) {
+  return (
+    <View
+      style={{
+        width: size, height: size, borderRadius: Math.round(size * 0.3),
+        backgroundColor: rgba(accent, 0.12), borderWidth: 1, borderColor: rgba(accent, 0.25),
+        alignItems: 'center', justifyContent: 'center',
+      }}
+    >
+      <NavIcon name={icon as IconName} color={accent} size={Math.round(size * 0.55)} />
+    </View>
+  );
 }
 
-// Voice grid shared by S16 and S18. Ids are backend voice UUIDs, exactly like S07_Voice.
-function VoicePicker({ voices, voiceId, onPick }: { voices: ApiVoice[]; voiceId: string | null; onPick: (id: string) => void }) {
-  if (voices.length === 0) return <ErrorNote>Voices unavailable — check your connection.</ErrorNote>;
+/** A tappable card that scales under the finger. No haptic: these sit in
+ *  scroll views, where a touch-down buzz would fire on every scroll. */
+function PressCard({
+  onPress, onLongPress, style, contentStyle, children,
+  accessibilityLabel, accessibilityHint, accessibilityActions, onAccessibilityAction,
+}: {
+  onPress: () => void;
+  onLongPress?: () => void;
+  style?: StyleProp<ViewStyle>;
+  contentStyle?: StyleProp<ViewStyle>;
+  children: React.ReactNode;
+  accessibilityLabel?: string;
+  accessibilityHint?: string;
+  accessibilityActions?: { name: string; label?: string }[];
+  onAccessibilityAction?: (e: AccessibilityActionEvent) => void;
+}) {
+  const press = usePressFeedback({ haptic: false });
   return (
-    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+    <Animated.View style={[style, press.animatedStyle]}>
+      <Pressable
+        onPress={onPress}
+        onLongPress={onLongPress}
+        delayLongPress={350}
+        onPressIn={press.onPressIn}
+        onPressOut={press.onPressOut}
+        accessibilityRole="button"
+        accessibilityLabel={accessibilityLabel}
+        accessibilityHint={accessibilityHint}
+        accessibilityActions={accessibilityActions}
+        onAccessibilityAction={onAccessibilityAction}
+        style={[styles.grow, contentStyle]}
+      >
+        {children}
+      </Pressable>
+    </Animated.View>
+  );
+}
+
+// Icon + accent are local styling — the backend only names the scenario.
+const studioLook = (c: ApiStudioCharacter) =>
+  SCENARIOS.find(s => s.id === c.scenario_id) ?? { icon: 'sparkle', accent: W.secondary };
+
+// ─── Voice picker (S16, S18) ─────────────────────────────────────────────
+// Ids are backend voice UUIDs, exactly like S07_Voice. Picking a voice plays
+// its bundled sample when this build has one, as the iOS voice pickers do.
+// Memoised, with stable handlers from its screen: typing in a field beside it
+// no longer redraws every card (and its waveform) on each keystroke.
+const VoicePicker = memo(function VoicePicker({ voices, catalogSize, gender, voiceId, onPick, status, onRetry }: {
+  /** The voices for the chosen gender. */
+  voices: ApiVoice[];
+  /** How many voices the whole catalog has. */
+  catalogSize: number;
+  gender: StudioGender;
+  voiceId: string | null;
+  onPick: (id: string) => void;
+  status: LoadStatus;
+  onRetry?: () => void;
+}) {
+  const { playingId, play } = useVoicePreview();
+  const picked = useRef(voiceId);
+  picked.current = voiceId;
+  // One handler for every card, so a card only redraws when its own state changes.
+  const pick = useCallback((id: string) => {
+    if (picked.current !== id) haptic.selection();
+    onPick(id);
+    if (hasVoicePreview(id)) play(id);
+  }, [onPick, play]);
+
+  if (voices.length === 0) {
+    if (catalogSize > 0) {
+      return <InlineNotice tone="info" text={`No ${GENDER_LABEL[gender].toLowerCase()} voices yet. Try another option.`} />;
+    }
+    if (status === 'loading') {
+      return (
+        <View accessible accessibilityLabel="Loading voices" style={styles.voiceGrid}>
+          <Skeleton width="48%" height={116} radius={R.lg} />
+          <Skeleton width="48%" height={116} radius={R.lg} />
+        </View>
+      );
+    }
+    return (
+      <InlineNotice
+        tone="error"
+        text={status === 'error' ? (onRetry ? "Couldn't load voices." : "Couldn't load voices. Check your connection.") : 'No voices are available right now.'}
+        actionLabel={onRetry ? 'Retry' : undefined}
+        onAction={onRetry}
+      />
+    );
+  }
+
+  return (
+    <View accessibilityRole="radiogroup" accessibilityLabel="Voice" style={styles.voiceGrid}>
       {voices.map(v => (
-        <Pressable
+        <VoiceCard
           key={v.id}
-          onPress={() => onPick(v.id)}
-          style={{ width: '31.5%', backgroundColor: W.surface1, borderRadius: 12, padding: 10, alignItems: 'center', gap: 4, borderWidth: voiceId === v.id ? 2 : 0, borderColor: W.accent }}
-        >
-          <Waveform color={W.primary} size={24} />
-          <Txt font="user" weight={500} style={{ fontSize: 12, color: W.text }} numberOfLines={1}>{v.name}</Txt>
-        </Pressable>
+          voice={v}
+          selected={voiceId === v.id}
+          playing={playingId === v.id}
+          canPreview={hasVoicePreview(v.id)}
+          onPress={pick}
+        />
       ))}
     </View>
   );
-}
+});
+
+const VoiceCard = memo(function VoiceCard({ voice: v, selected, playing, canPreview, onPress }: {
+  voice: ApiVoice; selected: boolean; playing: boolean; canPreview: boolean; onPress: (id: string) => void;
+}) {
+  const press = usePressFeedback({ haptic: false });
+  return (
+    <Animated.View style={[styles.voiceCardOuter, press.animatedStyle]}>
+      <Pressable
+        onPress={() => onPress(v.id)}
+        onPressIn={press.onPressIn}
+        onPressOut={press.onPressOut}
+        accessibilityRole="radio"
+        accessibilityState={{ selected }}
+        accessibilityLabel={v.personality ? `${v.name}. ${v.personality}` : v.name}
+        accessibilityHint={canPreview ? 'Selects this voice and plays a sample' : undefined}
+        // The border is always drawn, so selecting never shifts the content.
+        style={[styles.voiceCard, { borderColor: selected ? W.primary : 'transparent' }]}
+      >
+        <View style={styles.rowBetween}>
+          <Waveform color={selected || playing ? W.primary : W.text3} size={28} animate={playing} />
+          {selected ? (
+            <View style={styles.checkBadge}>
+              <NavIcon name="check" color={W.onAccent} size={12} />
+            </View>
+          ) : null}
+        </View>
+        <Txt variant="callout" weight={600} numberOfLines={1}>{v.name}</Txt>
+        {v.personality ? <Txt variant="caption" numberOfLines={3} style={{ color: W.text2 }}>{v.personality}</Txt> : null}
+        {canPreview ? (
+          <Txt variant="caption" weight={500} style={{ color: playing ? W.primarySoft : W.text3 }}>
+            {playing ? 'Playing sample…' : 'Tap to hear'}
+          </Txt>
+        ) : null}
+      </Pressable>
+    </Animated.View>
+  );
+});
+
+const GenderPills = memo(function GenderPills({ value, onChange }: { value: StudioGender; onChange: (g: StudioGender) => void }) {
+  return (
+    <View accessibilityRole="radiogroup" accessibilityLabel="Voice gender" style={styles.genderRow}>
+      {GENDERS.map(g => (
+        <Pill key={g} size="sm" selected={value === g} onPress={() => onChange(g)} style={styles.flex1}>
+          {GENDER_LABEL[g]}
+        </Pill>
+      ))}
+    </View>
+  );
+});
 
 // ─── S15 STUDIO HOME ─────────────────────────────────────────────────────
 interface StudioHomeProps {
@@ -94,179 +438,374 @@ interface StudioHomeProps {
   setupScenario: (s: Scenario) => void;
   openCreator: () => void;
   resumeConvo: (c: ApiStudioCharacter) => void;
+  /** State of the characters list; without it the list is taken as ready. */
+  status?: LoadStatus;
+  onRetry?: () => void;
+  onRefresh?: () => Promise<void>;
+  /** Deletes a Studio character; defaults to DELETE /studio/characters/:id. */
+  onDeleteCharacter?: (id: string) => Promise<void>;
 }
 
-// Icon + accent are local styling — the backend only names the scenario.
-const studioLook = (c: ApiStudioCharacter) =>
-  SCENARIOS.find(s => s.id === c.scenario_id) ?? { icon: 'sparkle', accent: W.secondary };
+// Memoised: this tab root stays mounted, and live, under the screens it
+// opens, so it would otherwise redraw on every router render behind them.
+export const S15_StudioHome = memo(function S15_StudioHome({
+  characters, setupScenario, openCreator, resumeConvo, status = 'ready', onRetry, onRefresh, onDeleteCharacter,
+}: StudioHomeProps) {
+  const tabBarH = useTabBarHeight();
+  const insets = useSafeAreaInsets();
+  const [removed, setRemoved] = useState<ReadonlySet<string>>(() => new Set());
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  // The character the creator just made, shown from the create response
+  // until the router's refetch includes it, and pulsed once on arrival.
+  const fresh = useSyncExternalStore(subscribeJustCreated, readJustCreated);
 
-export function S15_StudioHome({ go, characters, setupScenario, openCreator, resumeConvo }: StudioHomeProps) {
-  // Studio stays open for every account, deliberately. Entitlement is real now
-  // and says `free` for almost everyone, so gating on it would lock a shipped
-  // feature nobody can buy their way out of — there is no purchase flow yet.
-  // Re-gate here when StoreKit lands.
-  const locked = false;
+  const listed = characters.filter(c => !removed.has(c._id));
+  const freshListed = !!fresh && characters.some(c => c._id === fresh._id);
+  useEffect(() => {
+    if (freshListed) setJustCreated(null);
+  }, [freshListed]);
+  const all = fresh && !freshListed && !removed.has(fresh._id) ? [...listed, fresh] : listed;
+
   // "Continue" is every studio character that has actually been talked to.
-  const activeConvos = characters.filter(c => !!c.last_interaction_at);
-  const startedScenarios = new Set(characters.map(c => c.scenario_id).filter(Boolean));
-  const customs = characters.filter(c => c.kind === 'custom');
+  const activeConvos = all.filter(c => !!c.last_interaction_at);
+  const customs = all.filter(c => c.kind === 'custom');
+  const showSkeleton = status === 'loading' && listed.length === 0;
+
+  const refresh = useCallback(async () => {
+    if (!onRefresh) return;
+    setRefreshing(true);
+    try {
+      await onRefresh();
+    } catch {
+      // The router reports a failed refresh through `status`.
+    } finally {
+      setRefreshing(false);
+    }
+  }, [onRefresh]);
+
+  const remove = async (c: ApiStudioCharacter) => {
+    setDeleteError(null);
+    setRemoved(s => new Set(s).add(c._id));
+    if (readJustCreated()?._id === c._id) setJustCreated(null);
+    try {
+      await (onDeleteCharacter ?? deleteStudioCharacter)(c._id);
+      announce(`${c.name} deleted.`);
+    } catch (e) {
+      // Already gone on the server: the goal is met.
+      if (e instanceof ApiError && e.status === 404) {
+        announce(`${c.name} deleted.`);
+        return;
+      }
+      setRemoved(s => {
+        const next = new Set(s);
+        next.delete(c._id);
+        return next;
+      });
+      haptic.error();
+      setDeleteError(`Couldn't delete ${c.name}. ${isNetworkError(e) ? 'Check your connection and try again.' : 'Try again in a moment.'}`);
+    }
+  };
+
+  const askDelete = (c: ApiStudioCharacter) => confirmDestructive({
+    title: `Delete ${c.name}?`,
+    message: `${c.name} will be removed from Studio, and you won't be able to go back to your conversations with them. This can't be undone.`,
+    confirmLabel: 'Delete character',
+    onConfirm: () => { void remove(c); },
+  });
+
+  const openScenario = (s: Scenario) => {
+    const existing = activeConvos.find(c => c.scenario_id === s.id);
+    if (!existing) return setupScenario(s);
+    const when = formatLastInteraction(existing.last_interaction_at);
+    chooseAction({
+      title: s.name,
+      message: when ? `Last session: ${when}.` : undefined,
+      actions: [
+        { label: 'Continue where you left off', onPress: () => resumeConvo(existing) },
+        { label: 'Start a new setup', onPress: () => setupScenario(s) },
+      ],
+    });
+  };
+
+  // A second tap on the Studio tab scrolls back to the top.
+  const scrollRef = useRef<ScrollView>(null);
+  useTabReselect('studio', () => scrollRef.current?.scrollTo({ y: 0, animated: true }));
 
   return (
-    <Screen>
+    <Screen tabBar>
       <TopBar
-        left={<Txt font="display" weight={700} style={{ fontSize: 22, color: W.text }}>Studio</Txt>}
-        right={
-          <Pressable onPress={() => (locked ? go('paywall') : openCreator())} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-            <NavIcon name="plus" color={W.accent} size={18} />
-            <Txt font="user" weight={500} style={{ fontSize: 13, color: W.accent }}>Create</Txt>
-          </Pressable>
-        }
+        left={<Txt variant="title2" weight={700} heading>Studio</Txt>}
+        right={<CreateButton onPress={openCreator} />}
       />
-      <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 16 }}>
-        {/* CONTINUE — active conversations. The list endpoint has no message
-            preview, so that line is dropped rather than filled with filler. */}
-        {!locked && activeConvos.length > 0 && (
+      <ScrollView
+        ref={scrollRef}
+        style={styles.flex1}
+        // Content scrolls on under the floating tab bar and clears it at the end.
+        contentContainerStyle={{ paddingBottom: tabBarH + SP.base }}
+        scrollIndicatorInsets={{ bottom: Math.max(0, tabBarH - insets.bottom) }}
+        refreshControl={onRefresh ? <RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={W.text2} /> : undefined}
+      >
+        {status === 'error' ? (
+          <InlineNotice
+            tone="error"
+            text={listed.length ? "Couldn't refresh your characters." : "Couldn't load your characters."}
+            actionLabel={onRetry ? 'Retry' : undefined}
+            onAction={onRetry}
+            style={styles.homeNotice}
+          />
+        ) : null}
+        {deleteError ? <InlineNotice tone="error" text={deleteError} style={styles.homeNotice} /> : null}
+
+        {/* CONTINUE — conversations in progress. The list endpoint has no
+            message preview, so that line is left out rather than invented. */}
+        {activeConvos.length > 0 ? (
           <>
             <SectionHeader>Continue</SectionHeader>
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
-              contentContainerStyle={{ gap: 12, paddingHorizontal: 20 }}
+              snapToInterval={CONTINUE_CARD_W + ROW_GAP}
+              snapToAlignment="start"
+              decelerationRate="fast"
+              contentContainerStyle={styles.cardRow}
             >
-              {activeConvos.map(c => {
-                const look = studioLook(c);
-                return (
-                  <Pressable
-                    key={c._id}
-                    onPress={() => resumeConvo(c)}
-                    style={{
-                      width: 220, borderRadius: 16, padding: 14, gap: 8, overflow: 'hidden',
-                      borderWidth: 1, borderColor: alpha(look.accent, '26'), backgroundColor: 'rgba(32,22,26,0.55)',
-                    }}
-                  >
-                    <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-                      <View style={{ width: 36, height: 36, borderRadius: 10, backgroundColor: alpha(look.accent, '1f'), borderWidth: 1, borderColor: alpha(look.accent, '40'), alignItems: 'center', justifyContent: 'center' }}>
-                        <NavIcon name={look.icon as IconName} color={look.accent} />
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <Txt font="user" weight={600} style={{ fontSize: 14, color: W.text }} numberOfLines={1}>{c.name}</Txt>
-                        <Txt font="user" style={{ fontSize: 11, color: W.text2 }}>{formatLastInteraction(c.last_interaction_at)}</Txt>
-                      </View>
-                    </View>
-                    {!!c.total_sessions && (
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                        <NavIcon name="sparkle" color={W.accent} size={14} />
-                        <Txt font="user" style={{ fontSize: 11, color: W.accent }}>
-                          {c.total_sessions} {c.total_sessions === 1 ? 'session' : 'sessions'}
-                        </Txt>
-                      </View>
-                    )}
-                  </Pressable>
-                );
-              })}
+              {activeConvos.map(c => (
+                <ContinueCard key={c._id} character={c} onPress={() => resumeConvo(c)} onOptions={() => askDelete(c)} />
+              ))}
             </ScrollView>
           </>
-        )}
+        ) : null}
 
-        {/* Ready-made scenarios */}
-        <SectionHeader marginTop={activeConvos.length ? 24 : 8}>Ready-made scenarios</SectionHeader>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 12, paddingHorizontal: 20 }}>
-          {SCENARIOS.map(s => {
-            const isStarted = startedScenarios.has(s.id);
-            return (
-              <Pressable
-                key={s.id}
-                onPress={() => {
-                  if (locked) return go('paywall');
-                  if (isStarted) {
-                    const existing = characters.find(c => c.scenario_id === s.id);
-                    if (existing) return resumeConvo(existing);
-                  }
-                  setupScenario(s);
-                }}
-                style={{
-                  width: 160, height: 200, borderRadius: 18, padding: 16, overflow: 'hidden',
-                  justifyContent: 'space-between',
-                  borderWidth: 1, borderColor: alpha(s.accent, '1f'), backgroundColor: 'rgba(32,22,26,0.55)',
-                }}
-              >
-                <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-                <View style={{ width: 40, height: 40, borderRadius: 12, backgroundColor: alpha(s.accent, '1f'), borderWidth: 1, borderColor: alpha(s.accent, '26'), alignItems: 'center', justifyContent: 'center' }}>
-                  <NavIcon name={s.icon as IconName} color={s.accent} />
-                </View>
-                <View>
-                  <Txt font="user" weight={600} style={{ fontSize: 14, color: W.text, marginBottom: 4 }}>{s.name}</Txt>
-                  <Txt font="user" style={{ fontSize: 11, color: W.text2, lineHeight: 15 }}>{s.desc}</Txt>
-                </View>
-                {isStarted && (
-                  <View style={{ position: 'absolute', top: 10, right: 10, backgroundColor: alpha(s.accent, '26'), paddingVertical: 2, paddingHorizontal: 8, borderRadius: 8 }}>
-                    <Txt font="user" weight={600} style={{ fontSize: 9, color: s.accent, letterSpacing: 0.4, textTransform: 'uppercase' }}>Continue</Txt>
-                  </View>
-                )}
-                {locked && (
-                  <View style={{ position: 'absolute', top: 12, right: 12, opacity: 0.7 }}>
-                    <NavIcon name="lock" color={W.text2} size={18} />
-                  </View>
-                )}
-              </Pressable>
-            );
-          })}
+        <SectionHeader marginTop={activeConvos.length ? SP.xl : SP.sm}>Ready-made scenarios</SectionHeader>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          snapToInterval={SCENARIO_CARD_W + ROW_GAP}
+          snapToAlignment="start"
+          decelerationRate="fast"
+          contentContainerStyle={styles.cardRow}
+        >
+          {SCENARIOS.map(s => (
+            <ScenarioCard
+              key={s.id}
+              scenario={s}
+              inProgress={activeConvos.some(c => c.scenario_id === s.id)}
+              onPress={() => openScenario(s)}
+            />
+          ))}
         </ScrollView>
 
-        {/* Your characters — custom ones only; the scenario characters live in
-            the row above. The list endpoint returns no backstory, so the old
-            one-line trait is dropped. */}
-        <SectionHeader marginTop={24}>Your characters</SectionHeader>
-        <View style={{ paddingHorizontal: 20 }}>
-          {locked ? (
-            <View style={{ backgroundColor: W.surface1, borderRadius: 16, padding: 16, gap: 10 }}>
-              <Txt font="user" style={{ fontSize: 14, color: W.text, lineHeight: 20 }}>Upgrade to Plus to create custom characters.</Txt>
-              <Pressable onPress={() => go('paywall')} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
-                <Txt font="user" style={{ fontSize: 13, color: W.secondary }}>See plans</Txt>
-                <NavIcon name="right" color={W.secondary} size={18} />
-              </Pressable>
-            </View>
-          ) : customs.length === 0 ? (
-            <Pressable
-              onPress={openCreator}
-              style={{ borderWidth: 1.5, borderColor: W.surface2, borderStyle: 'dashed', borderRadius: 16, paddingVertical: 24, paddingHorizontal: 16, alignItems: 'center', gap: 8 }}
-            >
-              <NavIcon name="plus" color={W.text2} />
-              <Txt font="user" style={{ fontSize: 13, color: W.text2 }}>Create a character</Txt>
-            </Pressable>
+        {/* Your characters — custom ones only; scenario runs live in the rows above. */}
+        <SectionHeader marginTop={SP.xl}>Your characters</SectionHeader>
+        <View style={styles.gutter}>
+          {customs.length === 0 && !showSkeleton ? (
+            // After a failed load the notice above says so; "create your first"
+            // would claim there are none.
+            status === 'error' ? null : <CreateFirstCard onPress={openCreator} />
           ) : (
-            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
+            <View
+              accessible={showSkeleton && customs.length === 0}
+              accessibilityLabel={showSkeleton && customs.length === 0 ? 'Loading your characters' : undefined}
+              style={styles.tileGrid}
+            >
               {customs.map(c => (
-                <Pressable key={c._id} onPress={() => resumeConvo(c)} style={{ width: '48%', backgroundColor: W.surface1, borderRadius: 16, padding: 14 }}>
-                  <Avatar name={c.name} color={W.secondary} size={40} />
-                  <Txt font="user" weight={500} style={{ marginTop: 10, fontSize: 14, color: W.text }} numberOfLines={1}>{c.name}</Txt>
-                </Pressable>
+                <CharacterTile
+                  key={c._id}
+                  character={c}
+                  highlight={c._id === fresh?._id}
+                  onPress={() => resumeConvo(c)}
+                  onOptions={() => askDelete(c)}
+                />
               ))}
-              <Pressable
-                onPress={openCreator}
-                style={{ width: '48%', minHeight: 96, borderWidth: 1.5, borderColor: W.surface2, borderStyle: 'dashed', borderRadius: 16, padding: 14, alignItems: 'center', justifyContent: 'center', gap: 6 }}
-              >
-                <NavIcon name="plus" color={W.text2} />
-                <Txt font="user" style={{ fontSize: 12, color: W.text2 }}>Add</Txt>
-              </Pressable>
+              {showSkeleton ? (
+                <>
+                  <Skeleton width="48%" height={112} radius={R.lg} />
+                  {customs.length === 0 ? <Skeleton width="48%" height={112} radius={R.lg} /> : null}
+                </>
+              ) : (
+                <AddTile onPress={openCreator} />
+              )}
             </View>
           )}
         </View>
       </ScrollView>
     </Screen>
   );
+});
+
+function CreateButton({ onPress }: { onPress: () => void }) {
+  const press = usePressFeedback({ scale: MOTION.press.scaleSmall });
+  return (
+    <Animated.View style={press.animatedStyle}>
+      <Pressable
+        onPress={onPress}
+        onPressIn={press.onPressIn}
+        onPressOut={press.onPressOut}
+        hitSlop={minTarget(88, 34)}
+        accessibilityRole="button"
+        accessibilityLabel="Create a character"
+        style={({ pressed }) => [styles.createButton, pressed ? styles.pressed : null]}
+      >
+        <NavIcon name="plus" color={W.primarySoft} size={16} />
+        <Txt variant="subhead" weight={600} maxScale={1.3} style={{ color: W.primarySoft }}>Create</Txt>
+      </Pressable>
+    </Animated.View>
+  );
+}
+
+function ContinueCard({ character: c, onPress, onOptions }: { character: ApiStudioCharacter; onPress: () => void; onOptions: () => void }) {
+  const look = studioLook(c);
+  const when = formatLastInteraction(c.last_interaction_at);
+  const sessions = c.total_sessions ? `${c.total_sessions} ${c.total_sessions === 1 ? 'session' : 'sessions'}` : '';
+  return (
+    <PressCard
+      onPress={onPress}
+      onLongPress={() => { haptic.medium(); onOptions(); }}
+      accessibilityLabel={[c.name, when, sessions].filter(Boolean).join(', ')}
+      accessibilityHint="Continues the conversation"
+      accessibilityActions={DELETE_ACTIONS}
+      onAccessibilityAction={e => { if (e.nativeEvent.actionName === 'delete') onOptions(); }}
+      style={{ width: CONTINUE_CARD_W }}
+      contentStyle={[styles.glassCard, styles.continueCard, { borderColor: rgba(look.accent, 0.15) }]}
+    >
+      <View style={styles.rowCenter}>
+        {c.kind === 'custom'
+          ? <Avatar name={c.name} glyph="initials" color={avatarColor(c._id)} size={36} breathe={false} />
+          : <IconTile icon={look.icon} accent={look.accent} size={36} />}
+        <View style={styles.shrink}>
+          <Txt variant="callout" weight={600} numberOfLines={1}>{c.name}</Txt>
+          {when ? <Txt variant="caption" numberOfLines={1} style={{ color: W.text2 }}>{when}</Txt> : null}
+        </View>
+        <IconButton icon="kebab" label={`More options for ${c.name}`} onPress={onOptions} size={32} iconSize={18} tint={W.text2} haptic={false} />
+      </View>
+      {sessions ? (
+        <View style={styles.rowTight}>
+          <NavIcon name="chat" color={W.text3} size={14} />
+          <Txt variant="caption" style={{ color: W.text2 }}>{sessions}</Txt>
+        </View>
+      ) : null}
+    </PressCard>
+  );
+}
+
+function ScenarioCard({ scenario: s, inProgress, onPress }: { scenario: Scenario; inProgress: boolean; onPress: () => void }) {
+  return (
+    <PressCard
+      onPress={onPress}
+      accessibilityLabel={`${s.name}. ${s.desc}${inProgress ? '. In progress' : ''}`}
+      accessibilityHint={inProgress ? 'Continue it or start a new setup' : 'Opens the setup'}
+      style={{ width: SCENARIO_CARD_W }}
+      contentStyle={[styles.glassCard, styles.scenarioCard, { borderColor: rgba(s.accent, 0.12) }]}
+    >
+      <View style={styles.rowBetween}>
+        <IconTile icon={s.icon} accent={s.accent} size={40} />
+        {inProgress ? (
+          <View style={[styles.badge, { backgroundColor: rgba(s.accent, 0.15) }]}>
+            <Txt variant="caption" weight={600} maxScale={1.2} style={{ color: s.accent }}>In progress</Txt>
+          </View>
+        ) : null}
+      </View>
+      <View style={styles.gapXs}>
+        <Txt variant="callout" weight={600}>{s.name}</Txt>
+        <Txt variant="footnote" style={{ color: W.text2 }}>{s.desc}</Txt>
+      </View>
+    </PressCard>
+  );
+}
+
+function CharacterTile({ character: c, highlight, onPress, onOptions }: {
+  character: ApiStudioCharacter; highlight: boolean; onPress: () => void; onOptions: () => void;
+}) {
+  const reduced = useReducedMotion();
+  const exiting = useOnce(() => exit.scaleOut);
+  const ring = useSharedValue(highlight ? 1 : 0);
+  const pop = useSharedValue(1);
+  const when = formatLastInteraction(c.last_interaction_at);
+
+  // One pulse for a character that was just created; the ring fades after.
+  // The tile arrives while the creator is still sliding off it, so both wait
+  // for that to finish.
+  useEffect(() => {
+    if (!highlight) return;
+    if (!reduced) {
+      pop.value = withDelay(D.slow, withSequence(withTiming(1.04, timing(D.fast, 'decel')), withSpring(1, spring('bouncy'))));
+    }
+    ring.value = withDelay(D.slow + D.slower, withTiming(0, calm(D.slower)));
+  }, [highlight, reduced, pop, ring]);
+
+  const popStyle = useAnimatedStyle(() => ({ transform: [{ scale: pop.value }] }));
+  const ringStyle = useAnimatedStyle(() => ({ opacity: ring.value }));
+
+  return (
+    <Animated.View layout={layout} exiting={exiting} style={[styles.tileOuter, popStyle]}>
+      <PressCard
+        onPress={onPress}
+        onLongPress={() => { haptic.medium(); onOptions(); }}
+        accessibilityLabel={when ? `${c.name}, ${when}` : c.name}
+        accessibilityHint="Continues the conversation"
+        accessibilityActions={DELETE_ACTIONS}
+        onAccessibilityAction={e => { if (e.nativeEvent.actionName === 'delete') onOptions(); }}
+        style={styles.grow}
+        contentStyle={styles.tile}
+      >
+        <View style={styles.rowBetween}>
+          <Avatar name={c.name} glyph="initials" color={avatarColor(c._id)} size={40} breathe={false} />
+          <IconButton icon="kebab" label={`More options for ${c.name}`} onPress={onOptions} size={32} iconSize={18} tint={W.text2} haptic={false} />
+        </View>
+        <Txt variant="callout" weight={600} numberOfLines={1} style={styles.tileName}>{c.name}</Txt>
+        <Txt variant="caption" numberOfLines={1} style={{ color: W.text2 }}>{when || 'Not started yet'}</Txt>
+        <Animated.View pointerEvents="none" style={[styles.tileRing, ringStyle]} />
+      </PressCard>
+    </Animated.View>
+  );
+}
+
+function AddTile({ onPress }: { onPress: () => void }) {
+  return (
+    <PressCard
+      onPress={onPress}
+      accessibilityLabel="Create a character"
+      style={styles.tileOuter}
+      contentStyle={[styles.dashed, styles.addTile]}
+    >
+      <NavIcon name="plus" color={W.text2} />
+      <Txt variant="footnote" weight={500} style={{ color: W.text2 }}>Add</Txt>
+    </PressCard>
+  );
+}
+
+function CreateFirstCard({ onPress }: { onPress: () => void }) {
+  return (
+    <PressCard onPress={onPress} accessibilityLabel="Create your own character" contentStyle={[styles.dashed, styles.createFirst]}>
+      <View style={styles.createFirstIcon}>
+        <NavIcon name="plus" color={W.primarySoft} />
+      </View>
+      <Txt variant="headline" style={styles.center}>Create your own character</Txt>
+      <Txt variant="subhead" style={[styles.center, { color: W.text2 }]}>
+        Give them a name, a voice and a personality, then talk it through.
+      </Txt>
+    </PressCard>
+  );
 }
 
 // ─── S16 SCENARIO SETUP ──────────────────────────────────────────────────
 // The form is rendered from GET /studio/scenarios: the server owns the param
 // definitions and the persona that consumes them, so there is nothing to drift.
-export function S16_ScenarioSetup({ go, scenario, def, apiVoices = [], onStart }: {
+export function S16_ScenarioSetup({
+  go, scenario, def, apiVoices = [], onStart, defStatus, onRetry, voicesStatus, onRetryVoices,
+}: {
   go: Go;
   scenario: Scenario;
   def?: ApiScenario;
   apiVoices?: ApiVoice[];
   onStart: (characterId: string, remember: boolean) => void;
+  /** State of the scenario definitions. */
+  defStatus?: LoadStatus;
+  /** Refetches the scenario definitions (and the voices, if those failed too). */
+  onRetry?: () => void;
+  voicesStatus?: LoadStatus;
+  onRetryVoices?: () => void;
 }) {
   const [gender, setGender] = useState<StudioGender>('female');
   const [voiceId, setVoiceId] = useState<string | null>(null);
@@ -276,13 +815,60 @@ export function S16_ScenarioSetup({ go, scenario, def, apiVoices = [], onStart }
   const [remember, setRemember] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const inputs = useRef<Record<string, TextInput | null>>({});
+  // Whether this setup is still the one the user is on. A slow create can
+  // outlive it (Back, Android's back button or an edge swipe while it is
+  // pending), and handing the character over then would replace whatever
+  // the user went to instead. The screen stops being in front the moment it
+  // starts to leave, well before it unmounts at the end of the slide. Read
+  // as a ref: only the late answer needs it, and useSceneFocused() would
+  // redraw the whole form in the commit that starts every push and pop.
+  const inFrontRef = useSceneFocusRef();
+  const alive = useRef(true);
+  const leftByBack = useRef(false);
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  const gone = () => !alive.current || !inFrontRef.current || leftByBack.current;
 
-  const voiceList = voicesFor(apiVoices, gender);
+  const leave = () => {
+    leftByBack.current = true;
+    go('studio');
+  };
+
+  const setupStatus = useLoadStatus(!!def, defStatus);
+  const voiceStatus = useLoadStatus(apiVoices.length > 0, voicesStatus);
+  const retryVoices = onRetryVoices ?? onRetry;
+
+  // Arriving after a failed load: ask again rather than wait for a tap.
+  useEffect(() => {
+    const setupFailed = !def && defStatus === 'error';
+    const voicesFailed = apiVoices.length === 0 && voicesStatus === 'error';
+    if (setupFailed) onRetry?.();
+    // One call when a single retry covers both.
+    if (voicesFailed && !(setupFailed && retryVoices === onRetry)) retryVoices?.();
+    // Mount only: later failures are the Retry button's job.
+  }, []);
+
+  const name = def?.name ?? scenario.name;
+  // Kept by identity between keystrokes, so the memoised voice grid can skip them.
+  const voiceList = useMemo(() => voicesFor(apiVoices, gender), [apiVoices, gender]);
   const pickedVoice = voiceList.some(v => v.id === voiceId) ? voiceId : voiceList[0]?.id ?? null;
-  const missingRequired = (def?.params ?? []).some(p => p.required && !(params[p.key] ?? '').trim());
+  const fields = def?.params ?? [];
+  const missing = fields.filter(p => p.required && !(params[p.key] ?? '').trim());
+  const textKeys = fields.filter(p => p.type === 'text').map(p => p.key);
+  const hint = !def ? null
+    : !pickedVoice ? 'Pick a voice to start.'
+    : missing.length ? `Still needed: ${missing.map(p => p.label).join(', ')}`
+    : null;
+
+  const setParam = useCallback((key: string, value: string) => setParams(v => ({ ...v, [key]: value })), []);
 
   const start = async () => {
-    if (!def || !pickedVoice) return;
+    if (!def || !pickedVoice || missing.length || busy) return;
+    Keyboard.dismiss();
+    leftByBack.current = false;
     setBusy(true);
     setErr(null);
     try {
@@ -293,107 +879,231 @@ export function S16_ScenarioSetup({ go, scenario, def, apiVoices = [], onStart }
         voice_id: pickedVoice,
         gender: API_GENDER[gender],
       });
+      if (gone()) {
+        // Left while it was being made: nobody will talk to it, and it would
+        // otherwise sit, unseen, in the Studio character limit.
+        deleteStudioCharacter(res.character_id).catch(() => {});
+        if (alive.current) setBusy(false);
+        return;
+      }
+      setupBriefs.set(res.character_id, {
+        lines: def.params
+          .map(p => ({ label: p.label, value: (params[p.key] ?? '').trim() }))
+          .filter(l => l.value),
+        unused: true,
+      });
       onStart(res.character_id, remember);
     } catch (e) {
-      console.warn('[Studio] scenario character create failed:', e);
-      setErr(createErrorMessage(e));
-    } finally {
+      if (!alive.current) return;
       setBusy(false);
+      if (gone()) return;
+      haptic.error();
+      setErr(createErrorMessage(e));
     }
   };
+
+  const rememberCopy = remember
+    ? `Your ${name} will remember this across sessions.`
+    : 'One-time session. Nothing from it is saved to memory.';
 
   return (
     <Screen>
       <TopBar
-        left={<Pressable onPress={() => go('studio')}><NavIcon name="back" color={W.text2} /></Pressable>}
+        // Back stays available while a start is pending, and abandons it.
+        left={<BackButton onPress={leave} />}
         center={
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-            <View style={{ width: 24, height: 24, borderRadius: 6, backgroundColor: alpha(scenario.accent, '26'), alignItems: 'center', justifyContent: 'center' }}>
-              <NavIcon name={scenario.icon as IconName} color={scenario.accent} size={14} />
-            </View>
-            <Txt font="comp" weight={600} style={{ fontSize: 16, color: W.text }}>{def?.name ?? scenario.name}</Txt>
+          <View accessible accessibilityRole="header" accessibilityLabel={name} style={styles.titleRow}>
+            <IconTile icon={scenario.icon} accent={scenario.accent} size={24} />
+            <Txt variant="headline" numberOfLines={1} style={styles.shrinkText}>{name}</Txt>
           </View>
         }
       />
-      <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 24, paddingTop: 12, paddingBottom: 16, gap: 20 }}>
+      <ScrollView
+        style={styles.flex1}
+        contentContainerStyle={styles.form}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
         <View>
           <FieldLabel>Voice gender</FieldLabel>
-          <View style={{ flexDirection: 'row', gap: 8 }}>
-            {(['male', 'female', 'neutral'] as const).map(g => (
-              <Pill key={g} active={gender === g} onPress={() => setGender(g)} style={{ flex: 1, height: 38 }} textStyle={{ fontSize: 13, textTransform: 'capitalize' }}>{g}</Pill>
-            ))}
-          </View>
+          <GenderPills value={gender} onChange={setGender} />
         </View>
         <View>
           <FieldLabel>Voice</FieldLabel>
-          <VoicePicker voices={voiceList} voiceId={pickedVoice} onPick={setVoiceId} />
+          <VoicePicker
+            voices={voiceList} catalogSize={apiVoices.length} gender={gender} voiceId={pickedVoice} onPick={setVoiceId}
+            status={voiceStatus} onRetry={retryVoices}
+          />
         </View>
-        {def ? def.params.map(p => (
-          <View key={p.key}>
-            <FieldLabel>{p.label}</FieldLabel>
-            {p.type === 'choice' ? (
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
-                {(p.options ?? []).map(opt => (
-                  <Pill
-                    key={opt}
-                    active={params[p.key] === opt}
-                    onPress={() => setParams(v => ({ ...v, [p.key]: opt }))}
-                    style={{ height: 36 }}
-                    textStyle={{ fontSize: 13 }}
-                  >{opt}</Pill>
-                ))}
+
+        {def ? fields.map(p => (
+          <ParamField
+            key={p.key}
+            param={p}
+            value={params[p.key] ?? ''}
+            next={textKeys[textKeys.indexOf(p.key) + 1]}
+            inputs={inputs}
+            onChange={setParam}
+          />
+        )) : setupStatus === 'loading' ? (
+          <View accessible accessibilityLabel="Loading the setup" style={styles.form0}>
+            {[0, 1].map(i => (
+              <View key={i} style={styles.gapSm}>
+                <Skeleton width={96} height={11} />
+                <Skeleton height={48} radius={R.md} />
               </View>
-            ) : (
-              <TextInput
-                value={params[p.key] ?? ''}
-                onChangeText={(v) => setParams(s => ({ ...s, [p.key]: v }))}
-                placeholder={p.placeholder}
-                placeholderTextColor={W.text2}
-                style={{ backgroundColor: W.surface1, color: W.text, borderWidth: 1, borderColor: W.surface2, height: 44, borderRadius: 12, paddingHorizontal: 14, fontFamily: 'Outfit_400Regular', fontSize: 14 }}
-              />
-            )}
+            ))}
           </View>
-        )) : (
-          <Txt font="user" style={{ fontSize: 13, color: W.text2 }}>Loading setup…</Txt>
+        ) : (
+          <InlineNotice
+            tone="error"
+            text={setupStatus === 'error' ? "Couldn't load this setup." : "This scenario isn't available right now."}
+            actionLabel={onRetry ? 'Retry' : undefined}
+            onAction={onRetry}
+          />
         )}
-        {/* Memory toggle — sent as `remember` on POST /sessions/start. Off means
-            the backend skips memory extraction when the session ends. */}
-        <View style={{ marginTop: 4, borderRadius: 14, padding: 14, paddingLeft: 16, flexDirection: 'row', alignItems: 'center', gap: 12, overflow: 'hidden', borderWidth: 1, borderColor: 'rgba(255,138,118,0.10)', backgroundColor: 'rgba(32,22,26,0.55)' }}>
-          <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-          <View style={{ width: 32, height: 32, borderRadius: 10, backgroundColor: remember ? alpha(W.accent, '1f') : 'rgba(139,143,163,0.10)', alignItems: 'center', justifyContent: 'center' }}>
-            <NavIcon name="sparkle" color={remember ? W.accent : W.text2} />
-          </View>
-          <View style={{ flex: 1 }}>
-            <Txt font="user" weight={500} style={{ fontSize: 14, color: W.text }}>Remember this session</Txt>
-            <Txt font="user" style={{ fontSize: 11, color: W.text2, lineHeight: 15, marginTop: 2 }}>
-              {remember
-                ? `Your ${def?.name ?? scenario.name} will remember this across sessions.`
-                : 'One-time session. Nothing from it is saved to memory.'}
-            </Txt>
-          </View>
-          <Toggle value={remember} onChange={setRemember} />
-        </View>
+
+        {/* Sent as `remember` on POST /sessions/start. Off means the backend
+            skips memory extraction when the session ends. */}
+        <RememberRow remember={remember} copy={rememberCopy} onChange={setRemember} />
       </ScrollView>
-      <View style={{ paddingHorizontal: 24, paddingTop: 12, paddingBottom: 16, gap: 10 }}>
-        {err && <ErrorNote>{err}</ErrorNote>}
+
+      <View style={styles.footer}>
+        {err ? <InlineNotice tone="error" text={err} /> : null}
+        {hint && !err ? <Txt variant="footnote" style={styles.hint}>{hint}</Txt> : null}
         <PrimaryButton
-          disabled={!def || !pickedVoice || missingRequired || busy}
+          accent={scenario.accent}
+          haptic="medium"
+          loading={busy}
+          disabled={!def || !pickedVoice || missing.length > 0}
           onPress={start}
-          style={{ backgroundColor: scenario.accent }}
+          accessibilityHint={hint ?? undefined}
         >
-          {busy ? 'Starting…' : 'Start session'}
+          Start session
         </PrimaryButton>
       </View>
     </Screen>
   );
 }
 
-// ─── S17 ACTIVE STUDIO SESSION ───────────────────────────────────────────
-// Same wiring as S14_Chat: one backend text session, SSE replies, session ended
-// on unmount. A studio character is just a character, so the endpoints match.
-type SMsg = { from: string; text: string; streaming?: boolean };
+/** One setup parameter. Memoised with a stable onChange, so a keystroke
+ *  redraws only the field being typed in. */
+const ParamField = memo(function ParamField({ param: p, value, next, inputs, onChange }: {
+  param: ApiScenarioParam;
+  value: string;
+  /** The text field Return moves on to, if any. */
+  next?: string;
+  inputs: React.RefObject<Record<string, TextInput | null>>;
+  onChange: (key: string, value: string) => void;
+}) {
+  const key = p.key;
+  // Made once per field, so the ref isn't detached and re-attached on every commit.
+  const setRef = useCallback((r: TextInput | null) => { inputs.current[key] = r; }, [inputs, key]);
+  const onChangeText = useCallback((v: string) => onChange(key, v), [onChange, key]);
+  return (
+    <View>
+      <FieldLabel note={p.required && !value.trim() ? 'Required' : undefined}>{p.label}</FieldLabel>
+      {p.type === 'choice' ? (
+        <View accessibilityRole="radiogroup" accessibilityLabel={p.label} style={styles.wrapRow}>
+          {(p.options ?? []).map(opt => (
+            <Pill key={opt} size="sm" selected={value === opt} onPress={() => onChange(key, opt)}>{opt}</Pill>
+          ))}
+        </View>
+      ) : (
+        <Field
+          ref={setRef}
+          value={value}
+          onChangeText={onChangeText}
+          placeholder={p.placeholder}
+          accessibilityLabel={p.required ? `${p.label}, required` : p.label}
+          autoCapitalize="sentences"
+          returnKeyType={next ? 'next' : 'done'}
+          submitBehavior={next ? 'submit' : 'blurAndSubmit'}
+          onSubmitEditing={() => { if (next) inputs.current[next]?.focus(); }}
+        />
+      )}
+    </View>
+  );
+});
 
-export function S17_StudioSession({ go, scenario, characterId, totalSessions = 0, remember, isMinor = false, textRemainingToday = null, textDailyCap = null, textResetsAt = null, textUpsell = true, onQuotaRefused, onCapUpgrade }: {
+/** The whole row is the switch. Memoised: it sits in the setup form, beside
+ *  fields that change on every keystroke. */
+const RememberRow = memo(function RememberRow({ remember, copy, onChange }: {
+  remember: boolean;
+  copy: string;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <Pressable
+      onPress={() => { haptic.selection(); onChange(!remember); }}
+      accessibilityRole="switch"
+      accessibilityState={{ checked: remember }}
+      accessibilityLabel="Remember this session"
+      accessibilityHint={copy}
+      style={({ pressed }) => [styles.rememberRow, pressed ? styles.pressedRow : null]}
+    >
+      <GlassFill intensity={20} />
+      <View style={[styles.rememberIcon, { backgroundColor: remember ? rgba(W.gold, 0.12) : rgba(W.text3, 0.1) }]}>
+        <NavIcon name={remember ? 'sparkle' : 'eye-off'} color={remember ? W.gold : W.text2} />
+      </View>
+      <View style={styles.shrink}>
+        <Txt variant="callout" weight={500}>Remember this session</Txt>
+        <Txt variant="footnote" style={styles.rememberCopy}>{copy}</Txt>
+      </View>
+      <Toggle value={remember} onChange={onChange} label="Remember this session" />
+    </Pressable>
+  );
+});
+
+// ─── S17 ACTIVE STUDIO SESSION ───────────────────────────────────────────
+// Same wiring as S14_Chat: one backend text session, SSE replies, session
+// ended on unmount. A studio character is just a character, so the endpoints
+// match. The session opens on the first send, not on arrival, so visits that
+// say nothing stop leaving empty sessions behind.
+type UserMsg = { id: string; from: 'user'; text: string; status?: 'failed'; reason?: string };
+type CompMsg = { id: string; from: 'comp'; text: string; turnId?: string; streaming?: boolean; cut?: 'reload' | 'reloading' | 'lost' };
+type NoticeMsg = { id: string; from: 'notice'; text: string };
+type CrisisMsg = { id: string; from: 'crisis'; text: string };
+type SMsg = UserMsg | CompMsg | NoticeMsg | CrisisMsg;
+
+interface PendingTurn { text: string; userId: string; replyId: string }
+
+let msgSeq = 0;
+const nextId = (prefix: string) => `${prefix}${++msgSeq}`;
+
+// Turns from an earlier session carry this id prefix; this visit's use u/r/n.
+const HISTORY_ID = 'h';
+const isHistory = (m: SMsg) => m.id.startsWith(HISTORY_ID);
+
+function updateMsg<K extends SMsg['from']>(
+  list: SMsg[], id: string, from: K, fn: (m: Extract<SMsg, { from: K }>) => SMsg,
+): SMsg[] {
+  return list.map(m => (m.id === id && m.from === from ? fn(m as Extract<SMsg, { from: K }>) : m));
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new NetworkError('Timed out', true)), ms);
+    p.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
+  });
+}
+
+const wait = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+
+// Openers for a brand-new thread, sent as the user's first line.
+const STARTERS: Record<string, string[]> = {
+  interview: ['Start the interview', 'Ask me a tough one first'],
+  difficult: ['You start the conversation', "Let's begin"],
+  debate: ['Open with your strongest argument', 'Ask me where I stand'],
+  story: ['Set the opening scene', 'Surprise me'],
+  language: ['Start with something simple', 'Ask me about my day'],
+};
+const CUSTOM_STARTERS = ['Tell me about yourself', 'What should we talk about?'];
+
+export function S17_StudioSession({
+  go, scenario, characterId, totalSessions = 0, remember: rememberProp = true, isMinor = false,
+  textRemainingToday = null, textDailyCap = null, textResetsAt = null, textUpsell = true, onQuotaRefused, onCapUpgrade,
+}: {
   go: Go; scenario: Scenario; characterId?: string; totalSessions?: number; remember?: boolean;
   /** Known minors get the break reminder California requires. */
   isMinor?: boolean;
@@ -406,164 +1116,465 @@ export function S17_StudioSession({ go, scenario, characterId, totalSessions = 0
   onQuotaRefused?: () => void;
   onCapUpgrade?: () => void;
 }) {
+  const [brief] = useState(() => (characterId ? setupBriefs.get(characterId) : undefined));
   const [msgs, setMsgs] = useState<SMsg[]>([]);
-  useAiNoticeRepeat(() => setMsgs(m => [...m, { from: 'notice', text: aiNoticeText(scenario.name, isMinor, true) }]));
-  const [draft, setDraft] = useState('');
+  const msgsRef = useRef(msgs);
+  msgsRef.current = msgs;
+  useAiNoticeRepeat(() => setMsgs(m => [...m, { id: nextId('n'), from: 'notice', text: aiNoticeText(scenario.name, isMinor, true) }]));
+
+  // The draft lives in the message box (ChatInput keeps it when given
+  // onSubmit), so typing redraws only the box, never the thread above it.
+  const composer = useRef<ChatInputHandle>(null);
   const [capRefused, setCapRefused] = useState<{ message?: string; planCap: boolean } | null>(null);
   const capHit = capRefused != null || (textRemainingToday != null && textRemainingToday <= 0);
-  const [showSummary, setShowSummary] = useState(false);
+  const [history, setHistory] = useState<LoadStatus>(characterId ? 'loading' : 'ready');
+  const [remember, setRememberState] = useState(rememberProp);
+  // The memory choice is sent with the session request, so it can change
+  // only until then (and again if that request fails).
+  const [memoryLocked, setMemoryLocked] = useState(false);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const [hadTurn, setHadTurn] = useState(false);
   const [memoryCount, setMemoryCount] = useState<number | null>(null);
+  const [showSummary, setShowSummary] = useState(false);
+  const [reportTurn, setReportTurn] = useState<string | null>(null);
+  const [unseen, setUnseen] = useState(false);
+  // How many of the earlier session's messages are drawn, counted back from
+  // the newest (see HISTORY_PAGE).
+  const [historyShown, setHistoryShown] = useState(HISTORY_PAGE);
+
+  const mounted = useRef(true);
   const scrollRef = useRef<ScrollView>(null);
-
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const nearBottom = useRef(true);
+  const rememberRef = useRef(rememberProp);
+  const rememberTouched = useRef(false);
   const sessionRef = useRef<string | null>(null);
+  const startRef = useRef<Promise<string> | null>(null);
+  const requested = useRef(false);
+  const historyGate = useRef<Promise<void>>(Promise.resolve());
+  const queue = useRef<PendingTurn[]>([]);
+  const turnBusy = useRef(false);
   const abortRef = useRef<AbortController | null>(null);
-  // Typed before the session id landed — streamed the moment it does.
-  const pendingRef = useRef<string | null>(null);
+  const attempted = useRef(false);
 
-  const finishStreaming = (patch: Partial<SMsg>) => {
-    setMsgs(m => {
-      const updated = [...m];
-      const last = updated[updated.length - 1];
-      if (last?.streaming) updated[updated.length - 1] = { ...last, ...patch, streaming: false };
-      return updated;
-    });
+  // What the continued conversation was set to wins over the router's
+  // default, unless the user has already chosen here or the session has
+  // been asked for.
+  const adoptServerRemember = (v: boolean) => {
+    if (rememberTouched.current || requested.current) return;
+    rememberRef.current = v;
+    setRememberState(v);
   };
 
-  const runTurn = (sid: string, text: string) => {
-    abortRef.current?.abort();
-    abortRef.current = streamConversation(
-      { session_id: sid, message: text },
-      {
-        onChunk: (content) => {
-          setMsgs(m => {
-            const updated = [...m];
-            const last = updated[updated.length - 1];
-            if (last?.streaming) updated[updated.length - 1] = { ...last, text: last.text + content };
-            return updated;
-          });
-        },
-        onDone: () => finishStreaming({}),
-        onCrisis: () => { finishStreaming({}); go('crisis'); },
-        onError: (e, info) => {
-          const limited = messageLimitOf(info);
-          if (limited) {
-            // Same limits as the companion chat, and the same rule: give the
-            // typed line back rather than losing it inside a fake reply.
-            setMsgs(m => dropRefusedTurn(m, text));
-            setDraft(d => restoreDraft(d, text));
-            setCapRefused(limited);
-            onQuotaRefused?.();
-            return;
-          }
-          console.warn('[Studio] stream error:', e);
-          finishStreaming({ text: "(Couldn't reach the server — please try again.)" });
-        },
-      },
-    );
+  const changeRemember = (v: boolean) => {
+    rememberTouched.current = true;
+    rememberRef.current = v;
+    setRememberState(v);
+    announce(v ? 'This session will be remembered.' : 'One-time session. Nothing from it will be saved.');
   };
 
-  useEffect(() => {
-    if (sessionId && pendingRef.current) {
-      const text = pendingRef.current;
-      pendingRef.current = null;
-      runTurn(sessionId, text);
-    }
-  }, [sessionId]);
-
-  useEffect(() => {
+  // Resume where the user left off: the newest earlier session that has turns.
+  const loadHistory = useCallback(async (): Promise<void> => {
     if (!characterId) return;
-    let mounted = true;
-    startSession(characterId, 'text', remember)
-      .then(res => {
-        if (!mounted) return;
-        setSessionId(res.session_id);
-        sessionRef.current = res.session_id;
-      })
-      .catch(e => {
-        console.warn('[Studio] session start failed:', e);
-        if (!mounted) return;
-        if (pendingRef.current) {
-          pendingRef.current = null;
-          finishStreaming({ text: "(Couldn't reach the server — please try again.)" });
+    setHistory('loading');
+    // This visit's own session is never "earlier": its turns are already in
+    // the thread. Only it can have turns from this visit, and it has an id
+    // before its first message goes, so checking the id after each answer
+    // is enough (a Retry, or a slow list, can arrive after it exists).
+    const earlierSession = (id: string) => id !== sessionRef.current;
+    try {
+      const { sessions } = await getCharacterSessions(characterId);
+      if (!mounted.current) return;
+      const candidates = (sessions as SessionWithMemory[]).filter(s => earlierSession(s._id));
+      // Newest first, stopping at the first with turns. That is nearly always
+      // the newest (sessions now open on the first message); characters from
+      // builds that opened one per visit have runs of empty ones, so after the
+      // first the rest are asked for a few at a time. Answers are read in
+      // order: a newer one failing means the resume point is unknown, but one
+      // behind an answer that's already found doesn't matter.
+      let found: { session: SessionWithMemory; turns: ApiTurn[] } | null = null;
+      for (let i = 0; i < candidates.length && !found;) {
+        const batch = candidates.slice(i, i + (i === 0 ? 1 : HISTORY_BATCH));
+        i += batch.length;
+        const requests = batch.map(s => getConversationTurns(s._id).then(r => r.turns));
+        requests.forEach(r => { r.catch(() => {}); });
+        for (let j = 0; j < batch.length && !found; j++) {
+          const turns = await requests[j];
+          if (!mounted.current) return;
+          if (turns.length && earlierSession(batch[j]._id)) found = { session: batch[j], turns };
         }
-      });
-    return () => {
-      mounted = false;
-      abortRef.current?.abort();
-      if (sessionRef.current) {
-        endSession(sessionRef.current).catch(() => {});
-        sessionRef.current = null;
       }
-    };
-  }, [characterId, remember]);
-
-  // Resume where the user left off: newest session that actually has turns.
-  useEffect(() => {
-    if (!characterId) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const { sessions } = await getCharacterSessions(characterId);
-        for (const s of sessions) {
-          const { turns } = await getConversationTurns(s._id);
-          if (cancelled) return;
-          if (turns.length === 0) continue;
-          setMsgs(turns.map(t => ({ from: t.role === 'user' ? 'user' : 'comp', text: t.content_text })));
-          return;
-        }
-      } catch { /* no history — start clean */ }
-    })();
-    return () => { cancelled = true; };
+      const basis = found?.session ?? candidates[0];
+      if (typeof basis?.memory_enabled === 'boolean') adoptServerRemember(basis.memory_enabled);
+      if (found) {
+        const earlier = found.turns.map((t): SMsg => (t.role === 'user'
+          ? { id: `${HISTORY_ID}${t._id}`, from: 'user', text: t.content_text }
+          : { id: `${HISTORY_ID}${t._id}`, from: 'comp', text: t.content_text, turnId: t._id }));
+        // Merge rather than replace: anything sent while this loaded stays, after it.
+        setMsgs(m => (m.some(isHistory) ? m : [...earlier, ...m]));
+      }
+      setHistory('ready');
+    } catch {
+      if (mounted.current) setHistory('error');
+    }
+    // adoptServerRemember only touches refs and a state setter.
   }, [characterId]);
+
+  useEffect(() => {
+    historyGate.current = loadHistory();
+  }, [loadHistory]);
 
   useEffect(() => {
     if (!characterId) return;
     let cancelled = false;
     getMemories(characterId)
       .then(ms => { if (!cancelled) setMemoryCount(ms.length); })
-      .catch(() => {});
+      .catch(() => { /* the banner just leaves the count out */ });
     return () => { cancelled = true; };
   }, [characterId]);
 
-  useEffect(() => { scrollRef.current?.scrollToEnd({ animated: true }); }, [msgs]);
+  // Teardown, once, with what this visit knew at mount.
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      abortRef.current?.abort();
+      if (sessionRef.current) endSession(sessionRef.current).catch(() => {});
+      // A setup started and then left without a word would otherwise sit,
+      // unseen, in the 20-character Studio limit.
+      if (characterId && brief?.unused && !attempted.current) {
+        setupBriefs.delete(characterId);
+        deleteStudioCharacter(characterId).catch(() => {});
+      }
+    };
+  }, []);
 
-  const send = () => {
-    if (!draft.trim() || !characterId) return;
-    const text = draft.trim();
+  // ── Session ─────────────────────────────────────────────────────────
+  const ensureSession = (): Promise<string> => {
+    if (sessionRef.current) return Promise.resolve(sessionRef.current);
+    if (!startRef.current && characterId) {
+      const cid = characterId;
+      const attempt = Promise.race([historyGate.current, wait(PREF_WAIT_MS)])
+        .then(() => {
+          requested.current = true;
+          setMemoryLocked(true);
+          return startSession(cid, 'text', rememberRef.current);
+        })
+        .then(res => {
+          if (!mounted.current) {
+            endSession(res.session_id).catch(() => {});
+            throw new Error('Screen closed');
+          }
+          sessionRef.current = res.session_id;
+          return res.session_id;
+        });
+      startRef.current = attempt;
+      attempt.then(
+        () => { if (startRef.current === attempt) startRef.current = null; },
+        () => {
+          if (startRef.current === attempt) startRef.current = null;
+          // No session came of it, so the memory choice is open again.
+          if (!sessionRef.current && mounted.current) {
+            requested.current = false;
+            setMemoryLocked(false);
+          }
+        },
+      );
+    }
+    if (!startRef.current) return Promise.reject(new Error('No character'));
+    // A start that outlives the timeout still lands in sessionRef for the retry.
+    return withTimeout(startRef.current, SESSION_START_TIMEOUT_MS);
+  };
+
+  // Turns go out one at a time, in order; each waits for the one before.
+  const pump = () => {
+    if (turnBusy.current) return;
+    const turn = queue.current[0];
+    if (!turn) return;
+    turnBusy.current = true;
+    ensureSession().then(
+      sid => { if (mounted.current) runTurn(sid, turn); },
+      e => {
+        if (!mounted.current) return;
+        const failed = queue.current.splice(0);
+        turnBusy.current = false;
+        const replyIds = new Set(failed.map(t => t.replyId));
+        const userIds = new Set(failed.map(t => t.userId));
+        setMsgs(m => m
+          .filter(x => !replyIds.has(x.id))
+          .map((x): SMsg => (x.from === 'user' && userIds.has(x.id) ? { ...x, status: 'failed', reason: undefined } : x)));
+        setSessionError(sessionStartMessage(e));
+        haptic.error();
+      },
+    );
+  };
+
+  const finishTurn = () => {
+    queue.current.shift();
+    turnBusy.current = false;
+    pump();
+  };
+
+  const runTurn = (sid: string, turn: PendingTurn) => {
+    let received = false;
+    // The whole reply, so VoiceOver can read it once it has finished, as the
+    // companion chat does.
+    let acc = '';
+    abortRef.current = streamConversation(
+      { session_id: sid, message: turn.text },
+      {
+        onChunk: content => {
+          if (!received) {
+            received = true;
+            haptic.selection();
+          }
+          acc += content;
+          setMsgs(m => updateMsg(m, turn.replyId, 'comp', r => ({ ...r, text: r.text + content })));
+        },
+        onDone: turnId => {
+          setHadTurn(true);
+          setMsgs(m => updateMsg(m, turn.replyId, 'comp', r => ({ ...r, streaming: false, turnId: turnId || undefined })));
+          if (!nearBottom.current) setUnseen(true);
+          if (acc.trim()) announce(`${scenario.name}: ${acc.trim()}`);
+          finishTurn();
+        },
+        // The server's safety response replaces the reply. It stays in the
+        // thread with real resources, and the conversation carries on.
+        onCrisis: content => {
+          setHadTurn(true);
+          setMsgs(m => m.map((x): SMsg => (x.id === turn.replyId ? { id: x.id, from: 'crisis', text: content } : x)));
+          announce(content ? `${content} Support options follow.` : 'Support options are shown in the conversation.');
+          finishTurn();
+        },
+        onError: (_message, info) => {
+          const limited = messageLimitOf(info);
+          if (limited) {
+            // Same limits as the companion chat, and the same rule: give the
+            // typed lines back rather than lose them. Anything queued behind
+            // would be refused too, so it comes back with them.
+            const refused = [turn, ...queue.current.slice(1)];
+            queue.current = [];
+            turnBusy.current = false;
+            const ids = new Set(refused.flatMap(t => [t.userId, t.replyId]));
+            setMsgs(m => m.filter(x => !ids.has(x.id)));
+            const back = refused.map(t => t.text).join('\n');
+            composer.current?.set(d => restoreDraft(d, back));
+            setCapRefused(limited);
+            onQuotaRefused?.();
+            haptic.warning();
+            return;
+          }
+          haptic.error();
+          if (received) {
+            // Keep what arrived; the rest may be on the server.
+            setMsgs(m => updateMsg(m, turn.replyId, 'comp', r => ({ ...r, streaming: false, cut: 'reload' })));
+            announce('The reply was cut off.');
+          } else {
+            // Never put client-written text in the character's mouth: the
+            // message is marked unsent instead, and keeps its text.
+            setMsgs(m => updateMsg(
+              m.filter(x => x.id !== turn.replyId), turn.userId, 'user',
+              u => ({ ...u, status: 'failed', reason: notSentReason(info) }),
+            ));
+            announce('Message not sent.');
+          }
+          finishTurn();
+        },
+      },
+    );
+  };
+
+  const submit = (raw: string) => {
+    const text = raw.trim();
+    if (!text || !characterId) return;
+    attempted.current = true;
+    if (brief) brief.unused = false;
     // A new attempt clears the last refusal — the cap resets at midnight.
     setCapRefused(null);
-    setMsgs(m => [...m, { from: 'user', text }, { from: 'comp', text: '', streaming: true }]);
-    setDraft('');
-    if (sessionRef.current) runTurn(sessionRef.current, text);
-    else pendingRef.current = text;
+    setSessionError(null);
+    const turn: PendingTurn = { text, userId: nextId('u'), replyId: nextId('r') };
+    setMsgs(m => [...m, { id: turn.userId, from: 'user', text }, { id: turn.replyId, from: 'comp', text: '', streaming: true }]);
+    // Your own message always scrolls into view.
+    nearBottom.current = true;
+    setUnseen(false);
+    queue.current.push(turn);
+    pump();
   };
+
+  // For the message box (which has already given the send its haptic, and
+  // clears itself) and the opener's starters.
+  const sendText = useStableHandler(submit);
+
+  // Retrying moves the message to the end, as iMessage does.
+  const retry = (id: string) => {
+    const m = msgsRef.current.find(x => x.id === id);
+    if (!m || m.from !== 'user') return;
+    haptic.light();
+    setMsgs(ms => ms.filter(x => x.id !== id));
+    submit(m.text);
+  };
+
+  const retryAllFailed = () => {
+    const failed = msgsRef.current.filter((x): x is UserMsg => x.from === 'user' && x.status === 'failed');
+    setSessionError(null);
+    if (!failed.length) return;
+    const ids = new Set(failed.map(f => f.id));
+    setMsgs(ms => ms.filter(x => !ids.has(x.id)));
+    failed.forEach(f => submit(f.text));
+  };
+
+  // A reply cut off mid-stream may have finished on the server.
+  const reload = async (replyId: string) => {
+    const sid = sessionRef.current;
+    if (!sid) return;
+    setMsgs(m => updateMsg(m, replyId, 'comp', r => ({ ...r, cut: 'reloading' })));
+    try {
+      const { turns } = await getConversationTurns(sid);
+      if (!mounted.current) return;
+      const known = new Set(msgsRef.current.map(x => (x.from === 'comp' ? x.turnId : undefined)).filter(Boolean));
+      const latest = [...turns].reverse().find(t => t.role === 'assistant' && !known.has(t._id));
+      if (latest) {
+        setHadTurn(true);
+        setMsgs(m => updateMsg(m, replyId, 'comp', r => ({ ...r, text: latest.content_text, turnId: latest._id, cut: undefined })));
+        announce('Reply restored.');
+      } else {
+        setMsgs(m => updateMsg(m, replyId, 'comp', r => ({ ...r, cut: 'lost' })));
+        announce("That reply didn't finish.");
+      }
+    } catch {
+      if (!mounted.current) return;
+      setMsgs(m => updateMsg(m, replyId, 'comp', r => ({ ...r, cut: 'reload' })));
+      announce("Couldn't reload. Try again.");
+    }
+  };
+
+  const openReport = useCallback((turnId: string) => {
+    haptic.medium();
+    Keyboard.dismiss();
+    setReportTurn(turnId);
+  }, []);
+
+  const openSummary = () => {
+    haptic.light();
+    Keyboard.dismiss();
+    setShowSummary(true);
+  };
+
+  // ── Earlier messages, a page at a time ─────────────────────────────
+  // The earlier session's messages sit at the start of the list; all but the
+  // newest HISTORY_PAGE of them wait until the reader heads up towards them.
+  let historyCount = 0;
+  while (historyCount < msgs.length && isHistory(msgs[historyCount])) historyCount++;
+  const hiddenCount = Math.max(0, historyCount - historyShown);
+  const shownMsgs = hiddenCount ? msgs.slice(hiddenCount) : msgs;
+  const showOlder = () => {
+    // The same target from every call in one render, so a burst of scroll
+    // events adds one page, not one per event.
+    if (hiddenCount > 0) setHistoryShown(historyShown + HISTORY_PAGE);
+  };
+
+  // ── Scrolling ───────────────────────────────────────────────────────
+  // Pinned to the end while the user is there; reading further up is left
+  // alone, and a chip offers the way back when something new arrives.
+  const onScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+    const near = contentSize.height - (contentOffset.y + layoutMeasurement.height) < NEAR_BOTTOM_PX;
+    nearBottom.current = near;
+    if (near) setUnseen(false);
+    // Two screens from the top the next page mounts, well before a fling
+    // gets there, so what is on screen stays put (KEEP_POSITION) as it lands.
+    if (hiddenCount > 0 && contentOffset.y < layoutMeasurement.height * 2) showOlder();
+  };
+  const onContentSizeChange = () => {
+    if (nearBottom.current) scrollRef.current?.scrollToEnd({ animated: false });
+  };
+  const jumpToEnd = () => {
+    nearBottom.current = true;
+    setUnseen(false);
+    scrollRef.current?.scrollToEnd({ animated: true });
+  };
+  const lastId = msgs.length ? msgs[msgs.length - 1].id : '';
+  useEffect(() => {
+    const last = msgsRef.current[msgsRef.current.length - 1];
+    if (last && !nearBottom.current && (last.from === 'comp' || last.from === 'crisis')) setUnseen(true);
+  }, [lastId]);
+
+  const talked = msgs.some(m => m.from === 'user' || m.from === 'comp' || m.from === 'crisis');
+  const showOpener = history === 'ready' && !talked;
+  const sessionN = totalSessions + 1;
+
+  // Everything below is memoised and handed handlers whose identity never
+  // changes, so a streamed frame re-renders only the reply it grew, and a
+  // keystroke only the composer.
+  const retryRow = useStableHandler(retry);
+  const reloadRow = useStableHandler(reload);
+  const moreSupport = useCallback(() => go('crisis'), [go]);
+  const onRememberChange = useStableHandler(changeRemember);
+  const leave = useCallback(() => go('studio'), [go]);
+  const endPressed = useStableHandler(openSummary);
+  const retryHistory = useCallback(() => { historyGate.current = loadHistory(); }, [loadHistory]);
+  const forgotten = useCallback(() => setMemoryCount(c => (c == null ? c : Math.max(0, c - 1))), []);
+  const keepGoing = useCallback(() => setShowSummary(false), []);
+  const endSessionNow = useCallback(() => {
+    setShowSummary(false);
+    go('studio');
+  }, [go]);
+  const closeReport = useCallback(() => setReportTurn(null), []);
+  const topNotice = useMemo(
+    () => <AiNotice text={aiNoticeText(scenario.name, isMinor, false)} />,
+    [scenario.name, isMinor],
+  );
 
   return (
     <Screen>
-      <TopBar
-        left={<Pressable onPress={() => go('studio')}><NavIcon name="back" color={W.text2} /></Pressable>}
-        center={<Txt font="comp" weight={600} style={{ fontSize: 15, color: W.text }}>{scenario.name}</Txt>}
-        right={<Pressable onPress={() => setShowSummary(true)}><Txt font="user" weight={500} style={{ fontSize: 13, color: W.danger }}>End</Txt></Pressable>}
-        bg="rgba(24,16,20,0.55)"
-        border
+      <SessionHeader title={scenario.name} onBack={leave} onEnd={endPressed} />
+      <MemoryBanner
+        remember={remember}
+        sessionN={sessionN}
+        memoryCount={memoryCount}
+        changeable={!memoryLocked}
+        accent={scenario.accent}
+        onChange={onRememberChange}
       />
-      {/* context banner — the old "Playing: …" line had no backend source, so it's gone */}
-      <View style={{ marginHorizontal: 16, marginTop: 10, marginBottom: 6, borderRadius: 10, padding: 8, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', gap: 8, overflow: 'hidden', borderWidth: 1, borderColor: alpha(scenario.accent, '1f'), borderLeftWidth: 2, borderLeftColor: scenario.accent, backgroundColor: 'rgba(32,22,26,0.55)' }}>
-        <BlurView intensity={20} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-        <NavIcon name="sparkle" color={W.accent} size={14} />
-        <Txt font="user" style={{ fontSize: 11, color: W.accent }}>
-          Session {totalSessions + 1}{memoryCount != null ? ` · ${memoryCount} ${memoryCount === 1 ? 'memory' : 'memories'}` : ''}
-        </Txt>
-      </View>
-      <ScrollView ref={scrollRef} style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 16, paddingVertical: 8, gap: 8 }}>
-        <AiNotice text={aiNoticeText(scenario.name, isMinor, false)} />
-        {msgs.map((m, i) => (m.from === 'notice'
-          ? <AiNotice key={i} text={m.text} />
-          : <BubbleMem key={i} from={m.from} text={m.text} accent={scenario.accent} />
-        ))}
-        {capHit && (
-          <View style={{ marginTop: 10 }}>
+      <View style={styles.flex1}>
+        <ScrollView
+          ref={scrollRef}
+          style={styles.flex1}
+          contentContainerStyle={styles.thread}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
+          onScroll={onScroll}
+          scrollEventThrottle={32}
+          onContentSizeChange={onContentSizeChange}
+          maintainVisibleContentPosition={KEEP_POSITION}
+        >
+          {topNotice}
+          {history === 'loading' && !talked ? <ThreadSkeleton /> : null}
+          {history === 'error' ? (
+            <InlineNotice
+              tone="warning"
+              text="Couldn't load your earlier messages."
+              actionLabel="Retry"
+              onAction={retryHistory}
+            />
+          ) : null}
+          {showOpener ? (
+            <SessionOpener scenario={scenario} characterId={characterId} lines={brief?.lines ?? NO_LINES} onStarter={sendText} />
+          ) : null}
+          {hiddenCount > 0 ? <EarlierMessages onPress={showOlder} /> : null}
+          {shownMsgs.map(m => (
+            <ThreadRow
+              key={m.id}
+              m={m}
+              name={scenario.name}
+              accent={scenario.accent}
+              onReport={openReport}
+              onRetry={retryRow}
+              onReload={reloadRow}
+              onMoreSupport={moreSupport}
+            />
+          ))}
+          {sessionError ? <InlineNotice tone="error" text={sessionError} actionLabel="Retry" onAction={retryAllFailed} /> : null}
+          {capHit ? (
             <CapHitCard
               onUpgrade={() => { onCapUpgrade?.(); go('paywall'); }}
               dailyCap={textDailyCap}
@@ -571,112 +1582,676 @@ export function S17_StudioSession({ go, scenario, characterId, totalSessions = 0
               upsell={textUpsell && (capRefused?.planCap ?? true)}
               message={capRefused?.message ?? null}
             />
-          </View>
-        )}
-      </ScrollView>
-      <ChatInput draft={draft} setDraft={setDraft} onSend={send} companionName={scenario.name} />
-      {showSummary && (
-        <StudioSummary
-          scenario={scenario}
-          sessionN={totalSessions + 1}
-          characterId={characterId}
-          onContinue={() => setShowSummary(false)}
-          onClose={() => { setShowSummary(false); go('studio'); }}
-        />
-      )}
+          ) : null}
+        </ScrollView>
+        {unseen ? <NewMessageChip onPress={jumpToEnd} /> : null}
+      </View>
+      <ChatInput ref={composer} companionName={scenario.name} onSubmit={sendText} />
+
+      <SessionSummarySheet
+        visible={showSummary}
+        name={scenario.name}
+        sessionN={sessionN}
+        characterId={characterId}
+        remember={remember}
+        hadTurn={hadTurn}
+        onForgotten={forgotten}
+        onKeepGoing={keepGoing}
+        onEnd={endSessionNow}
+      />
+      <ReportReplySheet turnId={reportTurn} onClose={closeReport} />
     </Screen>
   );
 }
 
-// The prototype's bullet recap and coaching block had no backend source and are
-// gone. What is real is the character's memory set — shown here, deletable.
-function StudioSummary({ scenario, sessionN, characterId, onContinue, onClose }: {
-  scenario: Scenario; sessionN: number; characterId?: string; onContinue: () => void; onClose: () => void;
+const SessionHeader = memo(function SessionHeader({ title, onBack, onEnd }: {
+  title: string; onBack: () => void; onEnd: () => void;
 }) {
-  const [memories, setMemories] = useState<ApiMemory[] | null>(null);
-  useEffect(() => {
-    if (!characterId) { setMemories([]); return; }
-    let cancelled = false;
-    getMemories(characterId)
-      .then(ms => { if (!cancelled) setMemories(ms); })
-      .catch(() => { if (!cancelled) setMemories([]); });
-    return () => { cancelled = true; };
-  }, [characterId]);
-
-  const forget = (id: string) => {
-    setMemories(ms => (ms ?? []).filter(m => m._id !== id));
-    deleteMemory(id).catch(e => console.warn('[Studio] memory delete failed:', e));
-  };
-
   return (
-    <SheetOverlay onClose={onClose}>
-      <View style={{ width: 36, height: 4, backgroundColor: 'rgba(255,255,255,0.15)', borderRadius: 2, alignSelf: 'center', marginBottom: 16 }} />
-      <Txt font="comp" weight={600} style={{ fontSize: 18, color: W.text }}>Session summary</Txt>
-      <Txt font="user" style={{ marginTop: 4, fontSize: 12, color: W.text2 }}>Session {sessionN} · {scenario.name}</Txt>
+    <TopBar
+      left={<BackButton onPress={onBack} />}
+      title={title}
+      focusTitleOnMount
+      right={<EndButton onPress={onEnd} />}
+      glass
+      border
+    />
+  );
+});
 
-      <View style={{ marginTop: 16 }}>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8 }}>
-          <NavIcon name="sparkle" color={W.accent} size={14} />
-          <Txt font="user" weight={600} style={{ fontSize: 11, color: W.accent, textTransform: 'uppercase', letterSpacing: 0.9 }}>What they remember</Txt>
-        </View>
-        <View style={{ gap: 6 }}>
-          {(memories ?? []).map(m => (
-            <View key={m._id} style={{ backgroundColor: 'rgba(255,201,96,0.06)', borderWidth: 1, borderColor: 'rgba(255,201,96,0.15)', borderRadius: 10, padding: 10, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'flex-start', gap: 10 }}>
-              <Txt font="user" style={{ flex: 1, fontSize: 13, color: W.text, lineHeight: 18 }}>{m.content}</Txt>
-              <Pressable onPress={() => forget(m._id)} style={{ padding: 2, opacity: 0.6 }}>
-                <NavIcon name="close" color={W.text2} size={18} />
-              </Pressable>
-            </View>
-          ))}
-        </View>
-        {memories?.length === 0 && (
-          <Txt font="user" style={{ fontSize: 12, color: W.text2 }}>Nothing saved from this character yet.</Txt>
-        )}
-      </View>
-
-      <View style={{ marginTop: 18, flexDirection: 'row', gap: 10 }}>
-        <Pressable onPress={onClose} style={{ flex: 1, height: 44, backgroundColor: W.accentDim, borderWidth: 1, borderColor: 'rgba(255,201,96,0.20)', borderRadius: 12, alignItems: 'center', justifyContent: 'center' }}>
-          <Txt font="user" weight={500} style={{ fontSize: 14, color: W.accent }}>Save & close</Txt>
-        </Pressable>
-        <Pressable onPress={onContinue} style={{ flex: 1, height: 44, borderWidth: 1, borderColor: 'rgba(255,255,255,0.08)', borderRadius: 12, alignItems: 'center', justifyContent: 'center' }}>
-          <Txt font="user" weight={500} style={{ fontSize: 14, color: W.text }}>Keep going</Txt>
-        </Pressable>
-      </View>
-    </SheetOverlay>
+/** Shown above the thread while older messages are still waiting to be
+ *  drawn. Scrolling up draws them anyway; this is the explicit way, and the
+ *  one VoiceOver finds. */
+function EarlierMessages({ onPress }: { onPress: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      hitSlop={minTarget(HIT, 24)}
+      accessibilityRole="button"
+      accessibilityLabel="Show earlier messages"
+      style={({ pressed }) => [styles.earlier, pressed ? styles.pressed : null]}
+    >
+      <NavIcon name="clock" color={W.text2} size={14} />
+      <Txt variant="footnote" weight={500} style={{ color: W.text2 }}>Earlier messages</Txt>
+    </Pressable>
   );
 }
 
+/** One message in the S17 thread. Memoised: with the stable handlers S17
+ *  passes, a streamed frame re-renders only the reply it changed. */
+const ThreadRow = memo(function ThreadRow({ m, name, accent, onReport, onRetry, onReload, onMoreSupport }: {
+  m: SMsg;
+  name: string;
+  accent: string;
+  onReport: (turnId: string) => void;
+  onRetry: (id: string) => void;
+  onReload: (id: string) => void;
+  onMoreSupport: () => void;
+}) {
+  // Earlier sessions arrive still, all at once; only this visit's messages rise in.
+  const animateIn = !isHistory(m);
+  switch (m.from) {
+    case 'notice':
+      return <AiNotice text={m.text} />;
+    case 'crisis':
+      return <CrisisCard content={m.text} onMore={onMoreSupport} />;
+    case 'user':
+      return (
+        <View>
+          <BubbleMem from="user" text={m.text} animateIn={animateIn} />
+          {m.status === 'failed' ? <FailedNote reason={m.reason} onPress={() => onRetry(m.id)} /> : null}
+        </View>
+      );
+    case 'comp':
+      if (m.streaming && !m.text) {
+        return (
+          <View accessible accessibilityLabel={`${name} is replying`}>
+            <TypingDots />
+          </View>
+        );
+      }
+      return (
+        <View>
+          <BubbleMem
+            from="comp"
+            text={m.text}
+            accent={accent}
+            speaker={name}
+            streaming={m.streaming}
+            animateIn={animateIn}
+            // App Store Guideline 1.2: generated replies must be reportable, by
+            // long-press or VoiceOver's "Report this reply" action. Only a
+            // reply the backend has saved has a turn id to report.
+            reportId={m.turnId}
+            onReport={onReport}
+          />
+          {m.cut ? <CutNote state={m.cut} onReload={() => onReload(m.id)} /> : null}
+        </View>
+      );
+  }
+});
+
+function EndButton({ onPress }: { onPress: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      hitSlop={minTarget(52, 30)}
+      accessibilityRole="button"
+      accessibilityLabel="End session"
+      style={({ pressed }) => [styles.endButton, pressed ? styles.pressed : null]}
+    >
+      <Txt variant="subhead" weight={600} maxScale={1.3} style={{ color: W.dangerText }}>End</Txt>
+    </Pressable>
+  );
+}
+
+/** Session number and memory state. Before the session opens (on the first
+ *  message) the whole banner is the switch; after, it only reports. */
+const MemoryBanner = memo(function MemoryBanner({ remember, sessionN, memoryCount, changeable, accent, onChange }: {
+  remember: boolean; sessionN: number; memoryCount: number | null; changeable: boolean; accent: string;
+  onChange: (v: boolean) => void;
+}) {
+  const saved = memoryCount ? ` · ${memoryCount} saved` : '';
+  const text = remember ? `Session ${sessionN} · Memory on${saved}` : 'One-time session · not saved';
+  const spoken = remember
+    ? `Session ${sessionN}. Memory is on for this session.${memoryCount ? ` ${memoryCount} ${memoryCount === 1 ? 'memory' : 'memories'} saved.` : ''}`
+    : 'One-time session. Nothing from it is saved.';
+  const frame = [styles.banner, { borderColor: rgba(accent, 0.12), borderLeftColor: accent }];
+  const body = (
+    <>
+      <GlassFill intensity={20} />
+      <NavIcon name={remember ? 'sparkle' : 'eye-off'} color={remember ? W.gold : W.text2} size={14} />
+      <Txt variant="footnote" numberOfLines={2} style={[styles.shrinkText, { color: remember ? W.gold : W.text2 }]}>{text}</Txt>
+      {changeable ? <Toggle value={remember} onChange={onChange} label="Remember this session" /> : null}
+    </>
+  );
+  if (!changeable) {
+    return <View accessible accessibilityLabel={spoken} style={frame}>{body}</View>;
+  }
+  return (
+    <Pressable
+      onPress={() => { haptic.selection(); onChange(!remember); }}
+      accessibilityRole="switch"
+      accessibilityLabel="Remember this session"
+      accessibilityState={{ checked: remember }}
+      accessibilityHint={spoken}
+      style={({ pressed }) => [frame, pressed ? styles.pressedRow : null]}
+    >
+      {body}
+    </Pressable>
+  );
+});
+
+function ThreadSkeleton() {
+  return (
+    <View accessible accessibilityLabel="Loading the conversation" style={styles.threadSkeleton}>
+      <Skeleton width="62%" height={44} radius={R.bubble} />
+      <Skeleton width="44%" height={44} radius={R.bubble} style={styles.alignEnd} />
+      <Skeleton width="70%" height={44} radius={R.bubble} />
+    </View>
+  );
+}
+
+/** The first thing in a new thread: what this is, how it was set up, and a
+ *  few ways to begin. */
+const SessionOpener = memo(function SessionOpener({ scenario, characterId, lines, onStarter }: {
+  scenario: Scenario; characterId?: string; lines: { label: string; value: string }[]; onStarter: (text: string) => void;
+}) {
+  const entering = useOnce(() => enter.fadeUp);
+  const exiting = useOnce(() => exit.fade);
+  const custom = !STARTERS[scenario.id];
+  const starters = STARTERS[scenario.id] ?? CUSTOM_STARTERS;
+  return (
+    <Animated.View entering={entering} exiting={exiting} style={styles.opener}>
+      <GlassFill intensity={20} />
+      <View style={styles.rowCenter}>
+        {custom && characterId
+          ? <Avatar name={scenario.name} glyph="initials" color={avatarColor(characterId)} size={32} breathe={false} />
+          : <IconTile icon={scenario.icon} accent={scenario.accent} size={32} />}
+        <Txt variant="headline" heading numberOfLines={2} style={styles.shrinkText}>{scenario.name}</Txt>
+      </View>
+      {scenario.desc ? <Txt variant="subhead" style={{ color: W.text2 }}>{scenario.desc}</Txt> : null}
+      {lines.length ? (
+        <View style={styles.gapXs}>
+          {lines.map(l => (
+            <Txt key={l.label} variant="footnote" style={{ color: W.text2 }}>
+              <Txt variant="footnote" weight={600} style={{ color: W.text }}>
+                {/[?:]$/.test(l.label) ? `${l.label} ` : `${l.label}: `}
+              </Txt>
+              {l.value}
+            </Txt>
+          ))}
+        </View>
+      ) : null}
+      <Txt variant="footnote" style={{ color: W.text3 }}>
+        {custom ? `Say hello to ${scenario.name}, or start with one of these:` : 'Say hello, or start with one of these:'}
+      </Txt>
+      <View style={styles.starters}>
+        {starters.map(s => <QuickReply key={s} onPress={() => onStarter(s)}>{s}</QuickReply>)}
+      </View>
+    </Animated.View>
+  );
+});
+
+function FailedNote({ reason, onPress }: { reason?: string; onPress: () => void }) {
+  const entering = useOnce(() => enter.fade);
+  return (
+    <Animated.View entering={entering} style={styles.alignEnd}>
+      <Pressable
+        onPress={onPress}
+        hitSlop={minTarget(HIT, 24)}
+        accessibilityRole="button"
+        accessibilityLabel={reason ? `Message not sent. ${reason}` : 'Message not sent'}
+        accessibilityHint="Sends it again"
+        style={({ pressed }) => [styles.turnNote, pressed ? styles.pressed : null]}
+      >
+        <NavIcon name="refresh" color={W.dangerText} size={14} />
+        <Txt variant="footnote" style={{ color: W.dangerText, flexShrink: 1 }}>
+          {reason ? `Not sent. ${reason} Tap to retry.` : 'Not sent. Tap to retry.'}
+        </Txt>
+      </Pressable>
+    </Animated.View>
+  );
+}
+
+function CutNote({ state, onReload }: { state: 'reload' | 'reloading' | 'lost'; onReload: () => void }) {
+  if (state === 'lost') {
+    return <Txt variant="footnote" style={styles.cutText}>This reply didn't finish.</Txt>;
+  }
+  if (state === 'reloading') {
+    return <Txt variant="footnote" style={styles.cutText}>Reloading…</Txt>;
+  }
+  return (
+    <Pressable
+      onPress={onReload}
+      hitSlop={minTarget(HIT, 24)}
+      accessibilityRole="button"
+      accessibilityLabel="Connection dropped. Reload the reply"
+      style={({ pressed }) => [styles.turnNote, styles.alignStart, pressed ? styles.pressed : null]}
+    >
+      <NavIcon name="refresh" color={W.warning} size={14} />
+      <Txt variant="footnote" style={{ color: W.warning }}>Connection dropped · Reload</Txt>
+    </Pressable>
+  );
+}
+
+function NewMessageChip({ onPress }: { onPress: () => void }) {
+  const entering = useOnce(() => enter.fadeUp);
+  const exiting = useOnce(() => exit.fade);
+  return (
+    <Animated.View entering={entering} exiting={exiting} pointerEvents="box-none" style={styles.chipWrap}>
+      <Pressable
+        onPress={onPress}
+        hitSlop={minTarget(132, 34)}
+        accessibilityRole="button"
+        accessibilityLabel="Jump to the new message"
+        style={({ pressed }) => [styles.chip, pressed ? styles.pressed : null]}
+      >
+        <GlassFill intensity={30} />
+        <NavIcon name="down" color={W.text} size={14} />
+        <Txt variant="footnote" weight={600} maxScale={1.3}>New message</Txt>
+      </Pressable>
+    </Animated.View>
+  );
+}
+
+// ─── Crisis support, inline ──────────────────────────────────────────────
+// Where the reply would have been: the server's own words, then help that
+// works where the phone is (data/crisis.ts), then the full resources screen.
+function CrisisCard({ content, onMore }: { content: string; onMore: () => void }) {
+  const [{ emergency, resources }] = useState(() => crisisResources());
+  const [failedId, setFailedId] = useState<string | null>(null);
+  const entering = useOnce(() => enter.fadeUp);
+
+  const open = async (r: CrisisResource) => {
+    const ok = await openCrisisResource(r);
+    setFailedId(ok ? null : r.id);
+    if (!ok) announce(`Couldn't open that on this phone. ${r.detail}.`);
+  };
+
+  return (
+    <Animated.View entering={entering} style={styles.crisis}>
+      {content ? <Txt variant="bodyComp">{content}</Txt> : null}
+      <View style={styles.rowCenter}>
+        <View style={styles.crisisIcon}>
+          <NavIcon name="heart" color={W.gold} size={18} />
+        </View>
+        <Txt variant="headline" heading style={styles.shrinkText}>Talk to someone now</Txt>
+      </View>
+      <View style={styles.gapSm}>
+        {[emergency, ...resources].map(r => (
+          <CrisisRow key={r.id} resource={r} failed={failedId === r.id} onOpen={() => open(r)} />
+        ))}
+      </View>
+      <Pressable
+        onPress={onMore}
+        hitSlop={minTarget(120, 28)}
+        accessibilityRole="button"
+        accessibilityLabel="More support"
+        style={({ pressed }) => [styles.crisisMore, pressed ? styles.pressed : null]}
+      >
+        <Txt variant="subhead" weight={600} style={{ color: W.gold }}>More support</Txt>
+        <NavIcon name="right" color={W.gold} size={16} />
+      </Pressable>
+    </Animated.View>
+  );
+}
+
+function CrisisRow({ resource: r, failed, onOpen }: { resource: CrisisResource; failed: boolean; onOpen: () => void }) {
+  const openable = canOpenCrisisResource(r);
+  const icon: IconName = r.kind === 'call' ? 'phone' : r.kind === 'text' ? 'chat' : 'globe';
+  const label = [r.name, r.detail, r.hours].filter(Boolean).join('. ');
+  const body = (
+    <>
+      <View style={styles.crisisRowIcon}>
+        <NavIcon name={icon} color={W.gold} size={16} />
+      </View>
+      <View style={styles.shrink}>
+        <Txt variant="subhead" weight={600}>{r.name}</Txt>
+        <Txt variant="footnote" style={{ color: W.text2 }}>{r.hours ? `${r.detail} · ${r.hours}` : r.detail}</Txt>
+        {failed ? (
+          <Txt variant="footnote" style={{ color: W.dangerText }}>Couldn't open this on your phone. Use the details above.</Txt>
+        ) : null}
+      </View>
+      {openable ? <NavIcon name="right" color={W.text2} size={16} /> : null}
+    </>
+  );
+  // Nothing to dial (no local number known): shown as text, not a button.
+  if (!openable) return <View accessible accessibilityLabel={label} style={styles.crisisRow}>{body}</View>;
+  return (
+    <Pressable
+      onPress={onOpen}
+      accessibilityRole={r.kind === 'web' ? 'link' : 'button'}
+      accessibilityLabel={label}
+      accessibilityHint={r.kind === 'call' ? 'Calls this number' : r.kind === 'text' ? 'Opens Messages' : 'Opens in your browser'}
+      style={({ pressed }) => [styles.crisisRow, pressed ? styles.pressedRow : null]}
+    >
+      {body}
+    </Pressable>
+  );
+}
+
+// ─── Session summary sheet ───────────────────────────────────────────────
+// What is real is the character's memory set — shown here, and forgettable
+// with a short undo. Memories from this session are written by a job that runs
+// after it ends, so this can only list what was already remembered.
+// Memoised (as is the report sheet): both stay mounted under the thread,
+// which re-renders on every streamed frame.
+const SessionSummarySheet = memo(function SessionSummarySheet({
+  visible, name, sessionN, characterId, remember, hadTurn, onForgotten, onKeepGoing, onEnd,
+}: {
+  visible: boolean; name: string; sessionN: number; characterId?: string; remember: boolean; hadTurn: boolean;
+  onForgotten: () => void; onKeepGoing: () => void; onEnd: () => void;
+}) {
+  const screenReader = useScreenReader();
+  const [state, setState] = useState<LoadStatus>('loading');
+  const [memories, setMemories] = useState<ApiMemory[]>([]);
+  const [pending, setPending] = useState<ApiMemory | null>(null);
+  const [forgetError, setForgetError] = useState<string | null>(null);
+  const pendingRef = useRef<{ memory: ApiMemory; index: number } | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const request = useRef(0);
+  const mounted = useRef(true);
+
+  const load = useCallback(() => {
+    const id = ++request.current;
+    setForgetError(null);
+    if (!characterId) {
+      setMemories([]);
+      setState('ready');
+      return;
+    }
+    setState('loading');
+    getMemories(characterId).then(
+      ms => {
+        if (request.current !== id || !mounted.current) return;
+        // One waiting on its undo is still on the server; keep it hidden.
+        setMemories(ms.filter(m => m._id !== pendingRef.current?.memory._id));
+        setState('ready');
+      },
+      () => { if (request.current === id && mounted.current) setState('error'); },
+    );
+  }, [characterId]);
+
+  useEffect(() => {
+    if (visible) load();
+  }, [visible, load]);
+
+  const putBack = (p: { memory: ApiMemory; index: number }) => setMemories(ms => {
+    const out = [...ms];
+    out.splice(Math.min(p.index, out.length), 0, p.memory);
+    return out;
+  });
+
+  const commit = () => {
+    clearTimeout(timer.current);
+    const p = pendingRef.current;
+    if (!p) return;
+    pendingRef.current = null;
+    setPending(null);
+    deleteMemory(p.memory._id).then(
+      () => { if (mounted.current) onForgotten(); },
+      () => {
+        if (!mounted.current) return;
+        putBack(p);
+        haptic.error();
+        setForgetError("Couldn't forget that memory, so it's back in the list.");
+      },
+    );
+  };
+
+  // Leaving before the undo runs out still forgets it.
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      clearTimeout(timer.current);
+      const p = pendingRef.current;
+      if (p) deleteMemory(p.memory._id).catch(() => {});
+    };
+  }, []);
+
+  const forget = (m: ApiMemory) => {
+    commit();
+    haptic.light();
+    const index = memories.findIndex(x => x._id === m._id);
+    pendingRef.current = { memory: m, index };
+    setPending(m);
+    setForgetError(null);
+    setMemories(ms => ms.filter(x => x._id !== m._id));
+    timer.current = setTimeout(commit, screenReader ? UNDO_MS_SCREEN_READER : UNDO_MS);
+    announce('Memory forgotten. You can undo this for a few seconds.');
+  };
+
+  const undo = () => {
+    clearTimeout(timer.current);
+    const p = pendingRef.current;
+    if (!p) return;
+    pendingRef.current = null;
+    setPending(null);
+    putBack(p);
+    announce('Memory restored.');
+  };
+
+  return (
+    <Sheet
+      visible={visible}
+      onClose={onKeepGoing}
+      title="Session summary"
+      footer={
+        <>
+          <PrimaryButton onPress={onEnd} haptic="light">End session</PrimaryButton>
+          <PrimaryButton variant="secondary" onPress={onKeepGoing} haptic={false}>Keep going</PrimaryButton>
+        </>
+      }
+    >
+      <View style={styles.gapMd}>
+        <Txt variant="subhead" numberOfLines={2} style={{ color: W.text2 }}>Session {sessionN} · {name}</Txt>
+        {!remember ? <InlineNotice tone="info" text="This was a one-time session. Nothing from it is saved." /> : null}
+
+        <View style={styles.rowTight}>
+          <NavIcon name="sparkle" color={W.gold} size={14} />
+          <Txt variant="eyebrow" heading style={{ color: W.gold }}>Already remembered</Txt>
+        </View>
+        {remember && hadTurn ? (
+          <Txt variant="footnote" style={{ color: W.text3 }}>New memories from this session appear a minute or so after it ends.</Txt>
+        ) : null}
+
+        {pending ? <InlineNotice tone="info" text="Memory forgotten." actionLabel="Undo" onAction={undo} /> : null}
+        {forgetError ? <InlineNotice tone="error" text={forgetError} /> : null}
+
+        {state === 'loading' ? (
+          <View accessible accessibilityLabel="Loading memories" style={styles.gapSm}>
+            {[0, 1, 2].map(i => <Skeleton key={i} height={44} radius={R.md} />)}
+          </View>
+        ) : state === 'error' ? (
+          <InlineNotice tone="error" text="Couldn't load memories." actionLabel="Retry" onAction={load} />
+        ) : memories.length === 0 && !pending ? (
+          <Txt variant="subhead" style={{ color: W.text2 }}>Nothing remembered from {name} yet.</Txt>
+        ) : (
+          <View style={styles.gapSm}>
+            {memories.map(m => (
+              <Animated.View key={m._id} layout={layout} style={styles.memoryRow}>
+                <Txt variant="callout" style={styles.shrinkText}>{m.content}</Txt>
+                <IconButton icon="close" label="Forget this memory" onPress={() => forget(m)} size={32} iconSize={16} tint={W.text2} haptic={false} />
+              </Animated.View>
+            ))}
+          </View>
+        )}
+      </View>
+    </Sheet>
+  );
+});
+
+// ─── Report sheet ────────────────────────────────────────────────────────
+// Apple Guideline 1.2 — users must be able to report AI-generated content.
+const REPORT_REASONS: { k: ReportReason; l: string }[] = [
+  { k: 'harmful', l: 'Harmful or unsafe' },
+  { k: 'sexual', l: 'Sexual content' },
+  { k: 'inappropriate_minor', l: 'Inappropriate for a minor' },
+  { k: 'inaccurate', l: 'Inaccurate' },
+  { k: 'other', l: 'Something else' },
+];
+
+const ReportReplySheet = memo(function ReportReplySheet({ turnId, onClose }: { turnId: string | null; onClose: () => void }) {
+  // Kept after close so the content doesn't vanish while the sheet slides out.
+  const [target, setTarget] = useState(turnId);
+  const [reason, setReason] = useState<ReportReason | null>(null);
+  const [note, setNote] = useState('');
+  const [state, setState] = useState<'idle' | 'sending' | 'sent' | 'failed'>('idle');
+  const closeTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // The reply the sheet is open on right now (null while closed), so a report
+  // or its "Thanks" timer that outlives it can't act on the next one.
+  const openOn = useRef(turnId);
+  openOn.current = turnId;
+
+  useEffect(() => {
+    // Closed by hand, or opened on another reply: the last one's auto-close is void.
+    clearTimeout(closeTimer.current);
+    if (!turnId) return;
+    setTarget(turnId);
+    setReason(null);
+    setNote('');
+    setState('idle');
+  }, [turnId]);
+  useEffect(() => () => clearTimeout(closeTimer.current), []);
+
+  const submit = async () => {
+    if (!target || !reason || state === 'sending') return;
+    const reported = target;
+    setState('sending');
+    try {
+      await createReport(reported, reason, note.trim() || undefined);
+      haptic.success();
+      announce('Report sent. Thank you.');
+      if (openOn.current !== reported) return;
+      setState('sent');
+      closeTimer.current = setTimeout(() => {
+        if (openOn.current === reported) onClose();
+      }, 1400);
+    } catch {
+      if (openOn.current !== reported) return;
+      setState('failed');
+      haptic.error();
+    }
+  };
+
+  const sent = state === 'sent';
+  return (
+    <Sheet
+      visible={turnId != null}
+      onClose={onClose}
+      title={sent ? 'Thanks for telling us' : 'Report this reply'}
+      footer={sent ? undefined : (
+        <PrimaryButton disabled={!reason} loading={state === 'sending'} onPress={submit}>Submit report</PrimaryButton>
+      )}
+    >
+      {sent ? (
+        <Txt variant="body" style={{ color: W.text2 }}>We'll review it. Reports help keep Evarna safe.</Txt>
+      ) : (
+        <View style={styles.gapMd}>
+          <Txt variant="subhead" style={{ color: W.text2 }}>What was wrong with it?</Txt>
+          <View accessibilityRole="radiogroup" accessibilityLabel="Reason" style={styles.gapSm}>
+            {REPORT_REASONS.map(r => (
+              <Pill key={r.k} size="sm" selected={reason === r.k} onPress={() => setReason(r.k)}>{r.l}</Pill>
+            ))}
+          </View>
+          <Field
+            multiline
+            value={note}
+            onChangeText={setNote}
+            maxLength={REPORT_NOTE_MAX}
+            placeholder="Add a note (optional)"
+            accessibilityLabel="Note, optional"
+            textAlignVertical="top"
+            style={styles.noteInput}
+          />
+          {state === 'failed' ? (
+            <InlineNotice tone="error" text="Couldn't send the report. Check your connection and try again." />
+          ) : null}
+        </View>
+      )}
+    </Sheet>
+  );
+});
+
 // ─── S18 CHARACTER CREATOR ───────────────────────────────────────────────
 const SLIDERS = [
-  { k: 'warmth', l: 'Warmth', left: '❄️', right: '☀️' },
-  { k: 'humor', l: 'Humor', left: '😐', right: '😂' },
-  { k: 'directness', l: 'Directness', left: '🌊', right: '🎯' },
-  { k: 'energy', l: 'Energy', left: '🌙', right: '⚡' },
-  { k: 'formality', l: 'Formality', left: '👕', right: '👔' },
+  { k: 'warmth', l: 'Warmth', left: '❄️', right: '☀️', low: 'Cool', high: 'Warm' },
+  { k: 'humor', l: 'Humor', left: '😐', right: '😂', low: 'Serious', high: 'Playful' },
+  { k: 'directness', l: 'Directness', left: '🌊', right: '🎯', low: 'Gentle', high: 'Direct' },
+  { k: 'energy', l: 'Energy', left: '🌙', right: '⚡', low: 'Calm', high: 'Lively' },
+  { k: 'formality', l: 'Formality', left: '👕', right: '👔', low: 'Casual', high: 'Formal' },
 ] as const;
-const STEP_TITLES = ['', 'The Basics', 'Their Personality', 'Who Are They?', 'Test Them Out'];
+type TraitSpec = (typeof SLIDERS)[number];
+type TraitKey = TraitSpec['k'];
 
-export function S18_CharacterCreator({ go, apiVoices = [] }: { go: Go; apiVoices?: ApiVoice[] }) {
+const traitWord = (s: TraitSpec, v: number) => (v < 0.34 ? s.low : v > 0.66 ? s.high : 'Balanced');
+
+const STEP_TITLES = ['', 'The basics', 'Personality', 'Backstory', 'Review'];
+const STEPS = 4;
+
+export function S18_CharacterCreator({ go, apiVoices = [], voicesStatus, onRetryVoices }: {
+  go: Go;
+  apiVoices?: ApiVoice[];
+  voicesStatus?: LoadStatus;
+  onRetryVoices?: () => void;
+}) {
   const [step, setStep] = useState(1);
+  const [dir, setDir] = useState<1 | -1>(1);
   const [name, setName] = useState('');
   const [gender, setGender] = useState<StudioGender>('female');
   const [voiceId, setVoiceId] = useState<string | null>(null);
-  const [traits, setTraits] = useState<Record<string, number>>({ warmth: 0.6, humor: 0.5, directness: 0.5, energy: 0.4, formality: 0.3 });
+  const [traits, setTraits] = useState<Record<TraitKey, number>>({ warmth: 0.6, humor: 0.5, directness: 0.5, energy: 0.4, formality: 0.3 });
   const [backstory, setBackstory] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const scrollRef = useRef<ScrollView>(null);
 
-  const voiceList = voicesFor(apiVoices, gender);
+  const voiceStatus = useLoadStatus(apiVoices.length > 0, voicesStatus);
+  useEffect(() => {
+    if (apiVoices.length === 0 && voicesStatus === 'error') onRetryVoices?.();
+    // Mount only: later failures are the Retry button's job.
+  }, []);
+
+  // Kept by identity between keystrokes in the name, so the memoised voice grid skips them.
+  const voiceList = useMemo(() => voicesFor(apiVoices, gender), [apiVoices, gender]);
   const pickedVoice = voiceList.some(v => v.id === voiceId) ? voiceId : voiceList[0]?.id ?? null;
+  const voiceName = apiVoices.find(v => v.id === pickedVoice)?.name;
+  // One stable handler for every slider, so moving one doesn't redraw the rest.
+  const setTrait = useCallback((k: TraitKey, v: number) => setTraits(t => ({ ...t, [k]: v })), []);
+  const trimmed = name.trim();
+  const canNext = !!trimmed && !!pickedVoice;
+  const stepHint = step === 1 && !canNext ? (!trimmed ? 'Add a name to continue.' : 'Pick a voice to continue.') : null;
+
+  const goStep = (n: number) => {
+    setDir(n > step ? 1 : -1);
+    setStep(n);
+    setErr(null);
+    scrollRef.current?.scrollTo({ y: 0, animated: false });
+    announce(`Step ${n} of ${STEPS}. ${STEP_TITLES[n]}.`);
+  };
+
+  const back = () => {
+    if (step > 1) return goStep(step - 1);
+    if (!trimmed && !backstory.trim()) return go('studio');
+    confirmDestructive({
+      title: 'Discard this character?',
+      message: "What you've set up so far won't be saved.",
+      confirmLabel: 'Discard',
+      cancelLabel: 'Keep editing',
+      onConfirm: () => go('studio'),
+    });
+  };
 
   const create = async () => {
-    if (!pickedVoice) return;
+    if (!pickedVoice || !trimmed || busy) return;
     setBusy(true);
     setErr(null);
     try {
-      await createStudioCharacter({
+      const res = await createStudioCharacter({
         kind: 'custom',
-        name: name.trim(),
+        name: trimmed,
         ...(backstory.trim() ? { backstory: backstory.trim() } : {}),
         voice_id: pickedVoice,
         gender: API_GENDER[gender],
@@ -685,164 +2260,462 @@ export function S18_CharacterCreator({ go, apiVoices = [] }: { go: Go; apiVoices
           Object.entries(traits).map(([k, v]) => [k, Math.round(v * 100)]),
         ),
       });
+      const created = res.name || trimmed;
+      setJustCreated({ _id: res.character_id, name: created, gender: API_GENDER[gender], voice_id: pickedVoice, kind: 'custom' });
+      haptic.success();
+      announce(`${created} is ready. You'll find them under Your characters.`);
       go('studio');
     } catch (e) {
-      console.warn('[Studio] custom character create failed:', e);
+      haptic.error();
       setErr(createErrorMessage(e));
-    } finally {
       setBusy(false);
     }
   };
 
+  const personality = SLIDERS.map(s => traitWord(s, traits[s.k])).filter(w => w !== 'Balanced');
+
   return (
     <Screen>
       <TopBar
-        left={<Pressable onPress={() => (step === 1 ? go('studio') : setStep(s => s - 1))}><NavIcon name="back" color={W.text2} /></Pressable>}
-        center={<Txt font="user" style={{ fontSize: 13, color: W.text2 }}>{STEP_TITLES[step]}</Txt>}
+        left={<BackButton onPress={back} />}
+        center={
+          <View style={styles.stepTitle}>
+            <Txt variant="subhead" weight={600} heading numberOfLines={1}>{STEP_TITLES[step]}</Txt>
+            <ProgressDots total={STEPS} current={step} />
+          </View>
+        }
       />
-      <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingHorizontal: 24, paddingVertical: 12, gap: 20 }}>
-        {step === 1 && (
-          <>
+      <ScrollView
+        ref={scrollRef}
+        style={styles.flex1}
+        contentContainerStyle={styles.form}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
+        <StepPane key={step} dir={dir}>
+          {step === 1 ? (
+            <>
+              <View>
+                <FieldLabel>Name</FieldLabel>
+                <Field
+                  value={name}
+                  onChangeText={setName}
+                  placeholder="Marcus"
+                  maxLength={NAME_MAX}
+                  autoCapitalize="words"
+                  autoCorrect={false}
+                  returnKeyType="next"
+                  onSubmitEditing={() => { if (canNext) goStep(2); }}
+                  accessibilityLabel="Name"
+                  style={styles.nameInput}
+                />
+              </View>
+              <View>
+                <FieldLabel>Voice gender</FieldLabel>
+                <GenderPills value={gender} onChange={setGender} />
+              </View>
+              <View>
+                <FieldLabel>Voice</FieldLabel>
+                <VoicePicker
+                  voices={voiceList} catalogSize={apiVoices.length} gender={gender} voiceId={pickedVoice} onPick={setVoiceId}
+                  status={voiceStatus} onRetry={onRetryVoices}
+                />
+              </View>
+            </>
+          ) : null}
+
+          {step === 2 ? (
+            <>
+              <Txt variant="subhead" style={{ color: W.text2 }}>How should {trimmed} come across?</Txt>
+              {SLIDERS.map(s => (
+                <TraitSlider key={s.k} spec={s} value={traits[s.k]} onChange={setTrait} />
+              ))}
+            </>
+          ) : null}
+
+          {step === 3 ? (
             <View>
-              <FieldLabel>Name</FieldLabel>
-              <TextInput
-                value={name}
-                onChangeText={setName}
-                placeholder="Marcus"
-                placeholderTextColor={W.text2}
-                style={{ backgroundColor: W.surface1, color: W.text, borderWidth: 1, borderColor: W.surface2, height: 52, borderRadius: 14, paddingHorizontal: 16, fontFamily: 'Manrope_500Medium', fontSize: 18, textAlign: 'center' }}
+              <FieldLabel note="Optional">Backstory</FieldLabel>
+              <Txt variant="subhead" style={styles.fieldHelp}>A few lines on who they are and how they talk.</Txt>
+              <Field
+                multiline
+                value={backstory}
+                onChangeText={setBackstory}
+                maxLength={BACKSTORY_MAX}
+                placeholder="A laid-back surfer who gives surprisingly deep life advice…"
+                accessibilityLabel="Backstory, optional"
+                textAlignVertical="top"
+                style={styles.backstory}
               />
+              <Txt
+                variant="caption"
+                accessibilityLabel={`${backstory.length} of ${BACKSTORY_MAX} characters`}
+                style={[styles.counter, { color: backstory.length >= BACKSTORY_MAX ? W.warning : W.text2 }]}
+              >
+                {backstory.length}/{BACKSTORY_MAX}
+              </Txt>
             </View>
-            <View>
-              <FieldLabel>Voice gender</FieldLabel>
-              <View style={{ flexDirection: 'row', gap: 8 }}>
-                {(['male', 'female', 'neutral'] as const).map(g => (
-                  <Pill key={g} active={gender === g} onPress={() => setGender(g)} style={{ flex: 1, height: 38 }} textStyle={{ fontSize: 13, textTransform: 'capitalize' }}>{g}</Pill>
-                ))}
+          ) : null}
+
+          {/* A summary of what will be created, not a preview: a real one would
+              need the character to exist before the user commits to it. */}
+          {step === 4 ? (
+            <>
+              <View style={styles.review}>
+                <ReviewRow label="Name" value={trimmed} onEdit={() => goStep(1)} />
+                <ReviewRow label="Voice" value={voiceName ? `${voiceName} · ${GENDER_LABEL[gender]}` : GENDER_LABEL[gender]} onEdit={() => goStep(1)} />
+                <ReviewRow
+                  label="Personality"
+                  value={personality.length ? personality.join(', ') : 'Balanced on every trait'}
+                  onEdit={() => goStep(2)}
+                />
+                <ReviewRow label="Backstory" value={backstory.trim() || 'None'} muted={!backstory.trim()} onEdit={() => goStep(3)} last />
               </View>
-            </View>
-            <View>
-              <FieldLabel>Voice</FieldLabel>
-              <VoicePicker voices={voiceList} voiceId={pickedVoice} onPick={setVoiceId} />
-            </View>
-          </>
-        )}
-        {step === 2 && (
-          <View style={{ gap: 18 }}>
-            {SLIDERS.map(s => (
-              <View key={s.k}>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                  <Txt font="user" weight={500} style={{ fontSize: 13, color: W.text }}>{s.l}</Txt>
-                  <Txt font="user" style={{ fontSize: 11, color: W.text2 }}>{Math.round(traits[s.k] * 100)}</Txt>
-                </View>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                  <Txt font="user" style={{ fontSize: 18 }}>{s.left}</Txt>
-                  <View style={{ flex: 1 }}>
-                    <TraitSlider value={traits[s.k]} onChange={(v) => setTraits(t => ({ ...t, [s.k]: v }))} />
-                  </View>
-                  <Txt font="user" style={{ fontSize: 18 }}>{s.right}</Txt>
-                </View>
-              </View>
-            ))}
-          </View>
-        )}
-        {step === 3 && (
-          <View>
-            <FieldLabel>Backstory (optional)</FieldLabel>
-            <TextInput
-              value={backstory}
-              onChangeText={(t) => setBackstory(t.slice(0, 500))}
-              placeholder="A laid-back surfer who gives surprisingly deep life advice…"
-              placeholderTextColor={W.text2}
-              multiline
-              style={{ backgroundColor: W.surface1, color: W.text, borderWidth: 1, borderColor: W.surface2, height: 140, borderRadius: 14, padding: 14, fontFamily: 'Outfit_400Regular', fontSize: 14, lineHeight: 21, textAlignVertical: 'top' }}
-            />
-            <Txt font="user" style={{ marginTop: 6, textAlign: 'right', fontSize: 11, color: W.text2 }}>{backstory.length}/500</Txt>
-          </View>
-        )}
-        {step === 4 && (
-          <>
-            {/* ponytail: canned preview. A live one needs the character created first,
-                i.e. a create → session → stream round trip before the user commits —
-                not a small diff. Wire it to POST /studio/characters + /sessions/start
-                if the preview needs to be real. */}
-            <Txt font="user" style={{ fontSize: 13, color: W.text2, lineHeight: 20 }}>Test {name || 'them'} out. Type something and hear how they respond.</Txt>
-            <View style={{ backgroundColor: W.surface1, borderRadius: 12, padding: 12, gap: 8 }}>
-              <BubbleMem from="user" text="Hey, can you give me a quick pep talk?" />
-              <BubbleMem from="comp" text={`Yeah man, here it is — you've already won by showing up. Now ride it.`} />
-            </View>
-          </>
-        )}
+              <Txt variant="footnote" style={{ color: W.text3 }}>
+                Characters can't be edited once they're created, so check the details.
+              </Txt>
+            </>
+          ) : null}
+        </StepPane>
       </ScrollView>
-      <View style={{ paddingHorizontal: 24, paddingTop: 12, paddingBottom: 16, gap: 10 }}>
-        {err && <ErrorNote>{err}</ErrorNote>}
-        {step < 4 ? (
-          <PrimaryButton disabled={step === 1 && (!name.trim() || !pickedVoice)} onPress={() => setStep(s => s + 1)}>Next</PrimaryButton>
-        ) : (
-          <PrimaryButton disabled={busy || !pickedVoice} onPress={create}>
-            {busy ? 'Creating…' : `Create ${name || 'character'}`}
+
+      <View style={styles.footer}>
+        {err ? <InlineNotice tone="error" text={err} /> : null}
+        {stepHint ? <Txt variant="footnote" style={styles.hint}>{stepHint}</Txt> : null}
+        {step < STEPS ? (
+          <PrimaryButton haptic="selection" disabled={step === 1 && !canNext} onPress={() => goStep(step + 1)} accessibilityHint={stepHint ?? undefined}>
+            Next
           </PrimaryButton>
+        ) : (
+          <PrimaryButton loading={busy} disabled={!canNext} onPress={create}>{`Create ${trimmed}`}</PrimaryButton>
         )}
       </View>
     </Screen>
   );
 }
 
-// Draggable trait slider (replaces <input type=range>). Track + fill + thumb.
-function TraitSlider({ value, onChange }: { value: number; onChange: (v: number) => void }) {
-  const [width, setWidth] = useState(0);
-  const widthRef = useRef(0);
-  const onLayout = (e: LayoutChangeEvent) => { widthRef.current = e.nativeEvent.layout.width; setWidth(e.nativeEvent.layout.width); };
-  const pan = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: (e) => {
-        const w = widthRef.current;
-        if (w > 0) onChange(Math.max(0, Math.min(1, e.nativeEvent.locationX / w)));
-      },
-      onPanResponderMove: (e) => {
-        const w = widthRef.current;
-        if (w > 0) onChange(Math.max(0, Math.min(1, e.nativeEvent.locationX / w)));
-      },
-    }),
-  ).current;
-  const pct = Math.max(0, Math.min(1, value));
+function StepPane({ dir, children }: { dir: 1 | -1; children: React.ReactNode }) {
+  const entering = useOnce(() => (dir > 0 ? enter.fadeUp : enter.fadeDown));
+  const exiting = useOnce(() => exit.fade);
+  return <Animated.View entering={entering} exiting={exiting} style={styles.form0}>{children}</Animated.View>;
+}
+
+function ReviewRow({ label, value, muted = false, onEdit, last = false }: {
+  label: string; value: string; muted?: boolean; onEdit: () => void; last?: boolean;
+}) {
   return (
-    <View onLayout={onLayout} {...pan.panHandlers} style={{ height: 20, justifyContent: 'center' }}>
-      <View style={{ height: 4, backgroundColor: W.surface2, borderRadius: 2 }}>
-        <View style={{ position: 'absolute', left: 0, top: 0, height: 4, width: `${pct * 100}%`, backgroundColor: W.primary, borderRadius: 2 }} />
+    <View style={[styles.reviewRow, last ? null : styles.reviewDivider]}>
+      <View style={styles.shrink}>
+        <Txt variant="eyebrow" style={{ color: W.text2 }}>{label}</Txt>
+        <Txt variant="callout" style={{ color: muted ? W.text3 : W.text, marginTop: SP.xxs }}>{value}</Txt>
       </View>
-      <View
-        style={{
-          position: 'absolute', left: Math.max(0, pct * width - 8), top: 2,
-          width: 16, height: 16, borderRadius: 8, backgroundColor: W.primary,
-          shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 3, shadowOffset: { width: 0, height: 1 },
-        }}
-      />
+      <Pressable
+        onPress={onEdit}
+        hitSlop={minTarget(40, 28)}
+        accessibilityRole="button"
+        accessibilityLabel={`Edit ${label.toLowerCase()}`}
+        style={({ pressed }) => [styles.editButton, pressed ? styles.pressed : null]}
+      >
+        <Txt variant="subhead" weight={600} style={{ color: W.primarySoft }}>Edit</Txt>
+      </Pressable>
     </View>
   );
 }
 
-// Shared bottom-sheet overlay used by studio summary (+ reused pattern elsewhere).
-export function SheetOverlay({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
-  const v = useRef(new Animated.Value(0)).current;
+// ─── Trait slider ────────────────────────────────────────────────────────
+// A 44pt touch row around a 4pt track. The drag runs on the UI thread and
+// commits on release; a drag that starts vertical is left to the scroll view.
+// Grabbing the thumb moves it from where it is, touching the track elsewhere
+// jumps there, and every tenth ticks. VoiceOver adjusts it in steps of 10.
+// Only transforms move during a drag (no layout pass per frame), and only
+// this slider's own label re-renders as the number changes.
+const THUMB = 24;
+
+const TraitSlider = memo(function TraitSlider({ spec, value, onChange }: {
+  spec: TraitSpec;
+  value: number;
+  onChange: (k: TraitKey, v: number) => void;
+}) {
+  const [shown, setShown] = useState(Math.round(value * 100));
+  const width = useSharedValue(0);
+  const pos = useSharedValue(value);
+  const grab = useSharedValue(0);
+  const held = useSharedValue(0);
+  const lastPct = useSharedValue(Math.round(value * 100));
+  const lastTick = useSharedValue(Math.round(value * 10));
+  const onChangeRef = useRef(onChange);
+  onChangeRef.current = onChange;
+  // The value this slider last handed up. When it comes back as the prop,
+  // the thumb is already there (or gliding there), so leave it alone.
+  const selfSet = useRef<number | null>(null);
+
   useEffect(() => {
-    Animated.timing(v, { toValue: 1, duration: 450, easing: Easing.bezier(0.34, 1.05, 0.64, 1), useNativeDriver: true }).start();
-  }, []);
-  const translateY = v.interpolate({ inputRange: [0, 1], outputRange: [400, 0] });
+    const mine = selfSet.current === value;
+    selfSet.current = null;
+    if (!mine) pos.value = value;
+    lastPct.value = Math.round(value * 100);
+    lastTick.value = Math.round(value * 10);
+    setShown(Math.round(value * 100));
+  }, [value, pos, lastPct, lastTick]);
+
+  const commit = useCallback((v: number) => {
+    const rounded = Math.round(v * 100) / 100;
+    selfSet.current = rounded;
+    onChangeRef.current(spec.k, rounded);
+  }, [spec.k]);
+  const tick = useCallback(() => haptic.selection(), []);
+
+  const gesture = useMemo(() => {
+    const valueAt = (x: number) => {
+      'worklet';
+      const track = width.value - THUMB;
+      return track > 0 ? Math.min(1, Math.max(0, (x - THUMB / 2) / track)) : pos.value;
+    };
+    const report = (v: number) => {
+      'worklet';
+      const pct = Math.round(v * 100);
+      if (pct !== lastPct.value) {
+        lastPct.value = pct;
+        scheduleOnRN(setShown, pct);
+      }
+      const step = Math.round(v * 10);
+      if (step !== lastTick.value) {
+        lastTick.value = step;
+        scheduleOnRN(tick);
+      }
+    };
+    const pan = Gesture.Pan()
+      .activeOffsetX([-4, 4])
+      .failOffsetY([-10, 10])
+      .onBegin(e => {
+        const thumbCentre = pos.value * (width.value - THUMB) + THUMB / 2;
+        grab.value = Math.abs(e.x - thumbCentre) <= THUMB ? e.x - thumbCentre : 0;
+      })
+      // Swell only once the drag is really horizontal, not on a scroll's touch-down.
+      .onStart(() => { held.value = withTiming(1, calm(D.instant)); })
+      .onUpdate(e => {
+        const v = valueAt(e.x - grab.value);
+        pos.value = v;
+        report(v);
+      })
+      .onEnd(() => { scheduleOnRN(commit, pos.value); })
+      .onFinalize(() => { held.value = withTiming(0, calm(D.fast)); });
+    const tap = Gesture.Tap()
+      .maxDistance(10)
+      .onEnd((e, success) => {
+        if (!success) return;
+        const v = valueAt(e.x);
+        pos.value = withTiming(v, timing(D.fast, 'decel'));
+        report(v);
+        scheduleOnRN(commit, v);
+      });
+    return Gesture.Exclusive(pan, tap);
+  }, [commit, tick, width, pos, grab, held, lastPct, lastTick]);
+
+  // A full-length fill slid in from the left and clipped by the track, rather
+  // than a width that would need a layout pass on every frame of the drag.
+  const fillStyle = useAnimatedStyle(() => ({
+    // Hidden until measured, like the thumb, or it would flash full.
+    opacity: width.value > 0 ? 1 : 0,
+    transform: [{ translateX: (pos.value - 1) * Math.max(0, width.value - THUMB) }],
+  }));
+  const thumbStyle = useAnimatedStyle(() => ({
+    // Hidden until measured, so it never flashes at the left edge.
+    opacity: width.value > 0 ? 1 : 0,
+    transform: [{ translateX: pos.value * Math.max(0, width.value - THUMB) }, { scale: 1 + held.value * 0.12 }],
+  }));
+
+  const adjust = (delta: number) => {
+    const v = Math.min(1, Math.max(0, Math.round((value + delta) * 10) / 10));
+    if (v !== value) onChange(spec.k, v);
+  };
+
+  const word = traitWord(spec, shown / 100);
   return (
-    <View style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, zIndex: 30, justifyContent: 'flex-end' }}>
-      <Pressable onPress={onClose} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: 'rgba(24,16,20,0.55)' }}>
-        <BlurView intensity={8} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-      </Pressable>
-      <Animated.View style={{ transform: [{ translateY }], maxHeight: '85%', borderTopLeftRadius: 24, borderTopRightRadius: 24, overflow: 'hidden', borderTopWidth: 1, borderTopColor: 'rgba(255,255,255,0.10)' }}>
-        <LinearGradient colors={['rgba(48,32,40,0.95)', 'rgba(24,16,20,0.95)']} style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-        <BlurView intensity={36} tint="dark" style={{ position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 }} />
-        <ScrollView contentContainerStyle={{ paddingTop: 12, paddingHorizontal: 24, paddingBottom: 24 }}>
-          {children}
-        </ScrollView>
-      </Animated.View>
+    <View>
+      <View style={styles.traitHead}>
+        <Txt variant="subhead" weight={600}>{spec.l}</Txt>
+        <Txt variant="footnote" style={styles.traitValue}>{word} · {shown}</Txt>
+      </View>
+      <View style={styles.traitRow}>
+        <Txt accessibilityElementsHidden importantForAccessibility="no" maxScale={1.2} style={styles.traitEnd}>{spec.left}</Txt>
+        <GestureDetector gesture={gesture}>
+          <View
+            accessible
+            accessibilityRole="adjustable"
+            accessibilityLabel={`${spec.l}, ${spec.low} to ${spec.high}`}
+            accessibilityValue={{ min: 0, max: 100, now: shown, text: `${shown}, ${word.toLowerCase()}` }}
+            accessibilityActions={[{ name: 'increment' }, { name: 'decrement' }]}
+            onAccessibilityAction={e => adjust(e.nativeEvent.actionName === 'increment' ? 0.1 : -0.1)}
+            onLayout={e => { width.value = e.nativeEvent.layout.width; }}
+            style={styles.sliderHit}
+          >
+            <View pointerEvents="none" style={styles.track}>
+              <Animated.View style={[styles.trackFill, fillStyle]} />
+            </View>
+            <Animated.View pointerEvents="none" style={[styles.thumb, thumbStyle]} />
+          </View>
+        </GestureDetector>
+        <Txt accessibilityElementsHidden importantForAccessibility="no" maxScale={1.2} style={styles.traitEnd}>{spec.right}</Txt>
+      </View>
     </View>
   );
-}
+});
+
+const styles = StyleSheet.create({
+  flex1: { flex: 1 },
+  grow: { flexGrow: 1 },
+  shrink: { flex: 1, minWidth: 0 },
+  shrinkText: { flexShrink: 1 },
+  center: { textAlign: 'center' },
+  alignEnd: { alignSelf: 'flex-end' },
+  gapXs: { gap: SP.xs },
+  gapSm: { gap: SP.sm },
+  gapMd: { gap: SP.md },
+  rowCenter: { flexDirection: 'row', alignItems: 'center', gap: SP.sm2 },
+  rowTight: { flexDirection: 'row', alignItems: 'center', gap: SP.xs2 },
+  rowBetween: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: SP.sm },
+  wrapRow: { flexDirection: 'row', flexWrap: 'wrap', gap: SP.sm },
+  pressed: { opacity: 0.7 },
+  pressedRow: { opacity: 0.85 },
+
+  // S15
+  gutter: { paddingHorizontal: SP.lg },
+  sectionHeader: { paddingHorizontal: SP.lg, paddingBottom: SP.md },
+  homeNotice: { marginHorizontal: SP.lg, marginTop: SP.sm },
+  cardRow: { gap: ROW_GAP, paddingHorizontal: SP.lg },
+  createButton: {
+    flexDirection: 'row', alignItems: 'center', gap: SP.xs, minHeight: 34,
+    paddingHorizontal: SP.md, borderRadius: R.pill,
+    backgroundColor: rgba(W.primary, 0.12), borderWidth: 1, borderColor: rgba(W.primary, 0.28),
+  },
+  // The carousel cards are tinted glass without a live blur: a blur view
+  // re-renders on every frame of a scroll, and these scroll both ways over a
+  // still, already soft backdrop, where the blur added little to see.
+  glassCard: { borderRadius: R.lg, borderWidth: 1, overflow: 'hidden', backgroundColor: W.glass },
+  continueCard: { padding: SP.md2, gap: SP.sm },
+  scenarioCard: { padding: SP.base, minHeight: 200, justifyContent: 'space-between', gap: SP.md },
+  badge: { paddingVertical: SP.xxs, paddingHorizontal: SP.sm, borderRadius: R.sm, flexShrink: 1 },
+  tileGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: SP.sm2 },
+  tileOuter: { width: '48%' },
+  tile: { minHeight: 112, borderRadius: R.lg, padding: SP.md2, backgroundColor: W.surface1 },
+  tileName: { marginTop: SP.sm2 },
+  tileRing: { ...StyleSheet.absoluteFillObject, borderRadius: R.lg, borderWidth: 2, borderColor: W.primary },
+  dashed: { borderWidth: 1.5, borderStyle: 'dashed', borderColor: rgba(W.text3, 0.35), borderRadius: R.lg },
+  addTile: { minHeight: 112, padding: SP.md2, alignItems: 'center', justifyContent: 'center', gap: SP.xs2 },
+  createFirst: { paddingVertical: SP.xl, paddingHorizontal: SP.lg, alignItems: 'center', gap: SP.sm },
+  createFirstIcon: {
+    width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: W.primaryDim, borderWidth: 1, borderColor: rgba(W.primary, 0.2),
+  },
+
+  // Forms (S16, S18)
+  form: { paddingHorizontal: SP.xl, paddingTop: SP.md, paddingBottom: SP.base, gap: SP.lg },
+  form0: { gap: SP.lg },
+  fieldLabel: { flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: SP.sm, marginBottom: SP.sm2 },
+  fieldHelp: { color: W.text2, marginBottom: SP.sm2 },
+  titleRow: { flexDirection: 'row', alignItems: 'center', gap: SP.sm, maxWidth: '100%' },
+  stepTitle: { alignItems: 'center', gap: SP.xs2, maxWidth: '100%' },
+  input: {
+    minHeight: 48, borderRadius: R.md, borderWidth: 1, borderColor: W.hairline, backgroundColor: W.surface3,
+    paddingHorizontal: SP.md2, paddingVertical: SP.md,
+    color: W.text, fontFamily: resolveFont('user', 400), fontSize: TYPE.body.size,
+  },
+  inputFocused: { borderColor: rgba(W.primary, 0.45) },
+  nameInput: { minHeight: 52, fontFamily: resolveFont('comp', 500), fontSize: TYPE.title3.size, textAlign: 'center' },
+  backstory: { minHeight: 140, lineHeight: TYPE.body.lineHeight },
+  noteInput: { minHeight: 72 },
+  counter: { marginTop: SP.xs2, textAlign: 'right' },
+  genderRow: { flexDirection: 'row', gap: SP.sm },
+  voiceGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: SP.sm2 },
+  voiceCardOuter: { width: '48%' },
+  voiceCard: {
+    flexGrow: 1, minHeight: 116, borderRadius: R.lg, borderWidth: 2,
+    backgroundColor: W.surface1, padding: SP.md, gap: SP.xs,
+  },
+  checkBadge: {
+    width: 20, height: 20, borderRadius: 10, backgroundColor: W.primary,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  rememberRow: {
+    minHeight: HIT, borderRadius: R.md2, padding: SP.md2, paddingLeft: SP.base,
+    flexDirection: 'row', alignItems: 'center', gap: SP.md, overflow: 'hidden',
+    borderWidth: 1, borderColor: W.primaryDim, backgroundColor: W.glass,
+  },
+  rememberIcon: { width: 32, height: 32, borderRadius: R.sm2, alignItems: 'center', justifyContent: 'center' },
+  rememberCopy: { color: W.text2, marginTop: SP.xxs },
+  footer: { paddingHorizontal: SP.xl, paddingTop: SP.md, paddingBottom: SP.base, gap: SP.sm2 },
+  hint: { color: W.text2, textAlign: 'center' },
+  review: { borderRadius: R.lg, backgroundColor: W.surface1, paddingHorizontal: SP.base },
+  reviewRow: { flexDirection: 'row', alignItems: 'center', gap: SP.md, paddingVertical: SP.md2 },
+  reviewDivider: { borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: W.hairlineStrong },
+  editButton: { paddingHorizontal: SP.xs2, paddingVertical: SP.xs },
+
+  // Trait slider
+  traitHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', gap: SP.sm },
+  traitValue: { color: W.text2, fontVariant: ['tabular-nums'] },
+  traitRow: { flexDirection: 'row', alignItems: 'center', gap: SP.sm },
+  traitEnd: { fontSize: TYPE.title3.size, lineHeight: TYPE.title3.lineHeight },
+  sliderHit: { flex: 1, height: HIT, justifyContent: 'center' },
+  track: { marginHorizontal: THUMB / 2, height: 4, borderRadius: 2, backgroundColor: W.surface3, overflow: 'hidden' },
+  trackFill: { ...StyleSheet.absoluteFillObject, borderRadius: 2, backgroundColor: W.primary },
+  thumb: {
+    position: 'absolute', left: 0, top: (HIT - THUMB) / 2, width: THUMB, height: THUMB, borderRadius: THUMB / 2,
+    backgroundColor: W.cream, borderWidth: 3, borderColor: W.primary, ...ELEV.low,
+  },
+
+  // S17
+  endButton: { minHeight: 30, justifyContent: 'center', paddingHorizontal: SP.sm, borderRadius: R.pill },
+  banner: {
+    marginHorizontal: SP.base, marginTop: SP.sm2, marginBottom: SP.xs2, minHeight: HIT,
+    borderRadius: R.sm2, paddingVertical: SP.xs2, paddingLeft: SP.md, paddingRight: SP.sm,
+    flexDirection: 'row', alignItems: 'center', gap: SP.sm, overflow: 'hidden',
+    borderWidth: 1, borderLeftWidth: 2, backgroundColor: W.glass,
+  },
+  thread: { paddingHorizontal: SP.base, paddingVertical: SP.sm, gap: SP.sm },
+  threadSkeleton: { gap: SP.sm2, paddingTop: SP.xs },
+  opener: {
+    borderRadius: R.lg, padding: SP.base, gap: SP.sm2, overflow: 'hidden',
+    borderWidth: 1, borderColor: W.hairline, backgroundColor: W.glass,
+  },
+  starters: { flexDirection: 'row', flexWrap: 'wrap', gap: SP.sm, paddingTop: SP.xs },
+  turnNote: {
+    flexDirection: 'row', alignItems: 'center', gap: SP.xs2, alignSelf: 'flex-end',
+    paddingTop: SP.xs, paddingHorizontal: SP.xs,
+  },
+  alignStart: { alignSelf: 'flex-start' },
+  earlier: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: SP.xs2,
+    alignSelf: 'center', paddingVertical: SP.xs, paddingHorizontal: SP.md,
+  },
+  cutText: { alignSelf: 'flex-start', paddingTop: SP.xs, paddingHorizontal: SP.xs, color: W.text3 },
+  chipWrap: { position: 'absolute', left: 0, right: 0, bottom: SP.sm, alignItems: 'center' },
+  chip: {
+    flexDirection: 'row', alignItems: 'center', gap: SP.xs2, minHeight: 34,
+    paddingHorizontal: SP.md2, borderRadius: R.pill, overflow: 'hidden',
+    backgroundColor: W.glassBar, borderWidth: 1, borderColor: W.hairlineStrong,
+  },
+  crisis: {
+    alignSelf: 'stretch', marginVertical: SP.xs2, borderRadius: R.lg, padding: SP.base, gap: SP.md,
+    backgroundColor: rgba(W.gold, 0.08), borderWidth: 1, borderColor: rgba(W.gold, 0.18),
+  },
+  crisisIcon: {
+    width: 32, height: 32, borderRadius: R.sm2, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: rgba(W.gold, 0.12), borderWidth: 1, borderColor: rgba(W.gold, 0.2),
+  },
+  crisisRow: {
+    minHeight: HIT, flexDirection: 'row', alignItems: 'center', gap: SP.sm2,
+    paddingVertical: SP.sm2, paddingHorizontal: SP.md, borderRadius: R.sm2,
+    backgroundColor: W.glassSoft, borderWidth: 1, borderColor: rgba(W.gold, 0.1),
+  },
+  crisisRowIcon: {
+    width: 30, height: 30, borderRadius: R.sm, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: rgba(W.gold, 0.1),
+  },
+  crisisMore: { flexDirection: 'row', alignItems: 'center', gap: SP.xs, alignSelf: 'flex-start', paddingVertical: SP.xs },
+  memoryRow: {
+    flexDirection: 'row', alignItems: 'center', gap: SP.sm2, borderRadius: R.md,
+    paddingVertical: SP.xs2, paddingLeft: SP.md, paddingRight: SP.xs,
+    backgroundColor: rgba(W.gold, 0.06), borderWidth: 1, borderColor: rgba(W.gold, 0.15),
+  },
+});

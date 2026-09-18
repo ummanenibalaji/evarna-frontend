@@ -5,7 +5,24 @@
 // exists — including Expo Go, where the rest of the app still runs fine. Same
 // pattern as getAudioSession() in hooks/useVoiceCall.ts.
 
-export class GoogleSignInUnavailable extends Error {}
+import { withSystemPrompt } from '../components/PrivacyShield';
+
+/**
+ * This build cannot do Google sign-in at all. The message is written for the
+ * person holding the phone; the reason, which only a developer can act on, goes
+ * to the console.
+ */
+export class GoogleSignInUnavailable extends Error {
+  constructor(readonly detail: string) {
+    super("Google sign-in isn't available in this build.");
+    this.name = 'GoogleSignInUnavailable';
+  }
+}
+
+function unavailable(detail: string): GoogleSignInUnavailable {
+  console.warn(`[GoogleSignIn] ${detail}`);
+  return new GoogleSignInUnavailable(detail);
+}
 
 // The web client id is not a mistake and not optional. The library exchanges
 // the native sign-in for an ID token whose audience is the WEB client, and the
@@ -27,20 +44,19 @@ let mod: GoogleSignInModule | null = null;
 let configured = false;
 
 function load(): GoogleSignInModule {
-  if (mod) return mod;
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    mod = require('@react-native-google-signin/google-signin') as GoogleSignInModule;
-  } catch {
-    throw new GoogleSignInUnavailable(
-      'Google sign-in needs a development build — it does not work in Expo Go.',
-    );
+  if (!mod) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      mod = require('@react-native-google-signin/google-signin') as GoogleSignInModule;
+    } catch {
+      throw unavailable('The native module is missing. Google sign-in needs a development build; it does not work in Expo Go.');
+    }
   }
+  // Checked on every call, not only the first: a cached module is not a
+  // configured one.
   if (!configured) {
     if (!WEB_CLIENT_ID) {
-      throw new GoogleSignInUnavailable(
-        'Google sign-in is not configured on this build (EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID is unset).',
-      );
+      throw unavailable('EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID is unset, so the ID token would have the wrong audience.');
     }
     mod.GoogleSignin.configure({
       webClientId: WEB_CLIENT_ID,
@@ -58,9 +74,9 @@ function load(): GoogleSignInModule {
  * Returns a Google ID token, or null if the user cancelled.
  *
  * Throws GoogleSignInUnavailable when the build or the configuration cannot
- * support it — the caller shows that message directly, because "you need a dev
- * build" and "we couldn't sign you in" are different problems and telling a
- * developer the second one wastes their afternoon.
+ * support it. The caller shows its message directly: "not available in this
+ * build" and "we couldn't sign you in" are different problems, and the console
+ * warning carries the reason for whoever made the build.
  */
 export async function getGoogleIdToken(): Promise<string | null> {
   const { GoogleSignin } = load();
@@ -69,7 +85,9 @@ export async function getGoogleIdToken(): Promise<string | null> {
   // missing Play Services fails deep inside the native call.
   await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
 
-  const res = await GoogleSignin.signIn();
+  // iOS asks "Evarna wants to use google.com to sign in" and then shows
+  // Google's sheet; the sign-in screen stays visible behind both.
+  const res = await withSystemPrompt(() => GoogleSignin.signIn());
   // v13+ returns { data: { idToken } }; older versions returned idToken at the
   // top level. Accept both so a minor bump does not silently break sign-in.
   return res?.data?.idToken ?? res?.idToken ?? null;

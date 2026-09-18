@@ -7,7 +7,9 @@
 // nothing at runtime and we still get the real types.
 
 import { Platform } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import type * as NotificationsModule from 'expo-notifications';
+import { withSystemPrompt } from '../components/PrivacyShield';
 
 /** What the backend puts in the notification's `data` so we can open the right chat. */
 export interface PushTapData {
@@ -21,6 +23,33 @@ const REPLY_ACTION = 'reply';
 let mod: typeof NotificationsModule | null = null;
 let handlerSet = false;
 let categorySet = false;
+// The companion whose chat is on screen. Its pushes would only repeat what the
+// thread is already showing.
+let foregroundThread: string | null = null;
+// Bumped by every claim. A chat that is leaving is still mounted while the one
+// replacing it slides in, and has already been replaced as the owner by the
+// time it unmounts, so its release must not clear the newcomer's claim.
+let foregroundClaim = 0;
+
+/**
+ * While a chat is open, pushes from that companion arrive without a banner or
+ * sound. Returns this claim's release, which clears the slot only if no other
+ * chat has claimed it since; leaving a chat should call that (or
+ * clearForegroundThread) rather than pass null. Null still clears the slot
+ * outright, whoever holds it.
+ */
+export function setForegroundThread(characterId: string | null): () => void {
+  const claim = ++foregroundClaim;
+  foregroundThread = characterId;
+  return () => {
+    if (foregroundClaim === claim) foregroundThread = null;
+  };
+}
+
+/** Leaving `characterId`'s chat: clears the slot only while it is still that chat's. */
+export function clearForegroundThread(characterId: string): void {
+  if (foregroundThread === characterId) foregroundThread = null;
+}
 
 // Returns null instead of throwing: every caller here is fire-and-forget and a
 // missing native module must never be louder than "notifications are off".
@@ -36,12 +65,11 @@ function load(): typeof NotificationsModule | null {
     // Without this, a notification arriving while the app is foregrounded is
     // delivered silently and the user never sees the companion reach out.
     mod.setNotificationHandler({
-      handleNotification: async () => ({
-        shouldShowBanner: true,
-        shouldShowList: true,
-        shouldPlaySound: true,
-        shouldSetBadge: false,
-      }),
+      handleNotification: async n => {
+        const data = (n.request.content.data ?? {}) as PushTapData;
+        const show = !foregroundThread || data.character_id !== foregroundThread;
+        return { shouldShowBanner: show, shouldShowList: show, shouldPlaySound: show, shouldSetBadge: false };
+      },
     });
     handlerSet = true;
     registerMessageCategory();
@@ -75,14 +103,69 @@ export function registerMessageCategory(): void {
 /**
  * Immediate local notification telling the user a reply they typed never left
  * the device. Deliberately plain — they typed into a shade, not into the app.
+ * `code` is the refusal code when the server declined it: a limit is not
+ * something trying again will fix, so it must not say so. 'DELIVERY_UNKNOWN'
+ * (no answer before the app stopped waiting) may well have been delivered:
+ * the server finishes a turn after the app leaves and pushes the reply, so
+ * that one must not say "not sent".
  */
-export function notifyReplyFailed(): void {
+export function notifyReplyFailed(code?: string): void {
   const N = load();
   if (!N) return;
+  if (code === 'DELIVERY_UNKNOWN') {
+    N.scheduleNotificationAsync({
+      content: { title: 'Message not confirmed', body: 'It may still have gone through. Open Evarna to check.' },
+      trigger: null,
+    }).catch(() => {});
+    return;
+  }
+  const body = code === 'DAILY_MESSAGE_CAP'
+    ? "You've reached today's message limit."
+    : code === 'USAGE_LIMIT_REACHED'
+      ? "You've reached a messaging limit for now."
+      : "Couldn't send that. Open Evarna to try again.";
   N.scheduleNotificationAsync({
-    content: { title: 'Message not sent', body: "Couldn't send that — open Evarna to try again" },
+    content: { title: 'Message not sent', body },
     trigger: null,
   }).catch(() => {});
+}
+
+// Replies typed into the shade that never reached the server, by companion, so
+// the chat can offer the text back instead of losing it.
+const UNSENT_KEY = 'evarna_unsent_replies_v1';
+const UNSENT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+type UnsentReplies = Record<string, { text: string; at: number }>;
+
+async function readUnsent(): Promise<UnsentReplies> {
+  try {
+    const parsed = JSON.parse((await AsyncStorage.getItem(UNSENT_KEY)) ?? '{}') as UnsentReplies | null;
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Keep a reply that failed to send from the notification shade. A newer one for the same companion replaces it. */
+export async function saveUnsentReply(characterId: string, text: string): Promise<void> {
+  if (!characterId || !text.trim()) return;
+  const all = await readUnsent();
+  all[characterId] = { text, at: Date.now() };
+  await AsyncStorage.setItem(UNSENT_KEY, JSON.stringify(all)).catch(() => {});
+}
+
+/**
+ * The unsent reply for this companion, removed as it is read, so it becomes the
+ * chat's draft exactly once. Older than a week is dropped rather than offered.
+ */
+export async function takeUnsentReply(characterId: string): Promise<string | null> {
+  const all = await readUnsent();
+  const entry = all[characterId];
+  if (!entry) return null;
+  const now = Date.now();
+  const fresh = (e: { at: number }) => now - e.at <= UNSENT_TTL_MS;
+  const kept = Object.fromEntries(Object.entries(all).filter(([id, e]) => id !== characterId && fresh(e)));
+  await AsyncStorage.setItem(UNSENT_KEY, JSON.stringify(kept)).catch(() => {});
+  return fresh(entry) && typeof entry.text === 'string' ? entry.text : null;
 }
 
 /** The device's IANA zone. The backend needs it for quiet hours (22:00–08:00 local). */
@@ -129,10 +212,30 @@ export async function requestPushPermission(): Promise<string | null> {
   try {
     const existing = await N.getPermissionsAsync();
     // iOS only ever shows the system sheet once; asking again just re-reads it.
-    const status = existing.granted ? existing : await N.requestPermissionsAsync();
+    // The screen explaining why stays visible behind that sheet.
+    const status = existing.granted ? existing : await withSystemPrompt(() => N.requestPermissionsAsync());
     return await tokenIfGranted(N, status.granted);
   } catch {
     return null;
+  }
+}
+
+/**
+ * What notifications can do right now, without prompting.
+ * 'denied' means only the system Settings app can change it (iOS after one
+ * refusal, Android once it stops asking); an Android refusal that can still be
+ * asked again counts as 'undetermined'. A build without the module is 'denied':
+ * nothing would arrive.
+ */
+export async function getPushPermissionStatus(): Promise<'granted' | 'denied' | 'undetermined'> {
+  const N = load();
+  if (!N) return 'denied';
+  try {
+    const p = await N.getPermissionsAsync();
+    if (p.granted) return 'granted';
+    return p.status === 'denied' && !p.canAskAgain ? 'denied' : 'undetermined';
+  } catch {
+    return 'undetermined';
   }
 }
 
@@ -159,6 +262,19 @@ export function addPushTapListener(cb: (data: PushTapData) => void): () => void 
     // action — still means "open the chat".
     if (r.actionIdentifier === REPLY_ACTION) return;
     cb((r.notification.request.content.data ?? {}) as PushTapData);
+  });
+  return () => sub.remove();
+}
+
+/**
+ * A push that arrived while the app was in the foreground, so an open chat can
+ * refetch and show the message in place. Returns an unsubscribe.
+ */
+export function addPushReceivedListener(cb: (data: PushTapData) => void): () => void {
+  const N = load();
+  if (!N) return () => {};
+  const sub = N.addNotificationReceivedListener(n => {
+    cb((n.request.content.data ?? {}) as PushTapData);
   });
   return () => sub.remove();
 }

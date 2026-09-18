@@ -1,8 +1,13 @@
 // NavIcon.tsx — all line icons, ported from system.jsx NavIcon().
 // Uses react-native-svg. Default stroke style matches the web props:
 // strokeWidth 1.8, round caps/joins, no fill.
+// Icons are decorative: the control that holds one carries the label
+// (see IconButton in Atoms).
+//
+// Memoized: every prop is a primitive, so a parent re-render never re-runs
+// react-native-svg's prop processing for an icon that hasn't changed.
 
-import React from 'react';
+import React, { memo } from 'react';
 import Svg, { Path, Rect, Circle } from 'react-native-svg';
 import { W } from '../theme/theme';
 
@@ -12,7 +17,10 @@ export type IconName =
   | 'lock' | 'heart' | 'compass' | 'target' | 'briefcase' | 'book' | 'globe' | 'trash'
   | 'search' | 'kebab' | 'right' | 'mute' | 'two' | 'flash' | 'speaker' | 'play' | 'pause'
   // Ember Dusk additions — solid marks for streak / memory, plus a clock.
-  | 'flame' | 'flame-solid' | 'sparkle-solid' | 'clock';
+  | 'flame' | 'flame-solid' | 'sparkle-solid' | 'clock'
+  // Actions and status
+  | 'copy' | 'flag' | 'refresh' | 'captions' | 'external' | 'info' | 'alert'
+  | 'pencil' | 'share' | 'undo' | 'wifi-off';
 
 interface NavIconProps {
   name: IconName;
@@ -20,7 +28,7 @@ interface NavIconProps {
   size?: number;
 }
 
-export function NavIcon({ name, color = W.text, size = 22 }: NavIconProps) {
+function NavIconImpl({ name, color = W.text, size = 22 }: NavIconProps) {
   const common = {
     width: size,
     height: size,
@@ -122,7 +130,34 @@ export function NavIcon({ name, color = W.text, size = 22 }: NavIconProps) {
       return <Svg {...common}><Path d="M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2z" fill={color} /></Svg>;
     case 'clock':
       return <Svg {...common}><Circle {...stroke} cx={12} cy={12} r={9} /><Path {...stroke} d="M12 7v5l3 3" /></Svg>;
+
+    // ── Actions and status ─────────────────────────────────────────────
+    case 'copy':
+      return <Svg {...common}><Rect {...stroke} x={9} y={9} width={12} height={12} rx={2} /><Path {...stroke} d="M15 5v-.5A1.5 1.5 0 0 0 13.5 3h-9A1.5 1.5 0 0 0 3 4.5v9A1.5 1.5 0 0 0 4.5 15H5" /></Svg>;
+    case 'flag':
+      return <Svg {...common}><Path {...stroke} d="M5 21V4M5 4h12l-2.5 4.5L17 13H5" /></Svg>;
+    case 'refresh':
+      return <Svg {...common}><Path {...stroke} d="M20 12a8 8 0 1 1-8-8c2.2 0 4.3.9 5.9 2.4L20 8.5M20 4v4.5h-4.5" /></Svg>;
+    case 'captions':
+      return <Svg {...common}><Rect {...stroke} x={3} y={5} width={18} height={14} rx={3} /><Path {...stroke} d="M10.75 10.27a2 2 0 1 0 0 3.46M16.25 10.27a2 2 0 1 0 0 3.46" /></Svg>;
+    case 'external':
+      return <Svg {...common}><Path {...stroke} d="M14 4h6v6M20 4l-9 9M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4" /></Svg>;
+    case 'info':
+      return <Svg {...common}><Circle {...stroke} cx={12} cy={12} r={9} /><Path {...stroke} d="M12 11v5" /><Circle cx={12} cy={7.8} r={1.1} fill={color} /></Svg>;
+    case 'alert':
+      return <Svg {...common}><Circle {...stroke} cx={12} cy={12} r={9} /><Path {...stroke} d="M12 7.5v5" /><Circle cx={12} cy={16.2} r={1.1} fill={color} /></Svg>;
+    case 'pencil':
+      return <Svg {...common}><Path {...stroke} d="M4 20h4L19 9a2.83 2.83 0 0 0-4-4L4 16v4zM13.5 6.5l4 4" /></Svg>;
+    case 'share':
+      return <Svg {...common}><Path {...stroke} d="M12 15V3M8 7l4-4 4 4M6 11H5.5A1.5 1.5 0 0 0 4 12.5v7A1.5 1.5 0 0 0 5.5 21h13a1.5 1.5 0 0 0 1.5-1.5v-7a1.5 1.5 0 0 0-1.5-1.5H18" /></Svg>;
+    case 'undo':
+      return <Svg {...common}><Path {...stroke} d="M9 14L4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11" /></Svg>;
+    case 'wifi-off':
+      return <Svg {...common}><Path {...stroke} d="M3 3l18 18M8.5 16.4a5 5 0 0 1 6.2-.7M5 12.9a10 10 0 0 1 4.6-2.6M19 12.9a10 10 0 0 0-2.9-1.9M2 8.8A15 15 0 0 1 6.3 6.2M22 8.8A15 15 0 0 0 10.6 5.1" /><Circle cx={12} cy={19.5} r={1.1} fill={color} /></Svg>;
     default:
       return null;
   }
 }
+
+export const NavIcon = memo(NavIconImpl);
+NavIcon.displayName = 'NavIcon';

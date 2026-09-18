@@ -1,15 +1,25 @@
 // App.tsx (root) — loads the Bricolage Grotesque + Manrope + Outfit font faces
-// used by the Txt component, then renders the navigation router inside a
-// SafeAreaProvider.
+// used by the Txt component, then renders the navigation router inside the
+// gesture, safe-area and error-recovery shells, with the app-switcher privacy
+// cover on top.
+//
+// Launch is kept short: what this phone knows is read from storage while the
+// JS loads and the fonts register (navigation/launch.ts), LiveKit and WebRTC
+// are only set up when the first call starts (hooks/useVoiceCall.ts), and the
+// native launch screen stays up until the first real screen has been drawn,
+// then fades straight onto it.
 
 // MUST be first: installs DOMException + other shims Hermes lacks, before any
 // other module (e.g. livekit-client) loads and references them.
 import './src/polyfills';
+// Next: importing it starts reading the saved session and data (launch.ts).
+import { revealApp } from './src/navigation/launch';
 
 import * as Sentry from '@sentry/react-native';
 
 // Crash reporting: JS errors, unhandled rejections, native crashes, and render
-// errors caught by Sentry.wrap below. Nothing is sent without a DSN. No PII: a
+// errors caught by the ErrorBoundary below (Sentry.wrap itself only adds
+// profiling and touch breadcrumbs). Nothing is sent without a DSN. No PII: a
 // crash report must never carry what someone said to their companion.
 //
 // ponytail: stack traces from release builds stay minified until source maps
@@ -25,58 +35,102 @@ Sentry.init({
   sendDefaultPii: false,
 });
 
-import React, { useCallback } from 'react';
-import { View } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { StyleSheet, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as SplashScreen from 'expo-splash-screen';
+import * as Font from 'expo-font';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import {
-  useFonts as useManrope,
-  Manrope_400Regular, Manrope_500Medium, Manrope_600SemiBold, Manrope_700Bold,
-} from '@expo-google-fonts/manrope';
-import {
-  Outfit_400Regular, Outfit_500Medium, Outfit_600SemiBold, Outfit_700Bold,
-} from '@expo-google-fonts/outfit';
-import {
-  BricolageGrotesque_500Medium, BricolageGrotesque_600SemiBold, BricolageGrotesque_700Bold,
-} from '@expo-google-fonts/bricolage-grotesque';
+// One file per face, from each face's own entry: the package index would also
+// bundle every weight the app never uses. These are exactly the faces
+// theme.ts's `fonts` table (resolveFont) can hand out.
+import { Manrope_400Regular } from '@expo-google-fonts/manrope/400Regular';
+import { Manrope_500Medium } from '@expo-google-fonts/manrope/500Medium';
+import { Manrope_600SemiBold } from '@expo-google-fonts/manrope/600SemiBold';
+import { Manrope_700Bold } from '@expo-google-fonts/manrope/700Bold';
+import { Outfit_400Regular } from '@expo-google-fonts/outfit/400Regular';
+import { Outfit_500Medium } from '@expo-google-fonts/outfit/500Medium';
+import { Outfit_600SemiBold } from '@expo-google-fonts/outfit/600SemiBold';
+import { Outfit_700Bold } from '@expo-google-fonts/outfit/700Bold';
+import { BricolageGrotesque_500Medium } from '@expo-google-fonts/bricolage-grotesque/500Medium';
+import { BricolageGrotesque_600SemiBold } from '@expo-google-fonts/bricolage-grotesque/600SemiBold';
+import { BricolageGrotesque_700Bold } from '@expo-google-fonts/bricolage-grotesque/700Bold';
 import Router from './src/navigation/App';
-import { W } from './src/theme/theme';
-
-// Install LiveKit's WebRTC globals once, before any Room is created. The native
-// module is absent in Expo Go, where importing it eagerly crashes the whole app
-// at launch — so we require it defensively. Text chat then works in Expo Go;
-// voice calls still need a dev/production build that includes the module.
-try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  require('@livekit/react-native').registerGlobals();
-} catch {
-  // LiveKit native module unavailable (e.g. Expo Go) — voice disabled, chat OK.
-}
+import { ErrorBoundary } from './src/components/ErrorBoundary';
+import { PrivacyShield } from './src/components/PrivacyShield';
+import { MOTION, W } from './src/theme/theme';
 
 SplashScreen.preventAutoHideAsync().catch(() => {});
+// The launch screen shares W.bg, so fading it out reads as the UI surfacing
+// rather than a cut.
+SplashScreen.setOptions({ duration: MOTION.duration.base, fade: true });
+
+const FONTS = {
+  Manrope_400Regular, Manrope_500Medium, Manrope_600SemiBold, Manrope_700Bold,
+  Outfit_400Regular, Outfit_500Medium, Outfit_600SemiBold, Outfit_700Bold,
+  BricolageGrotesque_500Medium, BricolageGrotesque_600SemiBold, BricolageGrotesque_700Bold,
+};
+
+// Started as the module loads rather than after the first render. Resolves to
+// the load error, if any; the app carries on with the system font.
+const fontsLoading: Promise<Error | null> = Font.loadAsync(FONTS).then(
+  () => null,
+  (e: unknown) => (e instanceof Error ? e : new Error(String(e))),
+);
+const fontsAlreadyIn = () => Object.keys(FONTS).every(name => Font.isLoaded(name));
+
+/** The router reveals the app when its first screen is drawn. This is only
+ *  the backstop, counted from the first render, e.g. for a first render that
+ *  crashed into the error screen. */
+const SPLASH_BACKSTOP_MS = 3000;
 
 function App() {
-  const [fontsLoaded] = useManrope({
-    Manrope_400Regular, Manrope_500Medium, Manrope_600SemiBold, Manrope_700Bold,
-    Outfit_400Regular, Outfit_500Medium, Outfit_600SemiBold, Outfit_700Bold,
-    BricolageGrotesque_500Medium, BricolageGrotesque_600SemiBold, BricolageGrotesque_700Bold,
-  });
+  // Text measured before its face is registered keeps the system font's
+  // metrics, so nothing is drawn until the faces are in. The native launch
+  // screen covers the wait.
+  const [ready, setReady] = useState(fontsAlreadyIn);
 
-  const onLayout = useCallback(async () => {
-    if (fontsLoaded) await SplashScreen.hideAsync().catch(() => {});
-  }, [fontsLoaded]);
+  useEffect(() => {
+    let alive = true;
+    void fontsLoading.then(error => {
+      // A failed load must not strand the user on the splash: carry on with
+      // the system font and report why the brand faces are missing.
+      if (error) Sentry.captureException(error);
+      if (alive) setReady(true);
+    });
+    return () => { alive = false; };
+  }, []);
 
-  if (!fontsLoaded) return null;
+  useEffect(() => {
+    if (!ready) return;
+    const backstop = setTimeout(revealApp, SPLASH_BACKSTOP_MS);
+    return () => clearTimeout(backstop);
+  }, [ready]);
 
   return (
-    <SafeAreaProvider>
-      <View style={{ flex: 1, backgroundColor: W.bg }} onLayout={onLayout}>
+    <GestureHandlerRootView style={styles.root}>
+      <SafeAreaProvider>
         <StatusBar style="light" />
-        <Router />
-      </View>
-    </SafeAreaProvider>
+        {ready && (
+          <>
+            <View style={styles.root}>
+              <ErrorBoundary>
+                <Router />
+              </ErrorBoundary>
+            </View>
+            <PrivacyShield />
+          </>
+        )}
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }
+
+// The root paints the brand background, so nothing lighter shows while the
+// fonts load or between splash and first frame.
+const styles = StyleSheet.create({
+  root: { flex: 1, backgroundColor: W.bg },
+});
 
 export default Sentry.wrap(App);

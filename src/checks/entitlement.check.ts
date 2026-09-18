@@ -16,6 +16,7 @@ import {
   balanceLine, formatBalance, formatResetDate, minutesFrom, planFeatures, priceFor, quotaCode, resetLabel,
 } from '../lib/entitlement';
 import { dropRefusedTurn, restoreDraft } from '../lib/chatTurns';
+import { tierAndPeriodOf } from '../lib/storeProducts';
 import type { ApiBillingPlan, ApiEntitlement } from '../api';
 
 let failures = 0;
@@ -104,13 +105,15 @@ check('the typed text comes back', restoreDraft('', 'are you there?'), 'are you 
 check('but never over something newer', restoreDraft('a new thought', 'are you there?'), 'a new thought');
 check('whitespace does not count as newer', restoreDraft('   ', 'are you there?'), 'are you there?');
 
-console.log(failures === 0 ? '\nAll entitlement checks passed.\n' : `\n${failures} entitlement check(s) FAILED.\n`);
-process.exit(failures === 0 ? 0 : 1);
-
-// Which plan a Google Play product is, as RevenueCat reports it.
-import { tierAndPeriodOf } from '../lib/storeProducts';
-check('a Plus monthly base plan is Plus, monthly', JSON.stringify(tierAndPeriodOf('evarna.plus:monthly')), JSON.stringify({ tier: 'plus', annual: false }));
-check('a Premium annual base plan is Premium, annual', JSON.stringify(tierAndPeriodOf('evarna.premium:annual')), JSON.stringify({ tier: 'premium', annual: true }));
-check('the package type wins over the id', JSON.stringify(tierAndPeriodOf('evarna.plus', 'ANNUAL')), JSON.stringify({ tier: 'plus', annual: true }));
+// Which plan a store product is, as RevenueCat reports it. These used to sit
+// after process.exit() and never ran.
+console.log('\nWhich plan a store product is');
+check('a Plus monthly base plan is Plus, monthly', tierAndPeriodOf('evarna.plus:monthly'), { tier: 'plus', annual: false });
+check('a Premium annual base plan is Premium, annual', tierAndPeriodOf('evarna.premium:annual'), { tier: 'premium', annual: true });
+check('the package type wins over the id', tierAndPeriodOf('evarna.plus', 'ANNUAL'), { tier: 'plus', annual: true });
+check('an App Store annual product is annual', tierAndPeriodOf('evarna.plus.annual'), { tier: 'plus', annual: true });
+check('an App Store monthly product is monthly', tierAndPeriodOf('evarna.premium.monthly'), { tier: 'premium', annual: false });
 check('a product that is not ours is ignored', tierAndPeriodOf('com.other:monthly'), null);
 
+console.log(failures === 0 ? '\nAll entitlement checks passed.\n' : `\n${failures} entitlement check(s) FAILED.\n`);
+process.exit(failures === 0 ? 0 : 1);
