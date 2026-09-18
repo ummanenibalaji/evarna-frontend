@@ -2,6 +2,11 @@
  * Voice previews: short bundled clips, one per backend voice, played with
  * expo-audio.
  *
+ * Each voice has two clips (rendered by the backend's voice:samples script):
+ *   preview   "Hey, I'm Maya. I'm really glad you're here." — the voice picker
+ *   greeting  "Hi. It's really good to finally meet you."   — the Meet screen,
+ *             with no name in it, because the user names the companion.
+ *
  * expo-audio is a native module, so it is required lazily (same pattern as
  * lib/notifications.ts): a build without it loses previews, not the whole
  * onboarding flow that imports this file.
@@ -9,13 +14,26 @@
 import { useEffect, useState } from 'react';
 import type * as ExpoAudio from 'expo-audio';
 
+export type VoiceClip = 'preview' | 'greeting';
+
+/** What the greeting clip says, word for word, for captions and VoiceOver. */
+export const GREETING_TEXT = "Hi. It's really good to finally meet you.";
+
 // Static requires so Metro bundles the clips. Keyed by the backend's voice id.
-const CLIPS = new Map<string, number>([
-  ['944adf80-0d6e-4909-b6fa-078784d6f8c5', require('../../assets/voices/944adf80-0d6e-4909-b6fa-078784d6f8c5.mp3')], // Kai
-  ['3866d4e7-0188-4010-92be-836d927e84e0', require('../../assets/voices/3866d4e7-0188-4010-92be-836d927e84e0.mp3')], // Theo
-  ['c050bc97-0e14-44ba-8c23-ae353fee972d', require('../../assets/voices/c050bc97-0e14-44ba-8c23-ae353fee972d.mp3')], // Maya
-  ['3cd1f2e8-12f0-48b5-ade4-9e06241b8252', require('../../assets/voices/3cd1f2e8-12f0-48b5-ade4-9e06241b8252.mp3')], // Iris
-]);
+const CLIPS: Record<VoiceClip, Map<string, number>> = {
+  preview: new Map([
+    ['944adf80-0d6e-4909-b6fa-078784d6f8c5', require('../../assets/voices/944adf80-0d6e-4909-b6fa-078784d6f8c5.mp3')], // Kai
+    ['3866d4e7-0188-4010-92be-836d927e84e0', require('../../assets/voices/3866d4e7-0188-4010-92be-836d927e84e0.mp3')], // Theo
+    ['c050bc97-0e14-44ba-8c23-ae353fee972d', require('../../assets/voices/c050bc97-0e14-44ba-8c23-ae353fee972d.mp3')], // Maya
+    ['3cd1f2e8-12f0-48b5-ade4-9e06241b8252', require('../../assets/voices/3cd1f2e8-12f0-48b5-ade4-9e06241b8252.mp3')], // Iris
+  ]),
+  greeting: new Map([
+    ['944adf80-0d6e-4909-b6fa-078784d6f8c5', require('../../assets/voices/944adf80-0d6e-4909-b6fa-078784d6f8c5-greeting.mp3')], // Kai
+    ['3866d4e7-0188-4010-92be-836d927e84e0', require('../../assets/voices/3866d4e7-0188-4010-92be-836d927e84e0-greeting.mp3')], // Theo
+    ['c050bc97-0e14-44ba-8c23-ae353fee972d', require('../../assets/voices/c050bc97-0e14-44ba-8c23-ae353fee972d-greeting.mp3')], // Maya
+    ['3cd1f2e8-12f0-48b5-ade4-9e06241b8252', require('../../assets/voices/3cd1f2e8-12f0-48b5-ade4-9e06241b8252-greeting.mp3')], // Iris
+  ]),
+};
 
 let audio: typeof ExpoAudio | null | undefined;
 
@@ -32,9 +50,10 @@ function loadAudio(): typeof ExpoAudio | null {
   return audio;
 }
 
-/** Whether this voice has a clip this build can play. Hide the preview control otherwise. */
-export function hasVoicePreview(voiceId: string): boolean {
-  return CLIPS.has(voiceId) && loadAudio() !== null;
+/** Whether this voice has a clip of that kind this build can play. Hide the
+ *  preview control (or stay silent) otherwise. */
+export function hasVoicePreview(voiceId: string, clip: VoiceClip = 'preview'): boolean {
+  return CLIPS[clip].has(voiceId) && loadAudio() !== null;
 }
 
 interface Owner {
@@ -82,9 +101,9 @@ function createPreview(setPlayingId: (id: string | null) => void) {
 
   const owner: Owner = { yieldTo: () => halt(false) };
 
-  const play = (voiceId: string) => {
+  const play = (voiceId: string, clip: VoiceClip = 'preview') => {
     const A = loadAudio();
-    const source = CLIPS.get(voiceId);
+    const source = CLIPS[clip].get(voiceId);
     if (!A || source === undefined) return;
 
     if (activeOwner && activeOwner !== owner) activeOwner.yieldTo();
@@ -131,12 +150,16 @@ function createPreview(setPlayingId: (id: string | null) => void) {
 }
 
 /**
- * One preview at a time. `playingId` is the voice whose clip is playing (or
- * about to), and clears when the clip ends or `stop()` is called. Playing a
- * voice again restarts it. Playback stops and the player is released on
- * unmount.
+ * One clip at a time. `playingId` is the voice whose clip is playing (or
+ * about to), and clears when the clip ends, fails or `stop()` is called.
+ * Playing a voice again restarts it. `clip` picks the preview (default) or the
+ * greeting. Playback stops and the player is released on unmount.
  */
-export function useVoicePreview(): { playingId: string | null; play: (voiceId: string) => void; stop: () => void } {
+export function useVoicePreview(): {
+  playingId: string | null;
+  play: (voiceId: string, clip?: VoiceClip) => void;
+  stop: () => void;
+} {
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [preview] = useState(() => createPreview(setPlayingId));
 
