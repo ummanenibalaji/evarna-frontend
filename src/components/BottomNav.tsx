@@ -147,6 +147,15 @@ function BottomNavImpl({ active, onChange, sandboxComingSoon = true, onReselect,
   // Parked (display: none) once hidden, so the blur costs nothing offscreen.
   const visible = !hidden && natural != null;
   const [parked, setParked] = useState(!visible);
+  // Parks only if the bar is still meant to be away when the fade-out ends.
+  // At launch the bar mounts hidden (labels not measured yet) and its
+  // fade-out finishes a frame later; the measurement can land in between and
+  // un-park it, and an unconditional park would then hide the bar for good.
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  const park = useCallback(() => {
+    if (!visibleRef.current) setParked(true);
+  }, []);
   const shown = useSharedValue(visible ? 1 : 0);
 
   const layout = useMemo(() => (natural ? layoutFor(selected, rowW, natural) : null), [selected, rowW, natural]);
@@ -203,7 +212,7 @@ function BottomNavImpl({ active, onChange, sandboxComingSoon = true, onReselect,
     }
     shown.value = withTiming(0, reduced ? FADE : timing(MOTION.duration.fast, 'accel'), finished => {
       'worklet';
-      if (finished) scheduleOnRN(setParked, true);
+      if (finished) scheduleOnRN(park);
     });
   }, [visible, reduced]);
 
