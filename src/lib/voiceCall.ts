@@ -193,6 +193,27 @@ export function liveBalance(atStart: number | null, billedSince: number | null, 
 }
 
 /**
+ * The balance a call's countdown starts from, or null when unknown.
+ *
+ * `known` is the first balance the screen learned, with what its own closed
+ * sessions had spent by then; `spent` is what they have spent now (a dropped
+ * call, then "Call again"). `latest` is the server's newest figure, which
+ * counts only closed sessions and may not have caught up with the last one.
+ * The lower of the two wins, so a figure that is behind can never make the
+ * last-minute warning late.
+ */
+export function balanceAtStart(
+  known: { balance: number; spent: number } | null,
+  spent: number,
+  latest: number | null,
+): number | null {
+  const counted = known ? known.balance - Math.max(0, spent - known.spent) : null;
+  if (counted == null) return latest;
+  if (latest == null) return counted;
+  return Math.min(counted, latest);
+}
+
+/**
  * A 0–1 loudness from a linear RMS level (what LiveKit's volume processor
  * reports). Speech sits between about -50 and -10 dBFS, so that range is
  * spread across 0–1; anything quieter is silence.

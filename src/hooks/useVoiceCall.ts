@@ -13,7 +13,7 @@ import {
   type RemoteTrack,
 } from 'livekit-client';
 import { startVoiceSession, endVoiceSession } from '../api';
-import { ApiError, isNetworkError, limitMessage } from '../api/client';
+import { ApiError, NetworkError, isNetworkError, limitMessage } from '../api/client';
 import { quotaCode } from '../lib/entitlement';
 import { startCallService, stopCallService } from '../lib/callService';
 import {
@@ -163,6 +163,9 @@ async function errorFor(e: unknown): Promise<CallError> {
   // A generic rate limiter's message is written for developers, so only its
   // wait is kept.
   if (e instanceof ApiError && e.status === 429) return { kind: 'rate-limited', retryAfter: e.retryAfter };
+  // The client's own timeout only says the server was slow to answer (a cold
+  // start, a slow room), not that this phone is offline.
+  if (e instanceof NetworkError && e.timedOut) return { kind: 'connect' };
   if (isNetworkError(e)) return { kind: 'offline' };
   // A refused microphone, told apart by the error's name (NotAllowedError) or
   // by the permission itself — never by matching words in the message.
@@ -208,6 +211,13 @@ export interface VoiceCall {
   connectedAt: number | null;
   /** When the server session started, which is what the balance is charged from. */
   billedSince: number | null;
+  /**
+   * Seconds charged by this screen's sessions that have closed: a dropped
+   * call, before "Call again". The next call's balance counts on from here.
+   */
+  billedEarlier: number;
+  /** The microphone is published, so Mute has something to act on. */
+  micReady: boolean;
   /** When the user hung up. */
   endedAt: number | null;
   /** The companion's voice, for level metering. */
@@ -243,10 +253,13 @@ export function useVoiceCall({ userId, characterId, callTitle }: UseVoiceCallPar
   const [billedSince, setBilledSince] = useState<number | null>(null);
   const [endedAt, setEndedAt] = useState<number | null>(null);
   const [agentTrack, setAgentTrack] = useState<RemoteAudioTrack | null>(null);
+  const [billedEarlier, setBilledEarlier] = useState(0);
+  const [micReady, setMicReady] = useState(false);
   const [attempt, setAttempt] = useState(0);
 
   const roomRef = useRef<Room | null>(null);
   const mutedRef = useRef(false);
+  const billedEarlierRef = useRef(0);
   const attemptRef = useRef<Attempt | null>(null);
   const abandonRef = useRef<(() => Promise<void>) | null>(null);
 
@@ -264,6 +277,7 @@ export function useVoiceCall({ userId, characterId, callTitle }: UseVoiceCallPar
     setBilledSince(null);
     setEndedAt(null);
     setAgentTrack(null);
+    setMicReady(false);
     setOrbState('thinking');
 
     if (!userId || !characterId) {
@@ -276,9 +290,12 @@ export function useVoiceCall({ userId, characterId, callTitle }: UseVoiceCallPar
     let room: Room | null = null;
     // Per attempt, so closing an old attempt can never end a newer one's session.
     let sessionId: string | null = null;
+    // When this attempt's session started charging; null once it has closed.
+    let billedAt: number | null = null;
     let joinTimer: ReturnType<typeof setTimeout> | undefined;
     let leftTimer: ReturnType<typeof setTimeout> | undefined;
     let hintSeen = false;
+    let hasJoined = false;
     const settler = createOrbSettler('thinking', next => {
       if (!run.cancelled) setOrbState(next);
     });
@@ -306,6 +323,11 @@ export function useVoiceCall({ userId, characterId, callTitle }: UseVoiceCallPar
       if (roomRef.current === r) roomRef.current = null;
       const sid = sessionId;
       sessionId = null;
+      if (billedAt != null) {
+        billedEarlierRef.current += Math.max(0, Date.now() - billedAt) / 1000;
+        billedAt = null;
+        setBilledEarlier(billedEarlierRef.current);
+      }
       closing = (async () => {
         if (r) await r.disconnect().catch(() => {});
         releaseAudio();
@@ -330,6 +352,7 @@ export function useVoiceCall({ userId, characterId, callTitle }: UseVoiceCallPar
 
     const companionJoined = () => {
       if (run.cancelled) return;
+      hasJoined = true;
       clearTimeout(joinTimer);
       clearTimeout(leftTimer);
       // The clock starts when the companion picks up, not when the room opens.
@@ -358,7 +381,8 @@ export function useVoiceCall({ userId, characterId, callTitle }: UseVoiceCallPar
           return;
         }
         sessionId = res.session_id;
-        setBilledSince(Date.now());
+        billedAt = Date.now();
+        setBilledSince(billedAt);
 
         await getAudioSession().startAudioSession();
         if (run.cancelled) {
@@ -371,25 +395,80 @@ export function useVoiceCall({ userId, characterId, callTitle }: UseVoiceCallPar
         room = r;
         roomRef.current = r;
 
+        // Up from the room's Connected event. Before it, a Disconnected is only
+        // connect() failing: its rejection reaches errorFor below, which can
+        // tell "couldn't connect" from "offline". Handled here, it could only
+        // have called a call that never started a dropped one.
+        let roomUp = false;
+        // From Reconnecting to Reconnected. A full reconnect unwinds every
+        // participant just before it says it is reconnecting, and announces
+        // them again just after it has reconnected. Neither is the companion
+        // leaving or joining, so neither may end the call.
+        let reconnecting = false;
+
+        const waitForCompanion = () => {
+          clearTimeout(joinTimer);
+          joinTimer = setTimeout(() => {
+            if (!reconnecting) fail({ kind: 'agent-timeout' });
+          }, AGENT_JOIN_TIMEOUT_MS);
+        };
+        // The companion has gone unless it's back within the grace period. If
+        // the room closes in that time, its own disconnect says why.
+        const companionMayHaveLeft = () => {
+          clearTimeout(leftTimer);
+          leftTimer = setTimeout(() => {
+            if (reconnecting || r.remoteParticipants.size > 0) return;
+            fail({ kind: 'lost' });
+          }, AGENT_LEFT_GRACE_MS);
+        };
+
         r
           .on(RoomEvent.Connected, () => {
             if (run.cancelled) return;
+            roomUp = true;
             if (r.remoteParticipants.size > 0) companionJoined();
-            else joinTimer = setTimeout(() => fail({ kind: 'agent-timeout' }), AGENT_JOIN_TIMEOUT_MS);
+            else waitForCompanion();
           })
           .on(RoomEvent.ParticipantConnected, companionJoined)
           .on(RoomEvent.ParticipantDisconnected, () => {
-            if (run.cancelled || r.remoteParticipants.size > 0) return;
-            clearTimeout(leftTimer);
-            leftTimer = setTimeout(() => fail({ kind: 'lost' }), AGENT_LEFT_GRACE_MS);
+            if (run.cancelled || reconnecting || r.remoteParticipants.size > 0) return;
+            companionMayHaveLeft();
           })
           .on(RoomEvent.Reconnecting, () => {
-            if (!run.cancelled) setPhase('reconnecting');
+            if (run.cancelled) return;
+            reconnecting = true;
+            // The unwinding just before this armed the companion-left timer.
+            // LiveKit is recovering the room; let it.
+            clearTimeout(joinTimer);
+            clearTimeout(leftTimer);
+            setPhase('reconnecting');
           })
           .on(RoomEvent.Reconnected, () => {
-            if (!run.cancelled) setPhase(r.remoteParticipants.size > 0 ? 'connected' : 'connecting');
+            if (run.cancelled) return;
+            const wasReconnecting = reconnecting;
+            reconnecting = false;
+            // Muted during the reconnect: the republished mic follows the button.
+            if (mutedRef.current) r.localParticipant.setMicrophoneEnabled(false).catch(() => {});
+            if (r.remoteParticipants.size > 0) {
+              companionJoined();
+              return;
+            }
+            // A quick resume unwinds nothing, and the timers still stand.
+            if (!wasReconnecting) return;
+            // After a full reconnect the participants it brought back are
+            // announced right after this event. Look again once they have been.
+            setTimeout(() => {
+              if (run.cancelled || reconnecting || r.remoteParticipants.size > 0) return;
+              if (hasJoined) {
+                companionMayHaveLeft();
+              } else {
+                setPhase('connecting');
+                waitForCompanion();
+              }
+            }, 0);
           })
           .on(RoomEvent.Disconnected, (reason?: DisconnectReason) => {
+            if (!roomUp) return;
             // Our own hang-up or teardown has already cancelled the attempt.
             fail(errorForDisconnect(reason));
           })
@@ -417,9 +496,12 @@ export function useVoiceCall({ userId, characterId, callTitle }: UseVoiceCallPar
         await r.connect(res.livekit_url, res.livekit_token);
         if (run.cancelled) return;
         await r.localParticipant.setMicrophoneEnabled(true);
+        if (run.cancelled) return;
+        // The mic is live from here, companion or not, so Mute works from here.
+        setMicReady(true);
         // Only now: Android allows a microphone service once the mic permission
         // is granted, and only while the app is on screen.
-        if (!run.cancelled) startCallService(callTitleRef.current ?? 'your companion');
+        startCallService(callTitleRef.current ?? 'your companion');
       } catch (e) {
         if (run.cancelled) return;
         const failure = await errorFor(e);
@@ -494,9 +576,9 @@ export function useVoiceCall({ userId, characterId, callTitle }: UseVoiceCallPar
 
   return useMemo(
     () => ({
-      phase, orbState, muted, error, connectedAt, billedSince, endedAt, agentTrack,
+      phase, orbState, muted, error, connectedAt, billedSince, billedEarlier, endedAt, agentTrack, micReady,
       toggleMute, hangUp, retry, allowMic,
     }),
-    [phase, orbState, muted, error, connectedAt, billedSince, endedAt, agentTrack, toggleMute, hangUp, retry, allowMic],
+    [phase, orbState, muted, error, connectedAt, billedSince, billedEarlier, endedAt, agentTrack, micReady, toggleMute, hangUp, retry, allowMic],
   );
 }

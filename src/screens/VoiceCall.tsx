@@ -8,7 +8,7 @@
 // screen that says what happened and offers the one thing that helps.
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Linking, Platform, StyleSheet, View, useWindowDimensions } from 'react-native';
+import { Linking, Platform, ScrollView, StyleSheet, View, useWindowDimensions } from 'react-native';
 import Animated, { useSharedValue, type SharedValue } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -20,6 +20,7 @@ import {
   ENDED_BEAT_MS,
   ENDED_BEAT_SHORT_MS,
   RECAP_MIN_SECONDS,
+  balanceAtStart,
   formatClock,
   spokenDuration,
   type CallError,
@@ -83,20 +84,37 @@ export function S12_VoiceCall({
   userId, characterId, onOutOfMinutes, onCallEnded, onRecap, returnTo = 'home',
 }: VoiceCallProps) {
   const call = useVoiceCall({ userId, characterId, callTitle: companion.name });
-  const { phase, orbState, muted, error, connectedAt, billedSince, endedAt, agentTrack, hangUp, toggleMute, retry, allowMic } = call;
+  const {
+    phase, orbState, muted, error, connectedAt, billedSince, billedEarlier, endedAt, agentTrack, micReady,
+    hangUp, toggleMute, retry, allowMic,
+  } = call;
   const name = companion.name;
   const reduced = useReducedMotion();
   const level = useSharedValue(0);
+  const inCall = phase === 'connecting' || phase === 'connected' || phase === 'reconnecting';
 
   // The router animates the screen in; the stage only fades in on its own
   // when it comes back after an error screen.
   const [stageReturns, setStageReturns] = useState(false);
   if (phase === 'error' && !stageReturns) setStageReturns(true);
 
-  // The balance the countdown starts from: the first one known. A refresh of
-  // the entitlement mid-call must not move it.
-  const balanceRef = useRef(voiceSecondsRemaining);
-  if (balanceRef.current == null) balanceRef.current = voiceSecondsRemaining;
+  // ── Balance ──────────────────────────────────────────────────────────
+  // The first balance known, and what this screen's own calls had spent by then.
+  const knownBalanceRef = useRef<{ balance: number; spent: number } | null>(null);
+  if (knownBalanceRef.current == null && voiceSecondsRemaining != null) {
+    knownBalanceRef.current = { balance: voiceSecondsRemaining, spent: billedEarlier };
+  }
+  const nextBalance = balanceAtStart(knownBalanceRef.current, billedEarlier, voiceSecondsRemaining);
+  // What the countdown starts from, fixed once the session is billed: a
+  // refresh of the entitlement mid-call must not move it. A call made again
+  // after a drop starts from what the dropped one left, not from the balance
+  // before it.
+  const sessionBalanceRef = useRef<{ since: number; balance: number | null } | null>(null);
+  const session = sessionBalanceRef.current;
+  if (billedSince != null && (session == null || session.since !== billedSince || session.balance == null)) {
+    sessionBalanceRef.current = { since: billedSince, balance: nextBalance };
+  }
+  const balance = billedSince != null ? sessionBalanceRef.current?.balance ?? null : nextBalance;
 
   // ── Leaving ──────────────────────────────────────────────────────────
   // Every way out converges here, once: the balance is re-read, then the
@@ -149,9 +167,18 @@ export function S12_VoiceCall({
   // The last-minute banner's "See plans": the paywall replaces this screen, so
   // the call ends first rather than being cut off by the navigation.
   const plansMidCall = useCallback(() => {
-    void hangUp();
+    if (inCall) void hangUp();
     leaveRef.current('plans');
-  }, [hangUp]);
+  }, [hangUp, inCall]);
+
+  // "Call again" after a drop. The dropped session spent minutes, so the
+  // balance is re-read now rather than only when the screen is left.
+  const onCallEndedRef = useRef(onCallEnded);
+  onCallEndedRef.current = onCallEnded;
+  const callAgain = useCallback(() => {
+    if (billedSince != null) onCallEndedRef.current?.();
+    retry();
+  }, [retry, billedSince]);
 
   // "Call ended · 4:12" for a beat while the orb dims, then away. A call long
   // enough to talk about goes to its recap.
@@ -226,7 +253,6 @@ export function S12_VoiceCall({
   const usable = height - insets.top - insets.bottom - CALL_CHROME;
   const orbSize = Math.round(Math.max(ORB_MIN, Math.min(ORB_MAX, width * 0.5, usable / 2.4)));
 
-  const inCall = phase === 'connecting' || phase === 'connected' || phase === 'reconnecting';
   const orbShown: OrbState =
     phase === 'connected' ? orbState
       : phase === 'reconnecting' ? 'paused'
@@ -243,14 +269,16 @@ export function S12_VoiceCall({
         // Billing carries on through a reconnect, so the clock does too.
         right={<CallTimer since={phase === 'connected' || phase === 'reconnecting' ? connectedAt : null} />}
       />
-      <CallMinuteBanner balance={balanceRef.current} billedSince={billedSince} onUpgrade={plansMidCall} />
+      {/* Only while a session can be charging: after a drop or a hang-up the
+          countdown would be counting time nobody is billed for. */}
+      {inCall ? <CallMinuteBanner balance={balance} billedSince={billedSince} onUpgrade={plansMidCall} /> : null}
 
       {phase === 'error' && error ? (
         <CallErrorView
           key={error.kind}
           error={error}
           name={name}
-          onRetry={retry}
+          onRetry={callAgain}
           onClose={() => leave('back')}
           onPlans={() => leave('plans')}
           onText={() => leave('chat')}
@@ -276,11 +304,14 @@ export function S12_VoiceCall({
           />
           {inCall || phase === 'ended' ? (
             <View style={styles.controls}>
+              {/* From the moment the mic is live — while waiting for the
+                  companion and through a reconnect too, not only once
+                  connected. */}
               <CallControl
                 icon="mute"
                 caption="Mute"
                 checked={muted}
-                disabled={phase !== 'connected'}
+                disabled={!inCall || !micReady}
                 onPress={onMute}
               />
               <CallControl
@@ -295,7 +326,7 @@ export function S12_VoiceCall({
                 icon="chat"
                 caption="End & text"
                 label={`End call and text ${name}`}
-                disabled={phase !== 'connecting' && phase !== 'connected'}
+                disabled={!inCall}
                 onPress={endAndText}
               />
               <CallControl icon="close" caption="End" label="End call" danger disabled={!inCall} onPress={endCall} />
@@ -527,28 +558,36 @@ function CallErrorView({ error, name, onRetry, onClose, onPlans, onText }: {
     }
   };
 
+  // Centred while it fits; scrolls rather than clipping its actions on a small
+  // screen with large text.
   return (
     <Animated.View entering={entering} style={styles.error}>
-      <View style={styles.errorIcon}>
-        <NavIcon name={copy.icon} color={W.text2} size={26} />
-      </View>
-      <Txt variant="title3" heading style={styles.errorTitle}>{title}</Txt>
-      <Txt variant="callout" style={styles.errorBody}>{body}</Txt>
-      <View style={styles.errorActions}>
-        {copy.actions.map((action, i) => {
-          const b = button(action);
-          return (
-            <PrimaryButton
-              key={action}
-              variant={BUTTON_VARIANTS[Math.min(i, BUTTON_VARIANTS.length - 1)]}
-              onPress={b.onPress}
-              disabled={b.disabled}
-            >
-              {b.label}
-            </PrimaryButton>
-          );
-        })}
-      </View>
+      <ScrollView
+        contentContainerStyle={styles.errorContent}
+        alwaysBounceVertical={false}
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.errorIcon}>
+          <NavIcon name={copy.icon} color={W.text2} size={26} />
+        </View>
+        <Txt variant="title3" heading style={styles.errorTitle}>{title}</Txt>
+        <Txt variant="callout" style={styles.errorBody}>{body}</Txt>
+        <View style={styles.errorActions}>
+          {copy.actions.map((action, i) => {
+            const b = button(action);
+            return (
+              <PrimaryButton
+                key={action}
+                variant={BUTTON_VARIANTS[Math.min(i, BUTTON_VARIANTS.length - 1)]}
+                onPress={b.onPress}
+                disabled={b.disabled}
+              >
+                {b.label}
+              </PrimaryButton>
+            );
+          })}
+        </View>
+      </ScrollView>
     </Animated.View>
   );
 }
@@ -566,7 +605,11 @@ const styles = StyleSheet.create({
   sheetBody: { color: W.text2 },
   outputs: { gap: SP.sm2 },
 
-  error: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: SP.xl, paddingBottom: SP.xl },
+  error: { flex: 1 },
+  errorContent: {
+    flexGrow: 1, alignItems: 'center', justifyContent: 'center',
+    paddingHorizontal: SP.xl, paddingTop: SP.base, paddingBottom: SP.xl,
+  },
   errorIcon: {
     width: 56, height: 56, borderRadius: 28, alignItems: 'center', justifyContent: 'center',
     borderWidth: 1, backgroundColor: rgba(W.text3, 0.12), borderColor: rgba(W.text3, 0.2),
