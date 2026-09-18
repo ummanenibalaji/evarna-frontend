@@ -1,23 +1,24 @@
 // config.ts — ported from app.jsx TWEAK_DEFAULTS + the data arrays the app uses.
 // The HTML prototype exposed these through a floating "Tweaks" dev panel. Here
 // they live as plain config so the same states remain adjustable in code.
+// Colours are theme tokens (hex), never literals: screens tint them with rgba().
 
 import { W } from '../theme/theme';
+import type { IconName } from '../components/NavIcon';
 
 export type Tier = 'free' | 'plus' | 'premium';
 
 export interface AppConfig {
-  callState: string;
   sandboxComingSoon: boolean;
   orbHue: string;
-  showFirstChat: boolean;
 }
 
 export const CONFIG: AppConfig = {
-  callState: 'auto',
-  sandboxComingSoon: false,
+  // Sandbox has no backend session type yet: its modes used to answer with
+  // canned lines on a timer. Until the backend can run them, the tab previews
+  // the modes behind a "coming soon" card and no session can start.
+  sandboxComingSoon: true,
   orbHue: W.primary,   // Ember Dusk: the orb and chat accent are coral, not violet
-  showFirstChat: true,
 };
 
 // BILLING_LIVE and CURRENT_TIER are gone. The tier, the balance and the prices
@@ -30,20 +31,27 @@ export const CONFIG: AppConfig = {
 // The nightly check-in card's copy. Prompts and mood words, not data about
 // anyone — the streak and the week strip that used to live here alongside them
 // were invented numbers shown to every user, and now come from
-// GET /users/me/activity.
+// GET /users/me/activity. Its "30 sec" label went too: nothing timed it.
 export const CHECK_IN = {
   prompt: 'How are you arriving tonight?',
-  duration: '30 sec',
   moods: ['Calm', 'Heavy', 'Buzzing', 'Tired'],
 };
 
 // Suggestion chips shown above the chat composer. Static for now — the
-// backend does not yet return per-turn suggestions.
-export const QUICK_REPLIES: string[] = [
-  'Run a mock round',
-  'I just need to vent',
-  'Switch topic',
-];
+// backend does not yet return per-turn suggestions. Keyed by archetype, so a
+// Partner is never offered "Run a mock round"; the array itself holds lines
+// that suit any companion, for a caller that has no archetype to hand.
+type ArchetypeReplies = Readonly<Record<Companion['archetype'], readonly string[]>>;
+
+export const QUICK_REPLIES: readonly string[] & ArchetypeReplies = Object.assign(
+  ['I just need to vent', 'Help me think something through', 'Switch topic'],
+  {
+    mentor: ['Run a mock round', 'Help me plan my week', 'What should I work on next?'],
+    friend: ['I just need to vent', 'Guess what happened today', 'Cheer me up'],
+    partner: ['I just want to talk', "Here's what's on my mind", 'I had a long day'],
+    challenger: ['Hold me to my goal', 'Give me the hard truth', 'Check my progress'],
+  },
+);
 
 export interface Companion {
   id: string | number;
@@ -84,23 +92,40 @@ export const NAME_SUGGESTIONS: Record<string, string[]> = {
   challenger: ['Ember', 'Knox', 'Rae', 'Vance'],
 };
 
-// Scenarios (studio.jsx)
+// Scenarios (studio.jsx). Accents are Ember Dusk tokens, so Studio reads as
+// the same product as Home.
 export interface Scenario { id: string; icon: string; name: string; desc: string; accent: string; }
 export const SCENARIOS: Scenario[] = [
-  { id: 'interview', icon: 'briefcase', name: 'Interview Coach', desc: 'Practice landing the role', accent: '#60A5FA' },
-  { id: 'difficult', icon: 'two', name: 'Difficult Conversation', desc: 'Rehearse the hard ones', accent: '#FBBF24' },
-  { id: 'debate', icon: 'flash', name: 'Debate Partner', desc: 'Sharpen your argument', accent: '#34D399' },
-  { id: 'story', icon: 'book', name: 'Story Collaborator', desc: 'Build a world together', accent: '#A78BFA' },
-  { id: 'language', icon: 'globe', name: 'Language Partner', desc: "Speak it, don't study it", accent: '#5EEAD4' },
+  { id: 'interview', icon: 'briefcase', name: 'Interview Coach', desc: 'Practice landing the role', accent: W.mentor },
+  { id: 'difficult', icon: 'two', name: 'Difficult Conversation', desc: 'Rehearse the hard ones', accent: W.challenger },
+  { id: 'debate', icon: 'flash', name: 'Debate Partner', desc: 'Sharpen your argument', accent: W.friend },
+  { id: 'story', icon: 'book', name: 'Story Collaborator', desc: 'Build a world together', accent: W.violet },
+  { id: 'language', icon: 'globe', name: 'Language Partner', desc: "Speak it, don't study it", accent: W.secondary },
 ];
 
-// Sandbox modes (sandbox.jsx)
-export interface SandboxMode { id: string; icon: string; name: string; sub: string | null; accent: string; desc: string; }
+// Sandbox modes (sandbox.jsx). Each mode has one accent, used for its card,
+// its icon tile and the edge of its companion's bubbles alike.
+export type SandboxModeId = 'incognito' | 'roast' | 'safe' | 'intimate';
+
+export interface SandboxMode {
+  id: SandboxModeId;
+  icon: IconName;
+  name: string;
+  /** One line under the name, in the mode's accent. */
+  tagline?: string;
+  /** A short tag beside the name, such as an age rating. */
+  badge?: string;
+  /** Locked for minors. The session screen also treats an unknown age as a minor. */
+  adultsOnly?: boolean;
+  accent: string;
+  desc: string;
+}
+
 export const SANDBOX_MODES: SandboxMode[] = [
-  { id: 'incognito', icon: 'eye-off', name: 'Incognito', sub: null, accent: '#8B8FA3', desc: 'Talk freely. Nothing saved. Your companion forgets everything after the session.' },
-  { id: 'roast', icon: 'fire', name: 'Roast Mode', sub: 'Your companion, but spicier', accent: '#FBBF24', desc: "They'll still know you — they'll just stop being nice about it." },
-  { id: 'safe', icon: 'heart', name: 'Safe Space', sub: 'LGBTQ+ affirming', accent: '#FB7185', desc: 'A judgment-free space to explore identity, practice coming out, or just talk.' },
-  { id: 'intimate', icon: 'lock', name: 'Intimate', sub: '18+ only', accent: '#FB7185', desc: 'Romantic and intimate conversations. Your main companion modes stay separate.' },
+  { id: 'incognito', icon: 'eye-off', name: 'Incognito', accent: W.text2, desc: 'Talk freely. Your companion forgets the whole session once it ends.' },
+  { id: 'roast', icon: 'fire', name: 'Roast Mode', tagline: 'Your companion, but spicier', accent: W.challenger, desc: "They'll still know you — they'll just stop being nice about it." },
+  { id: 'safe', icon: 'shield', name: 'Safe Space', tagline: 'LGBTQ+ affirming', accent: W.secondary, desc: 'A judgment-free space to explore identity, practice coming out, or just talk.' },
+  { id: 'intimate', icon: 'heart', name: 'Intimate', badge: '18+', adultsOnly: true, accent: W.partner, desc: 'Romantic and intimate conversation, kept apart from your everyday chats.' },
 ];
 
 // Memory type badges.
